@@ -844,12 +844,6 @@ def _stage_catalog_snapshot(stages: Sequence[Any]) -> list[tuple[str, str, str, 
     ]
 
 
-def _chain_inventory_text() -> str:
-    return (Path(__file__).resolve().parents[1] / "docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md").read_text(
-        encoding="utf-8"
-    )
-
-
 def _run_fresh_python(code: str) -> None:
     result = subprocess.run(
         [sys.executable, "-c", code],
@@ -1251,16 +1245,6 @@ def test_chain_stage_catalog_type_compat_reexports_match_owner_modules_and_inven
     for name in type_names:
         assert getattr(legacy_chain, name) is getattr(chain_types, name)
 
-    inventory_text = _chain_inventory_text()
-    for token in (
-        "_CHAIN_STAGE_CATALOG_COMPAT_REEXPORT_NAMES",
-        "_CHAIN_TYPE_COMPAT_REEXPORT_NAMES",
-        "_CHAIN_STAGE_CATALOG_TYPE_COMPAT_REEXPORT_NAMES",
-        "_CHAIN_STAGE_CATALOG_TYPE_COMPAT_OWNER_REEXPORTS",
-        "_CHAIN_STAGE_CATALOG_TYPE_COMPAT_FACADE_REEXPORTS",
-    ):
-        assert token in inventory_text
-
 
 def test_chain_array_accounting_compat_forwarders_match_owner_module_and_inventory() -> None:
     import services.orchestrator.chain as legacy_chain
@@ -1358,10 +1342,6 @@ def test_chain_array_accounting_compat_forwarders_match_owner_module_and_invento
     deps = legacy_chain._array_accounting_dependencies()
     for field, facade_name in dependency_bindings:
         assert getattr(deps, field) is getattr(legacy_chain, facade_name)
-
-    inventory_text = _chain_inventory_text()
-    for token in ("ArrayAccountingDependencies",):
-        assert token in inventory_text
 
 
 def test_chain_array_accounting_module_parses_sacct_and_legacy_chain_wrapper_matches(tmp_path: Path) -> None:
@@ -10452,17 +10432,6 @@ def test_chain_stage_execution_compat_forwarders_match_owner_module_and_inventor
     for facade_name in forwarder_names:
         assert callable(getattr(legacy_chain.ForecastOrchestrator, facade_name))
 
-    inventory_text = _chain_inventory_text()
-    for token in (
-        "_CHAIN_STAGE_EXECUTION_COMPAT_FORWARDER_NAMES",
-        "_CHAIN_STAGE_EXECUTION_COMPAT_OWNER_FUNCTION_NAMES",
-        "_CHAIN_STAGE_EXECUTION_COMPAT_DEPENDENCY_FIELDS",
-        "_CHAIN_STAGE_EXECUTION_COMPAT_FORWARDERS",
-        "_CHAIN_STAGE_EXECUTION_COMPAT_FACADE_MISSING",
-        "StageExecutionDependencies",
-    ):
-        assert token in inventory_text
-
 
 def test_chain_workspace_log_compat_forwarders_match_owner_module_and_inventory() -> None:
     import services.orchestrator.chain as legacy_chain
@@ -10508,10 +10477,6 @@ def test_chain_workspace_log_compat_forwarders_match_owner_module_and_inventory(
     for facade_name in top_level_names:
         assert callable(getattr(legacy_chain, facade_name))
 
-    inventory_text = _chain_inventory_text()
-    for token in ("chain_workspace", "chain-workspace-log-forwarders"):
-        assert token in inventory_text
-
 
 def test_chain_http_slurm_gateway_client_legacy_subclass_uses_owner_module() -> None:
     import services.orchestrator.chain as legacy_chain
@@ -10527,10 +10492,6 @@ def test_chain_http_slurm_gateway_client_legacy_subclass_uses_owner_module() -> 
     assert client._validated_submit_response(
         {"job_id": "mock_1", "status": "submitted"}
     ) == {"job_id": "mock_1", "status": "submitted"}
-
-    inventory_text = _chain_inventory_text()
-    for token in ("HttpSlurmGatewayClient", "chain_slurm_client.HttpSlurmGatewayClient"):
-        assert token in inventory_text
 
 
 @pytest.mark.parametrize(
@@ -10636,10 +10597,6 @@ def test_chain_tile_publisher_compat_facade_matches_owner_module_and_inventory(
     assert repository.jobs["job-local-publish"]["slurm_job_id"] == "local"
     assert repository.jobs["job-local-publish"]["log_uri"].startswith("published://logs/gfs/2026050100/")
 
-    inventory_text = _chain_inventory_text()
-    for token in ("StageExecutionDependencies",):
-        assert token in inventory_text
-
 
 def test_chain_tile_publisher_compat_local_publish_failure_paths(
     tmp_path: Path,
@@ -10731,8 +10688,6 @@ def test_chain_worker_adapter_compat_facade_matches_owner_modules_and_inventory(
 
     expected_canonical_names = ("evaluate_canonical_readiness", "expected_converter_version")
     expected_cycle_names = ("parse_cycle_time", "format_cycle_time", "cycle_id_for")
-    expected_alias_names = (*expected_canonical_names, *expected_cycle_names)
-    expected_time_names = ("_check_three_way_time_consistency",)
     expected_local_helper_names = (
         "scenario_for_source",
         "_auto_trigger_source_policy_identity",
@@ -10790,19 +10745,6 @@ assert 'workers.data_adapters.ifs_adapter' not in sys.modules
 assert chain.scenario_for_source('IFS') == 'forecast_ifs_deterministic'
 """
     )
-
-    inventory_text = _chain_inventory_text()
-    for expected_inventory_text in (
-        *expected_alias_names,
-        *expected_time_names,
-        *expected_local_helper_names,
-        "workers.canonical_converter.converter",
-        "packages.common.contracts.time_normalization",
-        "workers.data_adapters.gfs_adapter",
-        "workers.data_adapters.ifs_adapter",
-        "packages.common.contracts.time_normalization",
-    ):
-        assert expected_inventory_text in inventory_text
 
 
 def test_chain_reservation_compat_facade_matches_owner_module_and_inventory(monkeypatch) -> None:
@@ -10914,39 +10856,9 @@ def test_chain_reservation_compat_facade_matches_owner_module_and_inventory(monk
 def test_chain_persistence_repository_compat_owner_aliases_match_owner_module_and_inventory() -> None:
     import services.orchestrator.chain as legacy_chain
 
-    expected_inventory_tokens = (
-        "_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_ALIAS_NAMES",
-        "_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_ALIAS_OWNER_MISSING",
-        "_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_ALIAS_FACADE_MISSING",
-        "_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_OWNER_ALIASES",
-        "_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_FACADE_ALIASES",
-        "_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_ALIAS_DRIFT",
-        "_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_LOCAL_REPOSITORY_NAMES",
-        "_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_CHAIN_LOCAL_CLASSIFICATIONS",
-        "_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_PROTOCOL_METHOD_NAMES",
-        "_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_LOCAL_REPOSITORY_MISSING",
-        "_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_FORWARDER_CLASSIFICATION_DRIFT",
-        "_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_LOCAL_REPOSITORIES",
-        "_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_LOCAL_REPOSITORY_OWNER_DRIFT",
-        "_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_PROTOCOL_METHOD_MISSING",
-        "_CHAIN_PERSISTENCE_REPOSITORY_COMPAT_PROTOCOL_METHODS",
-    )
-
     assert legacy_chain.PipelineJob is PipelineJob
     assert legacy_chain.PipelineEvent is PipelineEvent
     assert legacy_chain.PipelineStore is PipelineStore
-
-    inventory_text = _chain_inventory_text()
-    for token in expected_inventory_tokens:
-        assert token in inventory_text
-    for expected_text in (
-        "services.orchestrator.persistence",
-        "PipelineJob",
-        "PipelineEvent",
-        "PipelineStore",
-        "owner `services.orchestrator.persistence`",
-    ):
-        assert expected_text in inventory_text
 
 
 def test_chain_persistence_repository_compat_repository_retention_classification_and_inventory() -> None:
@@ -10982,20 +10894,6 @@ def test_chain_persistence_repository_compat_repository_retention_classification
     for method_name in expected_protocol_method_names:
         assert callable(getattr(legacy_chain.OrchestratorRepository, method_name))
 
-    inventory_text = _chain_inventory_text()
-    for expected_text in (
-        "services.orchestrator.persistence",
-        "services.orchestrator.chain",
-        "OrchestratorRepository.reclaim_pipeline_job_reservation",
-        "owner module cannot host",
-        "follow-up #711",
-        "caller migration path",
-        "removal condition",
-        "not a pure owner-module forwarder",
-        "chain-local local protocol",
-    ):
-        assert expected_text in inventory_text
-
 
 def test_chain_retry_compat_facade_matches_owner_module_and_inventory(
     tmp_path: Path,
@@ -11014,13 +10912,7 @@ def test_chain_retry_compat_facade_matches_owner_module_and_inventory(
 
     # R4 (#3261): the SQL retry service, its env factory and the whole
     # local-factory family are gone; only the bridge methods stay chain-local.
-    for retired_name in (
-        "_CHAIN_RETRY_COMPAT_LOCAL_FACTORY_NAMES",
-        "_CHAIN_RETRY_COMPAT_LOCAL_FACTORY_MISSING",
-        "_CHAIN_RETRY_COMPAT_CHAIN_LOCAL_FACTORIES",
-        "_retry_service_from_env",
-    ):
-        assert not hasattr(legacy_chain, retired_name)
+    assert not hasattr(legacy_chain, "_retry_service_from_env")
 
     for alias_name in alias_names:
         assert hasattr(retry, alias_name)

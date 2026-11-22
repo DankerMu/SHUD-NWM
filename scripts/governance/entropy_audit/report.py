@@ -40,11 +40,6 @@ from scripts.governance.entropy_audit.constants import (
     SEVERITY_RANK,
     STRUCTURAL_BUDGET_BASE_REF_ENV,
 )
-from scripts.governance.entropy_audit.facade_guard import (
-    _compatibility_facade_guard_findings,
-    _compatibility_facade_guard_markdown_lines,
-    _compatibility_facade_guard_summary,
-)
 from scripts.governance.entropy_audit.findings import (
     _dedupe_findings,
     _finding_record,
@@ -79,16 +74,11 @@ def build_report(
     structural_base_ref: str | None = None,
 ) -> dict[str, object]:
     root = repo_root_from(repo_root)
-    compatibility_facade_guard = _compatibility_facade_guard_summary(
-        root,
-        structural_base_ref=structural_base_ref,
-    )
     scoped_agent_context = _scoped_agent_context_summary(root)
     findings = sorted(
         _dedupe_findings(
             [
                 *_collect_findings(root),
-                *_compatibility_facade_guard_findings(compatibility_facade_guard),
                 *_scoped_agent_context_findings(scoped_agent_context),
             ]
         ),
@@ -111,7 +101,6 @@ def build_report(
             finding_records,
             mode=mode,
             structural_file_budget=structural_file_budget,
-            compatibility_facade_guard=compatibility_facade_guard,
             scoped_agent_context=scoped_agent_context,
         ),
         "module_heatmap": _module_heatmap(finding_records),
@@ -156,7 +145,6 @@ def render_markdown(report: dict[str, object]) -> str:
         ]
     )
     lines.extend(_structural_file_budget_markdown_lines(metadata.get("structural_file_budget")))
-    lines.extend(_compatibility_facade_guard_markdown_lines(metadata.get("compatibility_facade_guard")))
     lines.extend(_scoped_agent_context_markdown_lines(metadata.get("scoped_agent_context")))
     lines.extend(
         [
@@ -254,7 +242,6 @@ def _metadata(
     *,
     mode: AuditMode,
     structural_file_budget: dict[str, object],
-    compatibility_facade_guard: dict[str, object],
     scoped_agent_context: dict[str, object],
 ) -> dict[str, object]:
     baseline_path = ".entropy-baseline/latest.json"
@@ -273,7 +260,6 @@ def _metadata(
         "gate_eligible_count": int(summary_counts["by_gate_eligibility"]["gate_eligible"]),
         "summary_counts": summary_counts,
         "structural_file_budget": structural_file_budget,
-        "compatibility_facade_guard": compatibility_facade_guard,
         "scoped_agent_context": scoped_agent_context,
         "max_scanned_text_file_bytes": MAX_SCANNED_TEXT_FILE_BYTES,
         "max_artifact_fingerprint_bytes": MAX_ARTIFACT_FINGERPRINT_BYTES,

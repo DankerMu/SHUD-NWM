@@ -21,7 +21,6 @@ from tests.entropy_audit_helpers import (
     REPO_ROOT,
     _assert_unallowlisted_budget_counted_report_only_finding,
     _entropy_baseline_snapshot,
-    _findings_by_check,
     _repo_report,
     _run_entropy_audit_cli,
     _setup_clean_hard_gate_fixture,
@@ -77,20 +76,6 @@ def test_entropy_audit_json_schema_is_stable() -> None:
     assert isinstance(thresholds, dict)
     assert thresholds["yellow_zone_min_physical_lines"] == 500
     assert thresholds["mandatory_governance_over_physical_lines"] == 1000
-    compatibility_guard = metadata["compatibility_facade_guard"]
-    assert isinstance(compatibility_guard, dict)
-    assert (
-        compatibility_guard["schema_version"]
-        == audit_repo_entropy.COMPATIBILITY_FACADE_GUARD_SCHEMA_VERSION
-    )
-    assert compatibility_guard["mode"] == "report-only"
-    assert {
-        "comparison_base_ref",
-        "governed_facade_count",
-        "signal_count",
-        "facades",
-        "signals",
-    } <= set(compatibility_guard)
     scoped_context = metadata["scoped_agent_context"]
     assert isinstance(scoped_context, dict)
     assert (
@@ -129,7 +114,6 @@ def test_entropy_audit_json_schema_is_stable() -> None:
         "slurm-gateway-route-leakage",
         "agent-artifact-ownership-policy",
         "apps-api-layer-inversion",
-        "compatibility-facade-growth",
         "scoped-agent-context",
     } <= set(metadata["executed_check_families"])
 
@@ -257,24 +241,12 @@ def test_entropy_audit_markdown_report_preserves_repository_baseline() -> None:
     assert "- Baseline path: `.entropy-baseline/latest.json`" in result.stdout
     assert "- Baseline written: `false`" in result.stdout
     assert "## Structural File Budget" in result.stdout
-    assert "## Compatibility Facade Guard" in result.stdout
     assert "## Scoped Agent Context" in result.stdout
     assert "## Entropy Heatmap" in result.stdout
     assert "## High-Spread Patterns" in result.stdout
     assert "## Prioritized Cleanup Targets" in result.stdout
     assert _entropy_baseline_snapshot() == before
 
-
-def test_compatibility_facade_guard_current_repo_passes_with_inventories() -> None:
-    report = _repo_report(REPO_ROOT)
-    metadata = report["metadata"]
-    assert isinstance(metadata, dict)
-    guard = metadata["compatibility_facade_guard"]
-    assert isinstance(guard, dict)
-
-    assert guard["signal_count"] == 0
-    assert guard["signals"] == []
-    assert _findings_by_check(REPO_ROOT, audit_repo_entropy.COMPATIBILITY_FACADE_GUARD_CHECK_ID) == []
 
 def test_entropy_audit_hard_gate_json_preserves_repository_baseline_and_parseable_stdout() -> None:
     before = _entropy_baseline_snapshot()

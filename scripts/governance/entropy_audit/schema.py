@@ -2,9 +2,9 @@
 
 Split out of ``scripts/governance/audit_repo_entropy.py`` by #1842. Holds the
 ``Literal`` axis/mode aliases, ``FindingSpec`` (the one shape every check emits)
-and the frozen dataclasses the structural-budget, compatibility-facade,
-scoped-agent-context, stale-route and topology families pass between their own
-helpers, plus the two governed-scope config tuples built from them."""
+and the frozen dataclasses the structural-budget, scoped-agent-context,
+stale-route and topology families pass between their own helpers, plus the
+governed-scope config tuple built from them."""
 
 from __future__ import annotations
 
@@ -99,13 +99,6 @@ class _StructuralOwnershipGrowthSignal:
 
 
 @dataclass(frozen=True)
-class _CompatibilityFacadeConfig:
-    name: str
-    relative_path: str
-    inventory_path: str
-
-
-@dataclass(frozen=True)
 class _ScopedAgentContextConfig:
     scope_path: str
     instruction_path: str
@@ -113,64 +106,6 @@ class _ScopedAgentContextConfig:
     required_glossary_terms: tuple[str, ...]
     required_references: tuple[str, ...]
     required_verification_commands: tuple[str, ...]
-
-
-@dataclass(frozen=True)
-class _CompatibilityFacadeImportedSymbol:
-    exposed_name: str
-    imported_name: str
-    module: str
-    line: int
-
-    @property
-    def key(self) -> tuple[str, str, str]:
-        return (self.exposed_name, self.module, self.imported_name)
-
-
-@dataclass(frozen=True)
-class _CompatibilityFacadeAlias:
-    exposed_name: str
-    owner_module: str
-    owner_attr: str
-    line: int
-
-    @property
-    def key(self) -> tuple[str, str, str]:
-        return (self.exposed_name, self.owner_module, self.owner_attr)
-
-
-@dataclass(frozen=True)
-class _CompatibilityFacadeDefinition:
-    qualified_name: str
-    simple_name: str
-    kind: Literal["class", "function", "method"]
-    line: int
-    forwarding: bool
-
-    @property
-    def key(self) -> tuple[str, str]:
-        return (self.kind, self.qualified_name)
-
-
-@dataclass(frozen=True)
-class _CompatibilityFacadeSurface:
-    import_families: tuple[str, ...]
-    imported_symbols: tuple[_CompatibilityFacadeImportedSymbol, ...]
-    aliases: tuple[_CompatibilityFacadeAlias, ...]
-    definitions: tuple[_CompatibilityFacadeDefinition, ...]
-
-
-@dataclass(frozen=True)
-class _CompatibilityFacadeSignal:
-    facade_name: str
-    relative_path: str
-    inventory_path: str
-    signal_type: str
-    message_key: str
-    inventory_tokens: tuple[str, ...]
-    line: int | None
-    detail: str
-    owner_action: str
 
 
 @dataclass(frozen=True)
@@ -201,20 +136,6 @@ class _StructuralPhysicalLineCount:
 class _BoundedGitBlobText:
     text: str
     truncated: bool
-
-
-COMPATIBILITY_FACADE_CONFIGS = (
-    _CompatibilityFacadeConfig(
-        name="scheduler",
-        relative_path="services/orchestrator/scheduler.py",
-        inventory_path="docs/governance/SCHEDULER_COMPATIBILITY_INVENTORY.md",
-    ),
-    _CompatibilityFacadeConfig(
-        name="chain",
-        relative_path="services/orchestrator/chain.py",
-        inventory_path="docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md",
-    ),
-)
 
 
 SCOPED_AGENT_CONTEXT_CONFIGS = (

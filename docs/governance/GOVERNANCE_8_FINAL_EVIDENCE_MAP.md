@@ -15,10 +15,12 @@ The OpenSpec source is
 `openspec/changes/governance-8-module-deepening/`. Group inventories remain the
 authority for detailed owner/facade and lane contracts:
 
-- `docs/governance/SCHEDULER_COMPATIBILITY_INVENTORY.md`
-- `docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md`
 - `docs/governance/STRUCTURAL_FILE_DISPOSITION_INVENTORY.md`
 - `docs/governance/entropy-burndown-triage.md`
+
+The scheduler and chain group inventories this map originally listed here, and
+the audit check that read them, were deleted in #3274. The task rows below that
+name them are historical evidence only.
 
 When this summary disagrees with executable behavior, source code and tests win.
 When it disagrees with the OpenSpec change, the OpenSpec change wins.
@@ -27,7 +29,7 @@ When it disagrees with the OpenSpec change, the OpenSpec change wins.
 
 | Task | Issue | PR | Evidence authority |
 |---|---:|---:|---|
-| 1.1 Scheduler compatibility guard and parity fixture | #712 | #771 | Scheduler inventory guard metadata and focused scheduler parity verification. |
+| 1.1 Scheduler compatibility guard and parity fixture | #712 | #771 | Scheduler inventory guard metadata (deleted in #3274) and focused scheduler parity verification. |
 | 1.2 Scheduler state owner-family completion | #713 | #772 | Scheduler state owner/facade re-export and wrapper parity coverage. |
 | 1.3 Scheduler lease owner-family completion | #714 | #773 | Scheduler lease compatibility lookup and re-export coverage. |
 | 1.4 Scheduler discovery owner-family completion | #715 | #774 | Discovery alias, forwarder, and backfill selection parity coverage. |
@@ -35,8 +37,8 @@ When it disagrees with the OpenSpec change, the OpenSpec change wins.
 | 1.6 Scheduler execution/cohort owner-family completion | #717 | #776 | Execution wrapper and restart cohort parity coverage. |
 | 1.7 Scheduler evidence-write and proof owner-family completion | #718 | #777 | Evidence direct alias, forwarder, wrapper, and proof coverage. |
 | 1.8 Scheduler cancellation/status proof local-glue closure | #719 | #778 | Cancellation/status proof wrappers and retained local glue classification. |
-| 1.9 Scheduler group verification and evidence closeout | #720 | #779 | Scheduler group closeout table in scheduler compatibility inventory. |
-| 2.1 Chain compatibility guard and parity fixture | #721 | #780 | Chain facade guard metadata and compatibility-facade growth checks. |
+| 1.9 Scheduler group verification and evidence closeout | #720 | #779 | Scheduler group closeout table in scheduler compatibility inventory (deleted in #3274). |
+| 2.1 Chain compatibility guard and parity fixture | #721 | #780 | Chain facade guard metadata and compatibility-facade growth checks (both deleted in #3274). |
 | 2.2 Chain stage catalog/type owner-family completion | #722 | #781 | Stage catalog/type re-export identity and owner/facade map coverage. |
 | 2.3 Chain stage execution owner-family completion | #723 | #782 | Stage-execution forwarder and dependency-field compatibility coverage. |
 | 2.4 Chain array-accounting owner-family completion | #724 | #783 | Array-accounting wrapper, dependency binding, and monkeypatch-seam coverage. |
@@ -46,7 +48,7 @@ When it disagrees with the OpenSpec change, the OpenSpec change wins.
 | 2.8 Chain tile-publisher owner-family completion | #728 | #787 | Tile-publisher alias/function identity, local publish monkeypatch, and redaction coverage. |
 | 2.9 Chain worker/source-identity and time-consistency owner-family completion | #729 | #788 | Worker/source identity aliases and fail-closed time-consistency coverage. |
 | 2.10 Chain persistence/repository ownership decision and extraction/retention | #730 | #789 | Persistence primitive aliases and retained chain-local repository classifications. |
-| 2.11 Chain group verification and evidence closeout | #731 | #790 | Chain group closeout table in chain compatibility inventory. |
+| 2.11 Chain group verification and evidence closeout | #731 | #790 | Chain group closeout table in chain compatibility inventory (deleted in #3274). |
 | 3.1 Shared two-node evidence contracts | #732 | #791 | Shared contract guard metadata and strict identity coverage. |
 | 3.2 Metadata and strict-identity lane extraction | #733 | #792 | Metadata/source-scope seeding and owner row coverage. |
 | 3.3 Docker preflight lane extraction | #734 | #793 | Docker preflight owner row and resource/path guard coverage. |

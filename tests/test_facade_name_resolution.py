@@ -79,6 +79,12 @@ Not bindings, so not scanned (out of the 10.2 contract): relative imports
 (``from .scheduler import X``, ``from . import chain``),
 ``importlib.import_module(...)`` and ``sys.modules[...]`` lookups.
 
+Three silent forms are not collected either, and each has zero facade sites at
+f45e332b2: a dispatch wrapper that rebinds its name parameter before the
+``getattr`` (the name it really reads is never seen),
+``functools.partial(_scheduler_call, "X")``, and a keyword-form string target
+such as ``mock.patch(target="services.orchestrator.chain.X")``.
+
 ``EXEMPTIONS`` may hold a target that does not resolve today only when a test
 deliberately injects a new attribute; each entry carries its site and a
 written reason.  It is empty.  An entry that resolves, has no reason, or

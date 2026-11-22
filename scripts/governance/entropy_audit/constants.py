@@ -32,7 +32,6 @@ CHECK_FAMILIES = (
     "agent-artifact-ignore-policy",
     "tracked-generated-artifact",
     "apps-api-layer-inversion",
-    "compatibility-facade-growth",
     "scoped-agent-context",
     "hard-line-reference",
 )
@@ -139,12 +138,6 @@ STRUCTURAL_FILE_BUDGET_TOP_LIMIT = 10
 STRUCTURAL_FILE_BUDGET_SCHEMA_VERSION = "governance-7.structural-file-budget.v1"
 
 
-COMPATIBILITY_FACADE_GUARD_SCHEMA_VERSION = "governance-7.compatibility-facade-guard.v1"
-
-
-COMPATIBILITY_FACADE_GUARD_CHECK_ID = "compatibility-facade-growth"
-
-
 SCOPED_AGENT_CONTEXT_SCHEMA_VERSION = "governance-7.scoped-agent-context.v1"
 
 
@@ -241,9 +234,6 @@ STRUCTURAL_DEPENDENCY_LOCKFILE_NAMES = frozenset(
 
 
 STRUCTURAL_IMPORT_FAMILY_MIXED_COUNT = 4
-
-
-COMPATIBILITY_FACADE_PROJECT_IMPORT_ROOTS = frozenset({"apps", "packages", "services", "workers"})
 
 
 MAX_SCANNED_TEXT_FILE_BYTES = 1_048_576
