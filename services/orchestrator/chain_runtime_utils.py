@@ -11,6 +11,7 @@ import httpx
 
 from packages.common.contracts.time_normalization import cycle_id_for, format_cycle_time, parse_cycle_time
 from packages.common.contracts.time_normalization import format_iso_utc as _format_time
+from packages.common.contracts.time_normalization import utc_now as _utcnow  # noqa: F401 - re-exported to chain facade
 from packages.common.python_runtime import validated_target_python_runtime
 from packages.common.redaction import redact_payload
 from packages.common.source_identity import normalize_source_id

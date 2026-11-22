@@ -192,23 +192,6 @@ _SCHEDULER_EXECUTION_COMPAT_FACADE_WRAPPERS = MappingProxyType(
 )
 
 
-def _bounded_evidence_payload(
-    payload: Mapping[str, Any],
-    *,
-    reason: str,
-    max_evidence_bytes: int | None = None,
-) -> dict[str, Any]:
-    return _scheduler_evidence.bounded_evidence_payload(
-        payload,
-        reason=reason,
-        max_evidence_bytes=MAX_EVIDENCE_BYTES if max_evidence_bytes is None else max_evidence_bytes,
-    )
-
-
-def _evidence_status(evidence: Mapping[str, Any], fallback: str) -> str:
-    return _scheduler_evidence.evidence_status(evidence, fallback)
-
-
 _SCHEDULER_EVIDENCE_COMPAT_DIRECT_OWNER_NAMES = MappingProxyType(
     {
         "MAX_EVIDENCE_BYTES": "MAX_EVIDENCE_BYTES",
@@ -308,16 +291,6 @@ _SCHEDULER_EVIDENCE_COMPAT_FACADE_WRAPPERS = MappingProxyType(
 )
 
 
-def _now(config: ProductionSchedulerConfig) -> datetime:
-    return config.now or datetime.now(UTC)
-
-
-def _sleep(seconds: float) -> None:
-    import time
-
-    time.sleep(seconds)
-
-
 EXPORTS = {
     name: value
     for name, value in globals().items()
@@ -358,10 +331,6 @@ EXPORTS = {
         "_SCHEDULER_EXECUTION_COMPAT_WRAPPER_NAMES",
         "_SCHEDULER_EXECUTION_COMPAT_WRAPPER_OWNER_NAMES",
         "_accepted_horizon_from_hours",
-        "_bounded_evidence_payload",
-        "_evidence_status",
-        "_now",
-        "_sleep",
         "_source_forecast_hours",
         "_source_object_identity",
         "_source_policy_identity",

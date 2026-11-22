@@ -652,3 +652,13 @@ def _union_ms(intervals: list[tuple[float, float]]) -> float:
             current_start, current_end = start, end
     total += current_end - current_start
     return total
+
+
+def _now(config: Any) -> datetime:
+    return config.now or datetime.now(UTC)
+
+
+def _sleep(seconds: float) -> None:
+    import time
+
+    time.sleep(seconds)
