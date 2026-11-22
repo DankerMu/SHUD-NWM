@@ -2695,20 +2695,74 @@ Slice triage (F3-1, #3274, tasks 12.1-12.5):
 
 ## 13. J0 — Characterization guard for the journal class
 
-- [ ] 13.1 Add `tests/test_file_journal_class_surface.py`. It pins the four sets from design.md D4 as checked-in sorted lists:
+- [x] 13.1 Add `tests/test_file_journal_class_surface.py`. It pins the four sets from design.md D4 as checked-in sorted lists:
   - method names with signatures;
   - attribution-wrapped public methods;
   - private methods called by the four named external modules;
   - public module-level names importable from the facade.
-- [ ] 13.2 Extend the cluster-map late-lookup lint (`tests/test_file_journal_cluster_map.py:233-250`) to cover every `file_journal_*.py` mixin module listed in the cluster map, not only `EXTRACTION_ORDER`.
-- [ ] 13.3 Verification: CI only.
+- [x] 13.2 Extend the cluster-map late-lookup lint (`tests/test_file_journal_cluster_map.py:233-250`) to cover every `file_journal_*.py` mixin module listed in the cluster map, not only `EXTRACTION_ORDER`.
+- [x] 13.3 Verification: CI only.
 
 Suggested fixture level: compact - test-only.
 Minimal mergeable slice: atomic - one guard file plus the lint extension it needs.
 
+Slice triage (J0, #3275, tasks 13.1-13.3):
+- Issue type: test (characterization guard). Fixture level: compact (agree): test-only, one new guard file plus a lint extension. Width: one PR, atomic.
+- Recon at 900e35446:
+  - `services/orchestrator/file_orchestration_journal.py` has 12993 lines. The module has two decorated classes: `FileOrchestrationJournalRepository` at `:1305-1306` and `FileJournalRetryService` at `:12289-12290`.
+  - `_install_public_read_attribution` is defined at `file_journal_read_attribution.py:116-137`.
+    - It wraps only the public functions in `vars(cls)`, so the class's own dict, not the MRO.
+    - It skips generators and anything that already has `__wrapped__`.
+    - The wrapper comes from `_attributed_public_method` (`:93-114`) through `functools.wraps`.
+    - Consequence: a public method moved into an undecorated mixin silently loses attribution. That is why D4 says each mixin with public methods carries the decorator, and why this guard pins the wrapped set.
+  - The four external modules named in D4 contain these private attribute calls: `journal_scope_census.py` 6, `file_orchestration_migration.py` 4, `scripts/ops/node22_repair_placeholder_hydro_uris.py` 3, and `scheduler_state_manual_retry.py` 0. The last one only cites journal helpers in comments.
+  - The cluster map (`tests/fixtures/file_journal_cluster_map.json`, `tests/test_file_journal_cluster_map.py`) assigns top-level units to eight clusters. Its late-lookup lint (`late_lookup_problems`, `:233-250`) iterates `EXTRACTION_ORDER = CLUSTERS[1:]`, a hard-coded tuple (`:73`). A new `file_journal_<cluster>.py` mixin added by J1-J5 would therefore escape the lint unless the tuple is also edited.
+- Changes (implementer; test-only):
+  1. **13.1.** Add `tests/test_file_journal_class_surface.py` and its checked-in data file `tests/fixtures/file_journal_class_surface.json`. The data file holds four sorted lists, generated once from HEAD by a function inside the test module. When an opt-in env var (for example `NHMS_REGENERATE_CLASS_SURFACE=1`) is set, that function rewrites the file. The default run only compares.
+     - (1) For both classes, every non-dunder name in `dir(cls)`, resolved to its raw `vars(base)` entry through `cls.__mro__` (`object` excluded). The owning base and `__qualname__` are not recorded. Record its kind, one of `function`, `staticmethod`, `classmethod`, `property` or `value`.
+       - For callables, record a normalised signature of the underlying function: `__func__` for static and class methods; `fget` for properties, plus which of `fset` and `fdel` exist. `inspect.signature` follows `__wrapped__`.
+       - For `value`, record `type(v).__name__` and `repr(v)`.
+
+       Normalisation: each parameter renders as `str(param)`, except its default. A default renders as `=facade.NAME` when it `is` a module-level object of `file_orchestration_journal` named NAME (today `_UNSET`), and as `repr(default)` otherwise. The generator asserts that no row contains ` at 0x`, so a mixin that defines its own sentinel fails. Annotations stay the quoted strings that `from __future__ import annotations` produces. Every mixin module starts with that import, and a signature diff caused by an evaluated annotation is fixed in the mixin, never by regenerating.
+     - (2) For both classes, resolve each public name to its raw entry in `vars(base)` for the first `base` in `cls.__mro__` that has it (`object` excluded). The entry is an attribution wrapper when it is a plain function whose `__code__` is the inner function's code object, obtained once as `_attributed_public_method("probe", lambda self: None).__code__`. `functools.wraps` copies `__qualname__`, so qualname cannot identify the wrapper. Pin these names; the fixture review counted 67 on the repository and 6 on the retry service. Separately, pin the public plain functions the installer deliberately skips: generator functions, and functions that already carry a foreign `__wrapped__` (today `open_retention_cycle`, a `@contextmanager`). Properties, staticmethods and classmethods are outside this set. Converse: every public plain function resolved this way is either a wrapper or in the pinned skip list.
+     - (3) The private class attributes the four D4 modules reach: AST `Attribute` nodes `X._name` in those modules where `_name` resolves on either class through the MRO (`object` excluded) and is not defined by the scanned module itself. At HEAD this is 13 names on `FileOrchestrationJournalRepository`: census 6; migration 4, including the staticmethod `_pipeline_job_row`; the repair script 3. The test re-scans the four modules, asserts the result equals the pinned list, and asserts each name still resolves. Module-level private names are reached by from-import only, and set 4(b) pins them.
+     - (4) The facade's import contract, recorded as name -> coarse tag (`class`, `function` or `value`). It is the union of:
+       - (a) every public name defined at the facade's top level by `def`, `class`, `Assign` or `AnnAssign` at HEAD. A name later moved to a sibling must still resolve on the facade;
+       - (b) every name, public or private, that a production `*.py` outside the facade and the `file_journal_*` siblings imports from the facade, or reads as `<facade alias>.X`. Production means `services/`, `apps/`, `scripts/`, `workers/` and `packages/`. The import forms are `from services.orchestrator.file_orchestration_journal import X` and level-1 `from .file_orchestration_journal import X`.
+
+       Names the facade imports only for its own use are excluded: a pure move makes some of them unused, and ruff F401 forces their removal. The test asserts that every pinned name resolves on the facade with the same tag. Private names that tests import from the facade fail loudly at import time, so they are not pinned; silently-rebinding patched names are covered by the cluster map's `patched` and late-lookup rules.
+     The test asserts that the live sets equal the data file. A deliberate change must regenerate the file and appear in the diff. J1-J5 must leave the file unchanged, because a pure move preserves all four sets.
+
+     The generator writes `json.dumps(..., indent=2, sort_keys=True) + "\n"`. A byte-level serialisation test follows the pattern of `tests/test_file_journal_cluster_map.py:615-618`. The regeneration branch ends with `pytest.fail("regenerated; rerun without the env var")`, so a regenerating run never passes. The new test file must not `setattr` or `patch` the facade module: the cluster-map patch scanner reads every test that mentions the facade. Red run (b) therefore uses a synthetic class or a scratch copy.
+  2. **13.2.** In `tests/test_file_journal_cluster_map.py`, `coverage_problems` also reports every on-disk `services/orchestrator/file_journal_*.py` that is not `sibling_path(root, c)` for some `c` in `EXTRACTION_ORDER`, with the message `<rel>: file_journal sibling is not a registered cluster; add it to CLUSTERS and the map`.
+     - `coverage_problems`, `host_units` and `late_lookup_problems` keep iterating `EXTRACTION_ORDER`. `shape_problems` already ties the map keys to `CLUSTERS`, so all three then cover every mixin. A J slice registers its mixin by adding the cluster to `CLUSTERS` and to the map.
+     - Synthetic test: an on-disk `file_journal_newmixin.py` that is not in `CLUSTERS` is reported. HEAD reports nothing.
+  3. **Orchestrator `openspec` edits**, from `.workplans/3274/carry-overs.md`:
+     - `specs/orchestrator-structural-burndown/spec.md:7` loses the stale count "fifteen";
+     - the scenario titles "... inventory is updated with the extraction" in `specs/scheduler-facade-deepening/spec.md` and `specs/chain-facade-deepening/spec.md` stay. `openspec validate` rejects renaming a scenario inside a MODIFIED block, and the THEN text ("no compatibility inventory is edited … does not exist") is authoritative.
+- Must preserve:
+  - No production file changes.
+  - Existing cluster-map tests stay green unchanged, except for the new registration rule.
+  - No `file.py:NNN` line reference appears in shipped Python.
+- Out of scope: moving any method (J1-J5); extending the map's coverage rules beyond the lint.
+- Required evidence (`.workplans/3275/`):
+  1. `surface.md`: the four set sizes and the generation command.
+  2. `red-runs.log`, each a temporary edit reverted afterwards:
+     - (a) rename one public method on the class, which must fail set 1;
+     - (b) move one public method into an undecorated mixin base in a scratch copy, which must fail set 2;
+     - (c) drop one private attribute used by an external module, which must fail set 3;
+     - (d) add a public module-level name, which must fail set 4;
+     - (e) the unregistered-sibling synthetic case fails on HEAD's `coverage_problems` and passes after the change.
+  3. `uv run --no-sync ruff check . --no-cache`, `git diff --check` and `openspec validate redesign-orchestration-core --strict --no-interactive`.
+- Verification:
+  - Locally: the new test, `tests/test_file_journal_cluster_map.py`, and the other `tests/test_file_journal_*.py` files that collect quickly (at least the cluster-map and full-tree budget tests).
+  - CI: the full suite (13.3).
+  - No node-27 or node-22 run: test-only.
+
 ## 14. J1 — Retention mixin
 
 - [ ] 14.1 Move C18 (Appendix B) into `services/orchestrator/file_journal_retention.py` as a mixin that the class composes. The retention dataclasses stay importable from the facade. Update the cluster map. J0, `tests/test_file_journal_late_lookup_seams.py` and `tests/test_scheduler_journal_retention_archive.py` stay unchanged and green.
+  - J1-J5 carry-over from J0 (#3275): set 1 renders a `_UNSET` default as `=facade._UNSET`, and set 4 requires every pinned 4(a) name (e.g. `FileJournalRetentionCycle*`, `OperatorBindReceipt`, `PERMANENT_FAILURE_SOURCE_STATUSES`) to keep resolving on the facade. When a slice moves such a name, or the last class-body use of `_UNSET`, out of the facade, the facade keeps the re-import with `# noqa: F401`. Adding it to `__all__` is not an option: `tests/test_file_orchestration_journal_facade.py` requires every `__all__` name to have a consumer. Facade-only imports (`COHORT_MEMBERSHIP_*`, `journal_read_lane`) may be dropped under F401 without touching set 4, whose live side counts only sibling imports already pinned as 4(a).
 - [ ] 14.2 Verification: CI, then node-22 batch per D5.
 
 Suggested fixture level: expanded - moves persisted-state writer code.

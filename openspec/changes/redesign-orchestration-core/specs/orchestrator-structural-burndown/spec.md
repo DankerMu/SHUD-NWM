@@ -3,7 +3,7 @@
 ### Requirement: Entropy audit enforcement and its corpus split without report drift
 
 The repository SHALL split `scripts/governance/audit_repo_entropy.py` and
-its former single test module (now the fifteen `tests/test_entropy_audit_*.py` partitions of
+its former single test module (now the `tests/test_entropy_audit_*.py` partitions of
 `ENTROPY_AUDIT_TESTS`) below 1,000 lines with shared definitions in
 support modules. The audit's check identifiers, module heatmap keys, public function
 set, exit codes, and the stable subset of `metadata` SHALL be unchanged. The stable
