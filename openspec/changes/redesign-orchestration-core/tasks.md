@@ -2817,7 +2817,7 @@ Slice triage (J1, #3276, tasks 14.1-14.2):
 ## 15. J2 — Status/events and identity-blocked release mixins
 
 - [x] 15.1 Move C17 into `file_journal_events.py`. A mixin with public methods carries `@_install_public_read_attribution`. J0 stays unchanged.
-- [ ] 15.2 Move C15 into `file_journal_release.py`. J0 stays unchanged.
+- [x] 15.2 Move C15 into `file_journal_release.py`. J0 stays unchanged.
 - [ ] 15.3 Verification: CI, then node-22 batch per D5.
 
 Suggested fixture level: expanded - moves persisted-state writer code.
@@ -2872,6 +2872,87 @@ Slice triage (J2a, #3277, tasks 15.1, 15.3):
   - CI: the full suite.
   - node-22: the D5 pure-move batch (15.3).
 
+Slice triage (J2b, #3278, tasks 15.2, 15.3):
+- Issue type: refactor (pure move). Fixture level: expanded (agree): it moves the identity-blocked release/recover writers, which append persisted journal records. Width: one PR, atomic.
+- Recon at 4fd1597a9, J1 and J2a merged. The Appendix B range for C15 (5830-6183 at 54556b1e7) has shifted by about 90 lines; the HEAD ranges are below.
+  - C15 is 4 methods of `FileOrchestrationJournalRepository` in `services/orchestrator/file_orchestration_journal.py`. All are undecorated and all have docstrings:
+    - public, attribution-wrapped: `release_identity_blocked_reservation` `:5739-5878`, `recover_released_identity_blocked_reservation` `:5986-6091`;
+    - private: `_record_identity_released_signal_failure` `:5880-5938`, `_append_pipeline_job_event_unlocked` `:5940-5984`.
+  - **Decision: `_record_identity_released_signal_failure` stays in the facade class body.**
+    - It is the only class method that uses `LOGGER` (`:5931`).
+    - `tests/test_file_journal_cluster_map.py::test_logger_users_stay_in_the_facade` requires every top-level unit that references `LOGGER`, whether by name or as `<facade alias>.LOGGER`, to live in the facade cluster, because tests filter on the facade's logger name.
+    - Moving the method would break that rule, or need a guard change; leaving one method behind needs neither. `release_identity_blocked_reservation` keeps calling it as `self._record_identity_released_signal_failure(...)`, which resolves through the MRO.
+    - So the slice moves 3 methods.
+  - Module-level names the 3 moved methods read at runtime:
+    - Facade-defined, per method: release reads `FileOrchestrationJournalError`, `IDENTITY_RELEASED_OPERATOR_SIGNAL` and `_released_reservation_recovery_command`; recover reads `FileOrchestrationJournalError` and `OPERATOR_RECOVERY_ATTESTATION_FIELD`; `_append_pipeline_job_event_unlocked` reads only `_utcnow` (as a facade attribute). None of them is a cluster-map patched name.
+    - Facade-resident patched name: `_utcnow`. It is also used elsewhere in the facade, so the facade keeps its import.
+    - Imported into the facade from owner modules:
+      - `accepted_submit_identity`: `ACCEPTED_SUBMIT_CONTRACT_VERSION`, `ACCEPTED_SUBMIT_CONTRACT_VERSION_FIELD`, `AcceptedSubmitTransition`, `IDENTITY_MISMATCH_RELEASED_DECISION`, `accepted_submit_contract_is_current`, `accepted_submit_row_kind`, `apply_accepted_submit_transition`;
+      - `chain_types.OrchestratorError` and `packages.common.safe_fs.SafeFilesystemError`;
+      - `file_journal_retry_helpers._accepted_submit_attempt_anchor`, `file_journal_candidates` (`_accepted_submit_source_cycle_from_job_id`, `_public_scheduler_row`), `file_journal_paths._optional_safe_identity`, `file_journal_primitives._required_safe_identity`;
+      - `scheduler_state._format_utc`.
+
+      Re-derive this list per method.
+    - Annotation-only: `Any`, `Mapping`, `datetime` (stdlib, not facade-defined).
+  - No `_UNSET` defaults.
+  - The rest of the class calls `self._append_pipeline_job_event_unlocked` from other clusters, which resolves through the MRO.
+  - Consumers:
+    - production: `reconcile_reserved_support.py:296` via `getattr(store, "release_identity_blocked_reservation", None)`, and `operator_released_reservation_recovery.py:204` via the instance;
+    - tests:
+      - an instance-level `monkeypatch.setattr(repository, "_append_pipeline_job_event_unlocked", ...)` at `tests/test_orchestrator_demote_projection_faults.py:693`;
+      - a wrapper store at `tests/test_gateway_reconcile_identity_release.py:325` that delegates to the inner repository;
+      - no class-level patch of a C15 name.
+- Changes (implementer):
+  1. New `services/orchestrator/file_journal_release.py`: a module docstring, then `from __future__ import annotations`. It holds one top-level class, `_FileJournalReleaseMixin`, decorated `@_install_public_read_attribution`. The class contains the 3 moved methods, moved verbatim and in HEAD order: same bodies, decorators, signatures and docstrings; only name resolution changes.
+  2. Name resolution in the moved code, following the J1/J2a precedent:
+     - `_utcnow` is read as an attribute of the facade module at call time (`from services.orchestrator import file_orchestration_journal`, then `file_orchestration_journal._utcnow()`). It is never bound by import, at top level or in a function body, and it is not imported from `time_normalization`;
+     - facade-defined names read at runtime come from function-local imports from the facade, placed immediately after the method docstring and listing only the names that method reads at runtime. Facade-defined names used only in annotations, if any, go in one module-level `if TYPE_CHECKING:` block. The sibling must not import the facade at top level outside `TYPE_CHECKING`;
+     - other names the facade imports from owner modules are imported at the sibling's top level from those owner modules.
+  3. The facade imports `_FileJournalReleaseMixin` and declares `class FileOrchestrationJournalRepository(_FileJournalRetentionMixin, _FileJournalEventsMixin, _FileJournalReleaseMixin):`, keeping its own decorator.
+     - The 3 methods are deleted from the class body; `_record_identity_released_signal_failure` stays where it is.
+     - `__all__` and every facade-defined name stay.
+     - Facade imports left unused are removed (ruff F401), except a pinned J0 4(a) name or `_UNSET` (`# noqa: F401`). Names listed in `__all__` are never unused for ruff.
+     - Expected removals: none (`IDENTITY_MISMATCH_RELEASED_DECISION` is in `__all__`). Verify; do not assume.
+  4. Cluster map: append `"release"` to `CLUSTERS`, add `clusters["release"] = ["_FileJournalReleaseMixin"]`, and re-derive `patched[*].callers` with the module's own derivation. Expected: `_utcnow` gains `"release": ["_FileJournalReleaseMixin"]`, and nothing else changes. Update the docstring's cluster count and order sentence.
+  5. File-keyed guards. Expected result: nothing relocates, and `tests/status_literal_allowlist.json` stays byte-identical. The 3 moved methods hold no `Set`/`Tuple` with two or more `str` members (only `(None, "")` and an exception-class tuple). The facade keeps the same 9 `(file, members)` hit keys, the new file has 0 hits, and `compare_status_literals` returns `[]`. Run the scan with the new file indexed, in a temporary `GIT_INDEX_FILE` or after `git add`. Also unchanged:
+     - `line_reference_baseline.json`: the facade's two entries sit outside C15, and the new file matches no `LINE_REFERENCE_PATTERNS`;
+     - `pyproject.toml` per-file-ignores: the moved code needs neither B904 nor BLE001;
+     - the first-import allowlist: the sibling imports cleanly first;
+     - the facade `__all__` consumer rule: no listed name loses its last consumer.
+     `moves.md` records "none" with the scan output before and after. Any deviation from "none" is a stop-and-report.
+     The new module's docstring notes that the facade core (`_emit_committed_projection_fault_event`) also calls `_append_pipeline_job_event_unlocked`, and that `_record_identity_released_signal_failure` stays in the facade under the LOGGER rule.
+- Must preserve:
+  - The J0 data file is byte-identical, and the J0 test is unchanged and green.
+  - `tests/test_file_journal_late_lookup_seams.py`, `file_journal_retention.py` and `file_journal_events.py` are unchanged.
+  - `test_logger_users_stay_in_the_facade` stays green unchanged.
+  - No behaviour, signature, exception, log or on-disk format change. The moved `FunctionDef`s are AST-identical to HEAD after the documented rewrites.
+  - No `file.py:NNN` line reference is added in shipped Python.
+- Deviations (record in the PR body):
+  - the diff also edits `tests/test_file_journal_cluster_map.py` (`CLUSTERS` and its docstring) and ticks 15.2 in `tasks.md`;
+  - C15 moves without `_record_identity_released_signal_failure`, which the LOGGER rule keeps in the facade.
+- Out of scope: changing the LOGGER rule or giving the mixin its own logger; other clusters; renaming; the J1 and J2a carry-overs (seam tests, spec cluster count, `_cycle_write_owner` guard).
+- Required evidence (`.workplans/3278/`):
+  1. `ast-parity.md`:
+     - for each of the 3 methods, `ast.dump` of HEAD's whole `FunctionDef` versus the moved one, after dropping the inserted function-local imports and mapping `file_orchestration_journal._utcnow` → `_utcnow`. Expect identical, with docstrings equal;
+     - the facade diff only deletes those 3 methods, plus import-line and class-header edits;
+     - `_record_identity_released_signal_failure` is unchanged in the facade.
+  2. `red-runs.log`, each a temporary edit reverted afterwards:
+     - (a) bind `_utcnow` by import in the sibling: the late-lookup lint fails;
+     - (a') call `utc_now` from `time_normalization` directly in every moved site: `test_patched_callers_match_the_ast` fails;
+     - (b) drop the mixin decorator: J0 set 2 fails;
+     - (c) remove `"release"` from `CLUSTERS`: the 13.2 unregistered-sibling message is named, and the shape check also fires;
+     - (d) additionally move `_record_identity_released_signal_failure` into the mixin, resolving `LOGGER`, `IDENTITY_RELEASED_SIGNAL_FAILED_EVENT` and its other facade-defined names by one function-local import from the facade (Change 2). Expected: exactly `test_logger_users_stay_in_the_facade` fails, naming `('_FileJournalReleaseMixin', 'release')`. The J0 test and `tests/test_production_scheduler.py -k release_signal` stay green, which shows that only the guard blocks the move.
+  3. `moves.md`: allowlist and guard relocations with the scan before and after, or "none".
+  4. `checks.log`: `uv run --no-sync ruff check . --no-cache`, `git diff --check`, `openspec validate redesign-orchestration-core --strict --no-interactive`, and the local test list. `git ls-files` scanners are re-run with the new file indexed, each in its own temporary index; the entropy tests that run `git init` inside `tmp_path` run on the real index.
+- Verification:
+  - Locally:
+    - `tests/test_file_journal_*.py` and `tests/test_file_orchestration_journal*.py`;
+    - `tests/test_gateway_reconcile_identity_*.py`, `tests/test_orchestrator_demote_projection_faults.py`, `tests/test_orchestrator_demote_core_cas.py`, `tests/test_orchestrator_demote_reclaim_lifecycle.py`, `tests/test_scheduler_held_reservation_block.py`, `tests/test_cli_subcommand_surface.py`, and `tests/test_production_scheduler.py -k "release_signal or identity_blocked or released_identity"`. The `release_signal` tests are the only behavioural cover of the mixin → facade `_record_identity_released_signal_failure` → mixin `_append_pipeline_job_event_unlocked` hop and of its facade-logger `caplog`. Run every other test file that calls the 3 moved methods (grep) in full;
+    - `tests/test_status_literal_scan.py`, `tests/test_status_vocab_parity.py`, `tests/test_import_layering_guard.py`, `tests/test_orchestrator_first_import.py`, `tests/test_facade_name_resolution.py`, `tests/test_operator_action_listing.py`, `tests/test_operator_action_status_closure.py`;
+    - every test file that scans `services/**` or `tests/**` and names the facade or `file_journal_`.
+  - node-27: a fresh-process import check over all `integration`-marked files, then `-m integration` over the files that import the facade or `file_journal_release`, on throwaway `nhms_it_*` DBs. Expected: all pass, 0 leftover DBs.
+  - CI: the full suite.
+  - node-22: the D5 pure-move batch (15.3).
 ## 16. J3 — Reclaim, operator and cohort-projection mixins
 
 - [ ] 16.1 Move C12 into `file_journal_reclaim.py`.

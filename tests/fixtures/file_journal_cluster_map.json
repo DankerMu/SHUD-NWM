@@ -267,6 +267,9 @@
       "journal_read_lane",
       "reset_journal_read_counters"
     ],
+    "release": [
+      "_FileJournalReleaseMixin"
+    ],
     "replay": [
       "_REPLAY_ORDER_FIELD",
       "_REPLAY_SEQUENCE_FIELD",
@@ -446,6 +449,9 @@
           "FileJournalRetryService",
           "FileOrchestrationJournalRepository",
           "_historical_pipeline_event_row"
+        ],
+        "release": [
+          "_FileJournalReleaseMixin"
         ],
         "retry_helpers": [
           "_journal_record_for_write"
