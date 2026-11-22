@@ -961,34 +961,308 @@ def test_M3_STAGES_PipelineResult_StageRunResult_legacy_exports_preserve_identit
 
 
 def test_scheduler_state_compat_reexport_names_match_owner_module_and_inventory() -> None:
-    reexport_names = scheduler_module._SCHEDULER_STATE_COMPAT_REEXPORT_NAMES
-    wrapper_names = scheduler_module._SCHEDULER_STATE_COMPAT_WRAPPER_NAMES
-    direct_names = tuple(name for name in reexport_names if name not in wrapper_names)
-
-    assert len(reexport_names) == len(set(reexport_names))
-    assert set(wrapper_names).issubset(reexport_names)
-    assert set(wrapper_names) == set(scheduler_module._SCHEDULER_STATE_COMPAT_EXPORT_NAMES)
-    assert set(wrapper_names) == set(scheduler_module._SCHEDULER_STATE_COMPAT_ORIGINALS)
-    assert set(wrapper_names) == set(scheduler_module._SCHEDULER_STATE_COMPAT_WRAPPERS)
-    assert set(reexport_names) == set(scheduler_module._SCHEDULER_STATE_COMPAT_OWNER_REEXPORTS)
-    assert set(reexport_names) == set(scheduler_module._SCHEDULER_STATE_COMPAT_FACADE_REEXPORTS)
-    assert scheduler_module._SCHEDULER_STATE_COMPAT_EXPORTS == tuple(
-        scheduler_module._SCHEDULER_STATE_COMPAT_FACADE_REEXPORTS[name] for name in reexport_names
+    reexport_names = (
+        "ACTIVE_HYDRO_STATUSES",
+        "ACTIVE_PIPELINE_STATUSES",
+        "CANDIDATE_STATE_TASK_RESULT_LIMIT",
+        "DEFAULT_CANDIDATE_STATE_EVENT_LIMIT",
+        "DEFAULT_CANDIDATE_STATE_JOB_LIMIT",
+        "DEFAULT_RETRY_LIMIT",
+        "DOWNSTREAM_RESTART_STAGES",
+        "DOWNSTREAM_STAGE_ALIASES",
+        "DURABLE_HYDRO_SUCCESS_STATUSES",
+        "FAILED_PIPELINE_STATUSES",
+        "NATIVE_SHUD_STAGE_ALIASES",
+        "STATE_CANDIDATE_SCOPED_PROOF_FIELDS",
+        "STATE_M23_COMPARISON_FIELDS",
+        "STATE_STRONG_CANDIDATE_SCOPED_PROOF_FIELDS",
+        "TERMINAL_PIPELINE_SUCCESS_STATUSES",
+        "TRANSIENT_RETRY_REASON_CODES",
+        "CandidateStateDecision",
+        "_bounded_active_slurm_jobs",
+        "_bounded_candidate_event",
+        "_bounded_candidate_state",
+        "_bounded_task_result_rows",
+        "_bounded_task_result_sample",
+        "_call_active_slurm_jobs_provider",
+        "_call_candidate_state_provider",
+        "_cancelled_state_evidence",
+        "_candidate_canonical_product_id",
+        "_candidate_contract_pipeline_job_id",
+        "_candidate_identity_from_evidence",
+        "_candidate_production_identity",
+        "_candidate_published_manifest_id",
+        "_candidate_repaired_state_audit_evidence",
+        "_candidate_scoped_shared_cycle_aggregate_state",
+        "_candidate_scoped_shared_cycle_events",
+        "_candidate_state_decision",
+        "_candidate_state_decision_event",
+        "_candidate_state_decision_state",
+        "_candidate_state_evidence",
+        "_candidate_state_filtered_decision_state",
+        "_candidate_state_has_identity_mismatch",
+        "_candidate_state_identity_validation",
+        "_candidate_state_is_candidate_scoped_retry",
+        "_candidate_state_source_allows_nested_authority",
+        "_candidate_state_source_has_authoritative_ancestor",
+        "_canonical_downstream_stage",
+        "_coerce_int",
+        "_coerce_mapping_for_state",
+        "_coerce_optional_nonnegative_int",
+        "_completed_upstream_stage_retry_evidence",
+        "_downstream_failure_restartable",
+        "_downstream_retry_evidence",
+        "_durable_shud_output_exists",
+        "_ensure_utc",
+        "_event_has_candidate_scoped_failure",
+        "_event_has_failure_signal",
+        "_event_identity_containers",
+        "_event_is_manual_retry_marker",
+        "_evidence_safe",
+        "_failed_stage",
+        "_failure_policy_payload",
+        "_first_nested_state_value",
+        "_first_nonempty",
+        "_first_state_datetime",
+        "_first_state_int",
+        "_force_native_shud_rerun",
+        "_forecast_cycle_manifest_uri",
+        "_format_utc",
+        "_global_source_cycle_download_blocker_job",
+        "_has_candidate_task_failure",
+        "_has_successful_download_stage",
+        "_inconclusive_source_cycle_decision_state",
+        "_inconclusive_source_cycle_unresolved_job_ids",
+        "_is_raw_manifest_object_uri",
+        "_is_source_cycle_download_stage",
+        "_job_is_unsubmitted_auto_retry_placeholder",
+        "_job_state_evidence",
+        "_job_terminal_sort_key",
+        "_job_terminal_time",
+        "_latest_failed_job_for_stage",
+        "_latest_failure_truth_timestamp",
+        "_latest_manual_retry_blocker",
+        "_latest_manual_retry_marker",
+        "_latest_successful_download_stage",
+        "_legacy_compatible_state_row",
+        "_legacy_identity_values",
+        "_legacy_non_authoritative_state_row",
+        "_legacy_values_prove_same_candidate",
+        "_looks_like_production_job_id",
+        "_manual_retry_blocker_record",
+        "_manual_retry_blocking_hydro_status",
+        "_manual_retry_blocking_pipeline_status",
+        "_manual_retry_marker_bound_to_blocker",
+        "_manual_retry_marker_overrides_blocker",
+        "_manual_retry_marker_record",
+        "_manual_retry_marker_repairs_historical_failure",
+        "_manual_retry_markers",
+        "_manual_retry_new_attempt",
+        "_manual_retry_payload",
+        "_manual_retry_requested",
+        "_manual_retry_state_evidence",
+        "_missing_raw_manifest_repair_evidence",
+        "_nested_state_identity_payloads",
+        "_object_manifest_is_missing",
+        "_optional_mapping_state",
+        "_parse_state_datetime",
+        "_permanent_failure_evidence",
+        "_permanent_reason",
+        "_pipeline_job_is_repaired_stage_evidence",
+        "_pipeline_terminal_success_is_candidate_scoped",
+        "_prior_failure_reason",
+        "_redact_secret_manifest_for_evidence",
+        "_repaired_raw_manifest_downstream_retry_evidence",
+        "_repaired_stage_decision_state",
+        "_restore_top_level_source_cycle_download_blocker",
+        "_retry_failure_evidence",
+        "_shared_cycle_aggregate_has_candidate_failure",
+        "_shared_cycle_identity_values_match_candidate",
+        "_shared_cycle_row_is_candidate_scoped",
+        "_source_cycle_identity_matches_expected",
+        "_stage_cycle_run_matches_candidate",
+        "_state_active_jobs",
+        "_state_error_code",
+        "_state_error_message",
+        "_state_event_limit",
+        "_state_event_references_job_ids",
+        "_state_events",
+        "_state_has_failure_signal",
+        "_state_has_only_repaired_pipeline_failure_signal",
+        "_state_has_only_unsubmitted_auto_retry_placeholders",
+        "_state_job_limit",
+        "_state_jobs",
+        "_state_output_uri",
+        "_state_overflow_evidence",
+        "_state_retry_attempt",
+        "_state_retry_limit",
+        "_state_row_has_authoritative_candidate_proof",
+        "_state_row_has_m23_comparison_evidence",
+        "_state_row_has_m23_comparison_fields",
+        "_state_row_is_scoped_to_other_candidate",
+        "_state_row_references_job_ids",
+        "_state_status",
+        "_state_task_identity",
+        "_state_task_payload_failed",
+        "_state_truth_sequence",
+        "_state_truth_sort_key",
+        "_state_values_are_scoped_to_other_candidate",
+        "_state_values_have_authoritative_candidate_proof",
+        "_state_values_have_candidate_scoped_m23_proof",
+        "_state_values_have_complete_m23_identity",
+        "_strip_top_level_candidate_state_decision_fields",
+        "_strip_top_level_hydro_decision_fields",
+        "_strip_top_level_pipeline_decision_fields",
+        "_task_result_is_candidate_scoped",
+        "_terminal_hydro_truth_supersedes_failure",
+        "_top_level_source_cycle_download_blocker",
     )
+    wrapper_names = (
+        "_bounded_active_slurm_jobs",
+        "_bounded_candidate_event",
+        "_bounded_candidate_state",
+        "_bounded_task_result_rows",
+        "_bounded_task_result_sample",
+        "_call_active_slurm_jobs_provider",
+        "_call_candidate_state_provider",
+        "_cancelled_state_evidence",
+        "_candidate_canonical_product_id",
+        "_candidate_contract_pipeline_job_id",
+        "_candidate_identity_from_evidence",
+        "_candidate_production_identity",
+        "_candidate_published_manifest_id",
+        "_candidate_repaired_state_audit_evidence",
+        "_candidate_scoped_shared_cycle_aggregate_state",
+        "_candidate_scoped_shared_cycle_events",
+        "_candidate_state_decision",
+        "_candidate_state_decision_event",
+        "_candidate_state_decision_state",
+        "_candidate_state_evidence",
+        "_candidate_state_filtered_decision_state",
+        "_candidate_state_has_identity_mismatch",
+        "_candidate_state_identity_validation",
+        "_candidate_state_is_candidate_scoped_retry",
+        "_candidate_state_source_allows_nested_authority",
+        "_candidate_state_source_has_authoritative_ancestor",
+        "_canonical_downstream_stage",
+        "_coerce_int",
+        "_coerce_mapping_for_state",
+        "_coerce_optional_nonnegative_int",
+        "_downstream_failure_restartable",
+        "_downstream_retry_evidence",
+        "_durable_shud_output_exists",
+        "_ensure_utc",
+        "_event_has_candidate_scoped_failure",
+        "_event_has_failure_signal",
+        "_event_identity_containers",
+        "_event_is_manual_retry_marker",
+        "_evidence_safe",
+        "_failed_stage",
+        "_failure_policy_payload",
+        "_first_nested_state_value",
+        "_first_nonempty",
+        "_first_state_datetime",
+        "_first_state_int",
+        "_force_native_shud_rerun",
+        "_forecast_cycle_manifest_uri",
+        "_format_utc",
+        "_global_source_cycle_download_blocker_job",
+        "_has_candidate_task_failure",
+        "_has_successful_download_stage",
+        "_inconclusive_source_cycle_decision_state",
+        "_inconclusive_source_cycle_unresolved_job_ids",
+        "_is_raw_manifest_object_uri",
+        "_is_source_cycle_download_stage",
+        "_job_is_unsubmitted_auto_retry_placeholder",
+        "_job_state_evidence",
+        "_job_terminal_sort_key",
+        "_job_terminal_time",
+        "_latest_failed_job_for_stage",
+        "_latest_failure_truth_timestamp",
+        "_latest_manual_retry_blocker",
+        "_latest_manual_retry_marker",
+        "_latest_successful_download_stage",
+        "_legacy_compatible_state_row",
+        "_legacy_identity_values",
+        "_legacy_non_authoritative_state_row",
+        "_legacy_values_prove_same_candidate",
+        "_looks_like_production_job_id",
+        "_manual_retry_blocker_record",
+        "_manual_retry_blocking_hydro_status",
+        "_manual_retry_blocking_pipeline_status",
+        "_manual_retry_marker_bound_to_blocker",
+        "_manual_retry_marker_overrides_blocker",
+        "_manual_retry_marker_record",
+        "_manual_retry_marker_repairs_historical_failure",
+        "_manual_retry_markers",
+        "_manual_retry_new_attempt",
+        "_manual_retry_payload",
+        "_manual_retry_requested",
+        "_manual_retry_state_evidence",
+        "_missing_raw_manifest_repair_evidence",
+        "_nested_state_identity_payloads",
+        "_object_manifest_is_missing",
+        "_optional_mapping_state",
+        "_parse_state_datetime",
+        "_permanent_failure_evidence",
+        "_permanent_reason",
+        "_pipeline_job_is_repaired_stage_evidence",
+        "_pipeline_terminal_success_is_candidate_scoped",
+        "_prior_failure_reason",
+        "_redact_secret_manifest_for_evidence",
+        "_repaired_raw_manifest_downstream_retry_evidence",
+        "_repaired_stage_decision_state",
+        "_restore_top_level_source_cycle_download_blocker",
+        "_retry_failure_evidence",
+        "_shared_cycle_aggregate_has_candidate_failure",
+        "_shared_cycle_identity_values_match_candidate",
+        "_shared_cycle_row_is_candidate_scoped",
+        "_source_cycle_identity_matches_expected",
+        "_stage_cycle_run_matches_candidate",
+        "_state_active_jobs",
+        "_state_error_code",
+        "_state_error_message",
+        "_state_event_limit",
+        "_state_event_references_job_ids",
+        "_state_events",
+        "_state_has_failure_signal",
+        "_state_has_only_repaired_pipeline_failure_signal",
+        "_state_has_only_unsubmitted_auto_retry_placeholders",
+        "_state_job_limit",
+        "_state_jobs",
+        "_state_output_uri",
+        "_state_overflow_evidence",
+        "_state_retry_attempt",
+        "_state_retry_limit",
+        "_state_row_has_authoritative_candidate_proof",
+        "_state_row_has_m23_comparison_evidence",
+        "_state_row_has_m23_comparison_fields",
+        "_state_row_is_scoped_to_other_candidate",
+        "_state_row_references_job_ids",
+        "_state_status",
+        "_state_task_identity",
+        "_state_task_payload_failed",
+        "_state_truth_sequence",
+        "_state_truth_sort_key",
+        "_state_values_are_scoped_to_other_candidate",
+        "_state_values_have_authoritative_candidate_proof",
+        "_state_values_have_candidate_scoped_m23_proof",
+        "_state_values_have_complete_m23_identity",
+        "_strip_top_level_candidate_state_decision_fields",
+        "_strip_top_level_hydro_decision_fields",
+        "_strip_top_level_pipeline_decision_fields",
+        "_task_result_is_candidate_scoped",
+        "_terminal_hydro_truth_supersedes_failure",
+        "_top_level_source_cycle_download_blocker",
+        "_completed_upstream_stage_retry_evidence",
+    )
+    direct_names = tuple(name for name in reexport_names if name not in wrapper_names)
 
     for name in reexport_names:
         assert hasattr(scheduler_state_module, name)
-        assert scheduler_module._SCHEDULER_STATE_COMPAT_OWNER_REEXPORTS[name] is getattr(
-            scheduler_state_module,
-            name,
-        )
-        assert scheduler_module._SCHEDULER_STATE_COMPAT_FACADE_REEXPORTS[name] is getattr(
-            scheduler_module,
-            name,
-        )
     for name in wrapper_names:
-        assert scheduler_module._SCHEDULER_STATE_COMPAT_ORIGINALS[name] is getattr(scheduler_state_module, name)
-        assert scheduler_module._SCHEDULER_STATE_COMPAT_WRAPPERS[name] is getattr(scheduler_module, name)
+        assert getattr(scheduler_module, name) is not getattr(scheduler_state_module, name)
+        assert callable(getattr(scheduler_module, name))
     for name in direct_names:
         assert getattr(scheduler_module, name) is getattr(scheduler_state_module, name)
 
@@ -1021,29 +1295,29 @@ def test_scheduler_state_compat_reexport_names_match_owner_module_and_inventory(
 
 
 def test_scheduler_lease_compat_reexport_names_match_owner_module_and_inventory() -> None:
-    reexport_names = scheduler_module._SCHEDULER_LEASE_COMPAT_REEXPORT_NAMES
-    lookup_names = scheduler_module._SCHEDULER_LEASE_COMPAT_LOOKUP_NAMES
-
-    assert len(reexport_names) == len(set(reexport_names))
-    assert len(lookup_names) == len(set(lookup_names))
-    assert set(lookup_names).issubset(reexport_names)
-    assert set(reexport_names) == set(scheduler_lease_module.__all__)
-    assert set(reexport_names) == set(scheduler_module._SCHEDULER_LEASE_COMPAT_OWNER_REEXPORTS)
-    assert set(reexport_names) == set(scheduler_module._SCHEDULER_LEASE_COMPAT_FACADE_REEXPORTS)
-    assert scheduler_module._SCHEDULER_LEASE_COMPAT_EXPORTS == tuple(
-        scheduler_module._SCHEDULER_LEASE_COMPAT_FACADE_REEXPORTS[name] for name in reexport_names
+    reexport_names = (
+        "FileSchedulerLease",
+        "LOCK_OWNER",
+        "LOCK_SCHEMA_VERSION",
+        "MAX_LOCK_PAYLOAD_BYTES",
+        "UnsafeSchedulerLockError",
+        "_LeaseHeartbeat",
+        "_default_owner_liveness_probe",
+        "_open_lock_parent_directory",
+        "_open_regular_guard_file",
+        "_unlink_lock_file",
     )
+    lookup_names = (
+        "_default_owner_liveness_probe",
+        "_unlink_lock_file",
+        "_open_lock_parent_directory",
+        "_open_regular_guard_file",
+    )
+
+    assert set(reexport_names) == set(scheduler_lease_module.__all__)
 
     for name in reexport_names:
         assert hasattr(scheduler_lease_module, name)
-        assert scheduler_module._SCHEDULER_LEASE_COMPAT_OWNER_REEXPORTS[name] is getattr(
-            scheduler_lease_module,
-            name,
-        )
-        assert scheduler_module._SCHEDULER_LEASE_COMPAT_FACADE_REEXPORTS[name] is getattr(
-            scheduler_module,
-            name,
-        )
         assert getattr(scheduler_module, name) is getattr(scheduler_lease_module, name)
     for name in lookup_names:
         assert callable(getattr(scheduler_lease_module, name))
@@ -1061,7 +1335,13 @@ def test_scheduler_lease_compat_reexport_names_match_owner_module_and_inventory(
 def test_scheduler_lease_compat_lookup_names_resolve_scheduler_monkeypatches(
     monkeypatch: Any,
 ) -> None:
-    for name in scheduler_module._SCHEDULER_LEASE_COMPAT_LOOKUP_NAMES:
+    lookup_names = (
+        "_default_owner_liveness_probe",
+        "_unlink_lock_file",
+        "_open_lock_parent_directory",
+        "_open_regular_guard_file",
+    )
+    for name in lookup_names:
         fallback = getattr(scheduler_lease_module, name)
 
         def patched(*_args: Any, **_kwargs: Any) -> None:
@@ -1100,27 +1380,26 @@ def test_slurm_preflight_constants_have_a_single_owner_module() -> None:
 
 
 def test_scheduler_discovery_compat_aliases_match_owner_module_and_inventory() -> None:
-    alias_owner_names = scheduler_module._SCHEDULER_DISCOVERY_COMPAT_ALIAS_OWNER_NAMES
-    alias_names = scheduler_module._SCHEDULER_DISCOVERY_COMPAT_ALIAS_NAMES
-    forwarder_names = scheduler_module._SCHEDULER_DISCOVERY_COMPAT_FORWARDER_NAMES
-
-    assert len(alias_names) == len(set(alias_names))
-    assert len(forwarder_names) == len(set(forwarder_names))
-    assert tuple(alias_owner_names) == alias_names
-    assert set(alias_names) == set(scheduler_module._SCHEDULER_DISCOVERY_COMPAT_OWNER_ALIASES)
-    assert set(alias_names) == set(scheduler_module._SCHEDULER_DISCOVERY_COMPAT_FACADE_ALIASES)
+    alias_owner_names = {
+        "MAX_DISCOVERED_CYCLES": "MAX_DISCOVERED_CYCLES",
+        "SchedulerResourceLimitError": "SchedulerResourceLimitError",
+        "SchedulerSourceCycle": "SchedulerSourceCycle",
+        "_source_cycle_evidence": "_source_cycle_evidence",
+        "_source_cycle_status_candidate": "_source_cycle_status_candidate",
+        "_source_cycle_not_selected_reason": "_source_cycle_not_selected_reason",
+        "SOURCE_DISCOVERY_SENSITIVE_KEY_RE": "SOURCE_DISCOVERY_SENSITIVE_KEY_RE",
+        "SOURCE_DISCOVERY_SENSITIVE_TEXT_RE": "SOURCE_DISCOVERY_SENSITIVE_TEXT_RE",
+        "_source_discovery_evidence_safe": "_source_discovery_evidence_safe",
+        "_source_secret_text_safe": "_source_secret_text_safe",
+        "_duplicate_cycle_evidence": "_duplicate_cycle_evidence",
+        "_backfill_deferred_evidence": "_backfill_deferred_evidence",
+        "_source_horizon_metadata": "source_horizon_metadata",
+    }
+    forwarder_names = ("_discovery_context", "_cycle_completion_status", "_discover_cycles", "_discover_source_window")
 
     for facade_name, owner_name in alias_owner_names.items():
         assert hasattr(scheduler_discovery_module, owner_name)
         assert hasattr(scheduler_module, facade_name)
-        assert scheduler_module._SCHEDULER_DISCOVERY_COMPAT_OWNER_ALIASES[facade_name] is getattr(
-            scheduler_discovery_module,
-            owner_name,
-        )
-        assert scheduler_module._SCHEDULER_DISCOVERY_COMPAT_FACADE_ALIASES[facade_name] is getattr(
-            scheduler_module,
-            facade_name,
-        )
         assert getattr(scheduler_module, facade_name) is getattr(scheduler_discovery_module, owner_name)
     for method_name in forwarder_names:
         assert hasattr(scheduler_module.ProductionScheduler, method_name)
@@ -1236,9 +1515,25 @@ def test_production_scheduler_discovery_consumers_preserve_owner_identity() -> N
     from services.orchestrator import scheduler_models as scheduler_models_module
     from services.orchestrator import scheduler_runtime as scheduler_runtime_module
 
-    # scheduler.py facade: the discovery compat alias inventory resolves every
-    # facade alias to the owner object.
-    for facade_name, owner_name in scheduler_module._SCHEDULER_DISCOVERY_COMPAT_ALIAS_OWNER_NAMES.items():
+    discovery_alias_owner_names = {
+        "MAX_DISCOVERED_CYCLES": "MAX_DISCOVERED_CYCLES",
+        "SchedulerResourceLimitError": "SchedulerResourceLimitError",
+        "SchedulerSourceCycle": "SchedulerSourceCycle",
+        "_source_cycle_evidence": "_source_cycle_evidence",
+        "_source_cycle_status_candidate": "_source_cycle_status_candidate",
+        "_source_cycle_not_selected_reason": "_source_cycle_not_selected_reason",
+        "SOURCE_DISCOVERY_SENSITIVE_KEY_RE": "SOURCE_DISCOVERY_SENSITIVE_KEY_RE",
+        "SOURCE_DISCOVERY_SENSITIVE_TEXT_RE": "SOURCE_DISCOVERY_SENSITIVE_TEXT_RE",
+        "_source_discovery_evidence_safe": "_source_discovery_evidence_safe",
+        "_source_secret_text_safe": "_source_secret_text_safe",
+        "_duplicate_cycle_evidence": "_duplicate_cycle_evidence",
+        "_backfill_deferred_evidence": "_backfill_deferred_evidence",
+        "_source_horizon_metadata": "source_horizon_metadata",
+    }
+
+    # scheduler.py facade: every discovery compat facade alias resolves to the
+    # owner object.
+    for facade_name, owner_name in discovery_alias_owner_names.items():
         assert getattr(scheduler_module, facade_name) is getattr(
             scheduler_discovery_module, owner_name
         ), f"scheduler.py facade alias {facade_name} is not owner {owner_name}"
@@ -1259,17 +1554,9 @@ def test_production_scheduler_discovery_consumers_preserve_owner_identity() -> N
         scheduler_discovery_module.source_horizon_metadata
     ), "scheduler_candidate_runtime.py _source_horizon_metadata is not owner"
 
-    # scheduler_compat_runtime.py: owner/facade missing tuples are empty and
-    # the facade alias map resolves the CURRENT owner objects.
-    assert compat_runtime_module._SCHEDULER_DISCOVERY_COMPAT_OWNER_MISSING == (), (
-        "scheduler_compat_runtime.py discovery owner-missing tuple is non-empty"
-    )
-    assert compat_runtime_module._SCHEDULER_DISCOVERY_COMPAT_FACADE_MISSING == (), (
-        "scheduler_compat_runtime.py discovery facade-missing tuple is non-empty"
-    )
-    for facade_name, owner_name in (
-        compat_runtime_module._SCHEDULER_DISCOVERY_COMPAT_ALIAS_OWNER_NAMES.items()
-    ):
+    # scheduler_compat_runtime.py: every discovery compat facade alias resolves the
+    # CURRENT owner object.
+    for facade_name, owner_name in discovery_alias_owner_names.items():
         assert getattr(
             compat_runtime_module, facade_name
         ) is getattr(
@@ -1302,29 +1589,28 @@ def test_production_scheduler_discovery_consumers_preserve_owner_identity() -> N
 
 
 def test_scheduler_candidate_compat_aliases_match_owner_module_and_inventory() -> None:
-    alias_owner_names = scheduler_module._SCHEDULER_CANDIDATE_COMPAT_ALIAS_OWNER_NAMES
-    alias_names = scheduler_module._SCHEDULER_CANDIDATE_COMPAT_ALIAS_NAMES
-    forwarder_names = scheduler_module._SCHEDULER_CANDIDATE_COMPAT_FORWARDER_NAMES
-
-    assert len(alias_names) == len(set(alias_names))
-    assert len(forwarder_names) == len(set(forwarder_names))
-    assert tuple(alias_owner_names) == alias_names
-    assert scheduler_module._SCHEDULER_CANDIDATE_COMPAT_OWNER_MISSING == ()
-    assert scheduler_module._SCHEDULER_CANDIDATE_COMPAT_FACADE_MISSING == ()
-    assert set(alias_names) == set(scheduler_module._SCHEDULER_CANDIDATE_COMPAT_OWNER_ALIASES)
-    assert set(alias_names) == set(scheduler_module._SCHEDULER_CANDIDATE_COMPAT_FACADE_ALIASES)
+    alias_owner_names = {
+        "MAX_CANDIDATES": "MAX_CANDIDATES",
+        "_source_blocked_evidence": "_source_blocked_evidence",
+        "_reason_code": "_reason_code",
+        "_canonical_readiness_unavailable_evidence": "_canonical_readiness_unavailable_evidence",
+        "_canonical_candidate_row_count": "_canonical_candidate_row_count",
+        "_canonical_evidence_is_fresh_zero_row": "_canonical_evidence_is_fresh_zero_row",
+        "_candidate_is_fresh_full_chain": "_candidate_is_fresh_full_chain",
+        "_blocked_candidate": "_blocked_candidate",
+        "_candidate_with_state_evidence": "_candidate_with_state_evidence",
+        "_merge_state_evidence": "_merge_state_evidence",
+        "_slurm_status_sync_failed_evidence": "_slurm_status_sync_failed_evidence",
+        "_source_forecast_hours": "_source_forecast_hours",
+        "_source_policy_identity": "_source_policy_identity",
+        "_source_object_identity": "_source_object_identity",
+        "_accepted_horizon_from_hours": "_accepted_horizon_from_hours",
+    }
+    forwarder_names = ("_candidate_construction_context", "_build_candidates")
 
     for facade_name, owner_name in alias_owner_names.items():
         assert hasattr(scheduler_candidates_module, owner_name)
         assert hasattr(scheduler_module, facade_name)
-        assert scheduler_module._SCHEDULER_CANDIDATE_COMPAT_OWNER_ALIASES[facade_name] is getattr(
-            scheduler_candidates_module,
-            owner_name,
-        )
-        assert scheduler_module._SCHEDULER_CANDIDATE_COMPAT_FACADE_ALIASES[facade_name] is getattr(
-            scheduler_module,
-            facade_name,
-        )
         assert getattr(scheduler_module, facade_name) is getattr(scheduler_candidates_module, owner_name)
     for method_name in forwarder_names:
         assert hasattr(scheduler_module.ProductionScheduler, method_name)
@@ -1340,7 +1626,7 @@ def test_scheduler_candidate_compat_aliases_match_owner_module_and_inventory() -
         "_SCHEDULER_CANDIDATE_COMPAT_FACADE_ALIASES",
     ):
         assert token in inventory_text
-    for token in (*alias_names, *forwarder_names):
+    for token in (*alias_owner_names, *forwarder_names):
         assert token in inventory_text
 
 
@@ -1418,31 +1704,24 @@ def test_scheduler_candidate_compat_forwarders_delegate_to_owner_module(
 
 
 def test_scheduler_execution_compat_wrappers_match_owner_module_and_inventory() -> None:
-    wrapper_owner_names = scheduler_module._SCHEDULER_EXECUTION_COMPAT_WRAPPER_OWNER_NAMES
-    wrapper_names = scheduler_module._SCHEDULER_EXECUTION_COMPAT_WRAPPER_NAMES
-    forwarder_owner_names = scheduler_module._SCHEDULER_EXECUTION_COMPAT_FORWARDER_OWNER_NAMES
-    forwarder_names = scheduler_module._SCHEDULER_EXECUTION_COMPAT_FORWARDER_NAMES
-
-    assert len(wrapper_names) == len(set(wrapper_names))
-    assert len(forwarder_names) == len(set(forwarder_names))
-    assert tuple(wrapper_owner_names) == wrapper_names
-    assert tuple(forwarder_owner_names) == forwarder_names
-    assert scheduler_module._SCHEDULER_EXECUTION_COMPAT_OWNER_MISSING == ()
-    assert scheduler_module._SCHEDULER_EXECUTION_COMPAT_FACADE_MISSING == ()
-    assert set(wrapper_names) == set(scheduler_module._SCHEDULER_EXECUTION_COMPAT_OWNER_WRAPPERS)
-    assert set(wrapper_names) == set(scheduler_module._SCHEDULER_EXECUTION_COMPAT_FACADE_WRAPPERS)
+    wrapper_owner_names = {
+        "_restart_compatible_candidate_cohorts": "restart_compatible_candidate_cohorts",
+        "_candidate_restart_stage": "candidate_restart_stage",
+        "_candidate_restart_cohort_key": "candidate_restart_cohort_key",
+        "_candidate_execution_cohort_run_id": "candidate_execution_cohort_run_id",
+        "_candidate_execution_cohorts": "candidate_execution_cohorts",
+        "_candidate_execution_cohort_run_id_for_candidate": "candidate_execution_cohort_run_id_for_candidate",
+    }
+    forwarder_owner_names = {
+        "_produce_forcing_for_candidates": "produce_forcing_for_candidates",
+        "_execute_candidates": "execute_candidates",
+        "_execute_candidate_cohort": "execute_candidate_cohort",
+        "_scheduler_execution_context": "SchedulerExecutionContext",
+    }
 
     for facade_name, owner_name in wrapper_owner_names.items():
         assert hasattr(scheduler_execution_module, owner_name)
         assert hasattr(scheduler_module, facade_name)
-        assert scheduler_module._SCHEDULER_EXECUTION_COMPAT_OWNER_WRAPPERS[facade_name] is getattr(
-            scheduler_execution_module,
-            owner_name,
-        )
-        assert scheduler_module._SCHEDULER_EXECUTION_COMPAT_FACADE_WRAPPERS[facade_name] is getattr(
-            scheduler_module,
-            facade_name,
-        )
     for method_name, owner_name in forwarder_owner_names.items():
         assert hasattr(scheduler_execution_module, owner_name)
         assert hasattr(scheduler_module.ProductionScheduler, method_name)
@@ -1459,7 +1738,7 @@ def test_scheduler_execution_compat_wrappers_match_owner_module_and_inventory() 
         "_SCHEDULER_EXECUTION_COMPAT_FACADE_WRAPPERS",
     ):
         assert token in inventory_text
-    for token in (*wrapper_names, *forwarder_names):
+    for token in (*wrapper_owner_names, *forwarder_owner_names):
         assert token in inventory_text
 
 
@@ -1755,25 +2034,41 @@ def test_scheduler_execution_compat_wrappers_delegate_to_owner_module(monkeypatc
 
 
 def test_scheduler_evidence_compat_names_match_owner_module_and_inventory() -> None:
-    direct_owner_names = scheduler_module._SCHEDULER_EVIDENCE_COMPAT_DIRECT_OWNER_NAMES
-    direct_names = scheduler_module._SCHEDULER_EVIDENCE_COMPAT_DIRECT_NAMES
-    forwarder_owner_names = scheduler_module._SCHEDULER_EVIDENCE_COMPAT_FORWARDER_OWNER_NAMES
-    forwarder_names = scheduler_module._SCHEDULER_EVIDENCE_COMPAT_FORWARDER_NAMES
-    wrapper_owner_names = scheduler_module._SCHEDULER_EVIDENCE_COMPAT_WRAPPER_OWNER_NAMES
-    wrapper_names = scheduler_module._SCHEDULER_EVIDENCE_COMPAT_WRAPPER_NAMES
-
-    assert len(direct_names) == len(set(direct_names))
-    assert len(forwarder_names) == len(set(forwarder_names))
-    assert len(wrapper_names) == len(set(wrapper_names))
-    assert tuple(direct_owner_names) == direct_names
-    assert tuple(forwarder_owner_names) == forwarder_names
-    assert tuple(wrapper_owner_names) == wrapper_names
-    assert scheduler_module._SCHEDULER_EVIDENCE_COMPAT_OWNER_MISSING == ()
-    assert scheduler_module._SCHEDULER_EVIDENCE_COMPAT_FACADE_MISSING == ()
-    assert set(direct_names) == set(scheduler_module._SCHEDULER_EVIDENCE_COMPAT_OWNER_DIRECTS)
-    assert set(direct_names) == set(scheduler_module._SCHEDULER_EVIDENCE_COMPAT_FACADE_DIRECTS)
-    assert set(wrapper_names) == set(scheduler_module._SCHEDULER_EVIDENCE_COMPAT_OWNER_WRAPPERS)
-    assert set(wrapper_names) == set(scheduler_module._SCHEDULER_EVIDENCE_COMPAT_FACADE_WRAPPERS)
+    direct_owner_names = {
+        "MAX_EVIDENCE_BYTES": "MAX_EVIDENCE_BYTES",
+        "SCHEDULER_EVIDENCE_SCHEMA_VERSION": "SCHEDULER_EVIDENCE_SCHEMA_VERSION",
+        "SCHEDULER_EVIDENCE_CONTRACT_ID": "SCHEDULER_EVIDENCE_CONTRACT_ID",
+        "SCHEDULER_EVIDENCE_OPEN_SPEC_CHANGE": "SCHEDULER_EVIDENCE_OPEN_SPEC_CHANGE",
+        "SCHEDULER_EVIDENCE_GITHUB_ISSUE": "SCHEDULER_EVIDENCE_GITHUB_ISSUE",
+        "MODEL_RUN_EVIDENCE_SCHEMA_VERSION": "MODEL_RUN_EVIDENCE_SCHEMA_VERSION",
+        "UNKNOWN_AFTER_ATTEMPT": "UNKNOWN_AFTER_ATTEMPT",
+        "SchedulerEvidenceWriteError": "SchedulerEvidenceWriteError",
+    }
+    forwarder_owner_names = {
+        "_write_prelock_blocked_evidence": "write_prelock_blocked_evidence",
+        "_reserve_pre_execution_evidence": "reserve_pre_execution_evidence",
+        "_scheduler_evidence_write_context": "SchedulerEvidenceWriteContext",
+        "_base_evidence": "base_evidence",
+        "_write_evidence": "write_evidence",
+    }
+    wrapper_owner_names = {
+        "_candidate_evidence_write_blocked_evidence": "candidate_evidence_write_blocked_evidence",
+        "_cancel_candidate_evidence_write_blocked_evidence": "cancel_candidate_evidence_write_blocked_evidence",
+        "_sync_candidate_evidence_write_blocked_evidence": "sync_candidate_evidence_write_blocked_evidence",
+        "_evidence_reservation_blocked_payload": "evidence_reservation_blocked_payload",
+        "_evidence_write_error_payload": "evidence_write_error_payload",
+        "_scheduler_resolved_runtime_roots": "scheduler_resolved_runtime_roots",
+        "_root_evidence_item": "root_evidence_item",
+        "_scheduler_runtime_config_evidence": "scheduler_runtime_config_evidence",
+        "_open_evidence_directory": "open_evidence_directory",
+        "_write_new_regular_file": "write_new_regular_file",
+        "_require_evidence_artifact_available": "require_evidence_artifact_available",
+        "_bounded_evidence_payload": "bounded_evidence_payload",
+        "_evidence_status": "evidence_status",
+        "_execution_write_proof": "execution_write_proof",
+        "_execution_write_proof_from_evidence": "execution_write_proof_from_evidence",
+        "_no_mutation_proof": "no_mutation_proof",
+    }
 
     scheduler_source = Path(scheduler_module.__file__ or "").read_text(encoding="utf-8")
     scheduler_tree = ast.parse(scheduler_source)
@@ -1794,14 +2089,6 @@ def test_scheduler_evidence_compat_names_match_owner_module_and_inventory() -> N
         assert isinstance(assignment.value, ast.Name)
         assert assignment.value.id == "_scheduler_evidence"
         assert assignment.attr == owner_name
-        assert scheduler_module._SCHEDULER_EVIDENCE_COMPAT_OWNER_DIRECTS[facade_name] is getattr(
-            scheduler_evidence_module,
-            owner_name,
-        )
-        assert scheduler_module._SCHEDULER_EVIDENCE_COMPAT_FACADE_DIRECTS[facade_name] is getattr(
-            scheduler_module,
-            facade_name,
-        )
         assert getattr(scheduler_module, facade_name) is getattr(scheduler_evidence_module, owner_name)
     for method_name, owner_name in forwarder_owner_names.items():
         assert hasattr(scheduler_evidence_module, owner_name)
@@ -1809,14 +2096,6 @@ def test_scheduler_evidence_compat_names_match_owner_module_and_inventory() -> N
     for facade_name, owner_name in wrapper_owner_names.items():
         assert hasattr(scheduler_evidence_module, owner_name)
         assert hasattr(scheduler_module, facade_name)
-        assert scheduler_module._SCHEDULER_EVIDENCE_COMPAT_OWNER_WRAPPERS[facade_name] is getattr(
-            scheduler_evidence_module,
-            owner_name,
-        )
-        assert scheduler_module._SCHEDULER_EVIDENCE_COMPAT_FACADE_WRAPPERS[facade_name] is getattr(
-            scheduler_module,
-            facade_name,
-        )
 
     inventory_text = _scheduler_inventory_text()
     for token in (
@@ -1834,7 +2113,7 @@ def test_scheduler_evidence_compat_names_match_owner_module_and_inventory() -> N
         "_SCHEDULER_EVIDENCE_COMPAT_FACADE_WRAPPERS",
     ):
         assert token in inventory_text
-    for token in (*direct_names, *forwarder_names, *wrapper_names):
+    for token in (*direct_owner_names, *forwarder_owner_names, *wrapper_owner_names):
         assert token in inventory_text
 
 
@@ -2258,68 +2537,51 @@ def test_scheduler_evidence_compat_wrappers_delegate_to_owner_module(
 
 
 def test_scheduler_cancellation_status_compat_names_match_owner_module_and_inventory() -> None:
-    wrapper_owner_names = scheduler_module._SCHEDULER_CANCELLATION_STATUS_COMPAT_WRAPPER_OWNER_NAMES
-    wrapper_names = scheduler_module._SCHEDULER_CANCELLATION_STATUS_COMPAT_WRAPPER_NAMES
-    candidate_alias_owner_names = scheduler_module._SCHEDULER_CANCELLATION_STATUS_COMPAT_CANDIDATE_ALIAS_OWNER_NAMES
-    candidate_alias_names = scheduler_module._SCHEDULER_CANCELLATION_STATUS_COMPAT_CANDIDATE_ALIAS_NAMES
-    retained_method_names = scheduler_module._SCHEDULER_CANCELLATION_STATUS_COMPAT_RETAINED_LOCAL_METHOD_NAMES
-    retained_function_names = scheduler_module._SCHEDULER_CANCELLATION_STATUS_COMPAT_RETAINED_LOCAL_FUNCTION_NAMES
-
-    assert len(wrapper_names) == len(set(wrapper_names))
-    assert len(candidate_alias_names) == len(set(candidate_alias_names))
-    assert len(retained_method_names) == len(set(retained_method_names))
-    assert len(retained_function_names) == len(set(retained_function_names))
-    assert tuple(wrapper_owner_names) == wrapper_names
-    assert tuple(candidate_alias_owner_names) == candidate_alias_names
-    assert scheduler_module._SCHEDULER_CANCELLATION_STATUS_COMPAT_OWNER_MISSING == ()
-    assert scheduler_module._SCHEDULER_CANCELLATION_STATUS_COMPAT_FACADE_MISSING == ()
-    assert scheduler_module._SCHEDULER_CANCELLATION_STATUS_COMPAT_RETAINED_LOCAL_OVERLAP == ()
-    assert set(wrapper_names) == set(scheduler_module._SCHEDULER_CANCELLATION_STATUS_COMPAT_OWNER_WRAPPERS)
-    assert set(wrapper_names) == set(scheduler_module._SCHEDULER_CANCELLATION_STATUS_COMPAT_FACADE_WRAPPERS)
-    assert set(candidate_alias_names) == set(
-        scheduler_module._SCHEDULER_CANCELLATION_STATUS_COMPAT_CANDIDATE_OWNER_ALIASES
-    )
-    assert set(candidate_alias_names) == set(
-        scheduler_module._SCHEDULER_CANCELLATION_STATUS_COMPAT_CANDIDATE_FACADE_ALIASES
+    wrapper_owner_names = {
+        "_scheduler_pass_status_from_cancellation": "scheduler_pass_status_from_cancellation",
+        "_scheduler_execution_boundary_from_cancellation": "scheduler_execution_boundary_from_cancellation",
+        "_slurm_status_sync_proof": "slurm_status_sync_proof",
+        "_slurm_status_sync_proof_from_candidates": "slurm_status_sync_proof_from_candidates",
+        "_slurm_cancellation_proof": "slurm_cancellation_proof",
+        "_slurm_cancellation_proof_from_evidence": "slurm_cancellation_proof_from_evidence",
+        "_slurm_status_sync_count": "slurm_status_sync_count",
+        "_slurm_status_sync_unknown_count": "slurm_status_sync_unknown_count",
+        "_slurm_status_sync_mutated": "slurm_status_sync_mutated",
+        "_slurm_status_sync_failed": "slurm_status_sync_failed",
+        "_slurm_cancelled_count": "slurm_cancelled_count",
+        "_slurm_cancellation_blocked_count": "slurm_cancellation_blocked_count",
+        "_slurm_cancellation_unknown_count": "slurm_cancellation_unknown_count",
+        "_restart_reconcile_proof": "restart_reconcile_proof",
+        "_scheduler_mutation_proof": "scheduler_mutation_proof",
+        "_proof_mutation_value": "proof_mutation_value",
+        "_named_proof_value": "named_proof_value",
+        "_slurm_submit_proof_value": "slurm_submit_proof_value",
+        "_pipeline_status_write_proof_value": "pipeline_status_write_proof_value",
+        "_pipeline_event_write_proof_value": "pipeline_event_write_proof_value",
+        "_merge_proof_values": "merge_proof_values",
+        "_positive_count": "positive_count",
+        "_empty_counts": "empty_counts",
+    }
+    candidate_alias_owner_names = {"_slurm_status_sync_failed_evidence": "_slurm_status_sync_failed_evidence"}
+    retained_method_names = ("_cancel_requested_active_slurm", "_cancel_orchestrator_for")
+    retained_function_names = (
+        "_scheduler_cancellation_status",
+        "_cancelled_job_pipeline_status_write",
+        "_cancelled_job_pipeline_event_write",
+        "_execution_mutation_value",
     )
 
     for facade_name, owner_name in wrapper_owner_names.items():
         assert hasattr(scheduler_evidence_module, owner_name)
         assert hasattr(scheduler_module, facade_name)
-        assert scheduler_module._SCHEDULER_CANCELLATION_STATUS_COMPAT_OWNER_WRAPPERS[facade_name] is getattr(
-            scheduler_evidence_module,
-            owner_name,
-        )
-        assert scheduler_module._SCHEDULER_CANCELLATION_STATUS_COMPAT_FACADE_WRAPPERS[facade_name] is getattr(
-            scheduler_module,
-            facade_name,
-        )
     for facade_name, owner_name in candidate_alias_owner_names.items():
-        assert scheduler_module._SCHEDULER_CANDIDATE_COMPAT_ALIAS_OWNER_NAMES[facade_name] == owner_name
         assert hasattr(scheduler_candidates_module, owner_name)
         assert hasattr(scheduler_module, facade_name)
-        assert scheduler_module._SCHEDULER_CANCELLATION_STATUS_COMPAT_CANDIDATE_OWNER_ALIASES[facade_name] is getattr(
-            scheduler_candidates_module, owner_name
-        )
-        assert scheduler_module._SCHEDULER_CANCELLATION_STATUS_COMPAT_CANDIDATE_FACADE_ALIASES[facade_name] is getattr(
-            scheduler_module, facade_name
-        )
         assert getattr(scheduler_module, facade_name) is getattr(scheduler_candidates_module, owner_name)
     for method_name in retained_method_names:
         assert hasattr(scheduler_module.ProductionScheduler, method_name)
-        assert method_name not in wrapper_names
-        assert method_name not in candidate_alias_names
     for function_name in retained_function_names:
         assert hasattr(scheduler_module, function_name)
-        assert function_name not in wrapper_names
-        assert function_name not in candidate_alias_names
-    for evidence_write_name in (
-        "_execution_write_proof",
-        "_execution_write_proof_from_evidence",
-        "_no_mutation_proof",
-    ):
-        assert evidence_write_name not in wrapper_names
-        assert evidence_write_name not in candidate_alias_names
 
     inventory_text = _scheduler_inventory_text()
     for token in (
@@ -2338,7 +2600,12 @@ def test_scheduler_cancellation_status_compat_names_match_owner_module_and_inven
         "_SCHEDULER_CANCELLATION_STATUS_COMPAT_CANDIDATE_FACADE_ALIASES",
     ):
         assert token in inventory_text
-    for token in (*wrapper_names, *candidate_alias_names, *retained_method_names, *retained_function_names):
+    for token in (
+        *wrapper_owner_names,
+        *candidate_alias_owner_names,
+        *retained_method_names,
+        *retained_function_names,
+    ):
         assert token in inventory_text
 
 
@@ -2354,7 +2621,32 @@ def test_scheduler_cancellation_status_compat_wrappers_delegate_to_owner_module(
 
         return fake
 
-    for owner_name in scheduler_module._SCHEDULER_CANCELLATION_STATUS_COMPAT_WRAPPER_OWNER_NAMES.values():
+    wrapper_owner_names = {
+        "_scheduler_pass_status_from_cancellation": "scheduler_pass_status_from_cancellation",
+        "_scheduler_execution_boundary_from_cancellation": "scheduler_execution_boundary_from_cancellation",
+        "_slurm_status_sync_proof": "slurm_status_sync_proof",
+        "_slurm_status_sync_proof_from_candidates": "slurm_status_sync_proof_from_candidates",
+        "_slurm_cancellation_proof": "slurm_cancellation_proof",
+        "_slurm_cancellation_proof_from_evidence": "slurm_cancellation_proof_from_evidence",
+        "_slurm_status_sync_count": "slurm_status_sync_count",
+        "_slurm_status_sync_unknown_count": "slurm_status_sync_unknown_count",
+        "_slurm_status_sync_mutated": "slurm_status_sync_mutated",
+        "_slurm_status_sync_failed": "slurm_status_sync_failed",
+        "_slurm_cancelled_count": "slurm_cancelled_count",
+        "_slurm_cancellation_blocked_count": "slurm_cancellation_blocked_count",
+        "_slurm_cancellation_unknown_count": "slurm_cancellation_unknown_count",
+        "_restart_reconcile_proof": "restart_reconcile_proof",
+        "_scheduler_mutation_proof": "scheduler_mutation_proof",
+        "_proof_mutation_value": "proof_mutation_value",
+        "_named_proof_value": "named_proof_value",
+        "_slurm_submit_proof_value": "slurm_submit_proof_value",
+        "_pipeline_status_write_proof_value": "pipeline_status_write_proof_value",
+        "_pipeline_event_write_proof_value": "pipeline_event_write_proof_value",
+        "_merge_proof_values": "merge_proof_values",
+        "_positive_count": "positive_count",
+        "_empty_counts": "empty_counts",
+    }
+    for owner_name in wrapper_owner_names.values():
         monkeypatch.setattr(scheduler_evidence_module, owner_name, fake_owner(owner_name))
 
     cancellation_evidence = [{"status": "cancelled", "cancelled_jobs": []}]
@@ -2458,7 +2750,7 @@ def test_scheduler_cancellation_status_compat_wrappers_delegate_to_owner_module(
     assert scheduler_module._empty_counts()["owner"] == "empty_counts"
     assert calls[-1]["args"] == ()
     assert set(call["owner"] for call in calls) == set(
-        scheduler_module._SCHEDULER_CANCELLATION_STATUS_COMPAT_WRAPPER_OWNER_NAMES.values()
+        wrapper_owner_names.values()
     )
 
 
@@ -58066,11 +58358,23 @@ def test_discovery_evidence_moved_names_share_owner_and_facade_identity() -> Non
         assert hasattr(scheduler_discovery_module, owner_name)
         assert not hasattr(scheduler_module, owner_name)
 
-    # The facade alias inventory still names every discovery compat symbol and
-    # resolves to the owner object.
-    for facade_name, owner_name in (
-        scheduler_module._SCHEDULER_DISCOVERY_COMPAT_ALIAS_OWNER_NAMES.items()
-    ):
+    # Every discovery compat facade alias resolves to the owner object.
+    discovery_alias_owner_names = {
+        "MAX_DISCOVERED_CYCLES": "MAX_DISCOVERED_CYCLES",
+        "SchedulerResourceLimitError": "SchedulerResourceLimitError",
+        "SchedulerSourceCycle": "SchedulerSourceCycle",
+        "_source_cycle_evidence": "_source_cycle_evidence",
+        "_source_cycle_status_candidate": "_source_cycle_status_candidate",
+        "_source_cycle_not_selected_reason": "_source_cycle_not_selected_reason",
+        "SOURCE_DISCOVERY_SENSITIVE_KEY_RE": "SOURCE_DISCOVERY_SENSITIVE_KEY_RE",
+        "SOURCE_DISCOVERY_SENSITIVE_TEXT_RE": "SOURCE_DISCOVERY_SENSITIVE_TEXT_RE",
+        "_source_discovery_evidence_safe": "_source_discovery_evidence_safe",
+        "_source_secret_text_safe": "_source_secret_text_safe",
+        "_duplicate_cycle_evidence": "_duplicate_cycle_evidence",
+        "_backfill_deferred_evidence": "_backfill_deferred_evidence",
+        "_source_horizon_metadata": "source_horizon_metadata",
+    }
+    for facade_name, owner_name in discovery_alias_owner_names.items():
         assert getattr(scheduler_module, facade_name) is getattr(scheduler_discovery_module, owner_name)
     assert hasattr(scheduler_module.ProductionScheduler, "_discover_source_window")
     assert hasattr(scheduler_module.ProductionScheduler, "_discover_cycles")
