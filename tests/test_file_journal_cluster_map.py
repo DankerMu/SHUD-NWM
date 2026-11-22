@@ -20,7 +20,10 @@ Coverage follows the extraction (option a), so 5.2-5.5 leave this file
 unchanged: cluster ``c`` lives in ``services/orchestrator/file_journal_<c>.py``
 when that sibling exists and in the facade otherwise; every sibling's top-level
 names equal ``clusters[c]`` and the facade's equal ``clusters["facade"]`` plus
-every cluster that has no sibling yet.  Callers are collected from every host
+every cluster that has no sibling yet.  Every on-disk
+``services/orchestrator/file_journal_*.py`` must be the sibling of a registered
+cluster, so a new mixin module cannot escape these rules: it is registered by
+adding its cluster to ``CLUSTERS`` and to the map.  Callers are collected from every host
 file; inside a unit, an import of the facade module makes ``<alias>.<name>``
 anywhere in that unit's subtree (closures included) a reference.  A sibling
 must never bind a facade-resident patched name by import (top level or function
@@ -226,6 +229,12 @@ def coverage_problems(root: Path, cluster_map: Mapping[str, object]) -> list[str
     facade_actual = set(top_level_units(root, root / FACADE, sibling=False))
     owners = ", ".join(f"`{c}`" for c in ["facade", *pending])
     compare(root / FACADE, facade_actual, facade_expected, f"clusters {owners}")
+    registered = {sibling_path(root, c) for c in EXTRACTION_ORDER}
+    for path in sorted((root / "services" / "orchestrator").glob("file_journal_*.py")):
+        if path not in registered:
+            problems.append(
+                f"{_rel(root, path)}: file_journal sibling is not a registered cluster; add it to CLUSTERS and the map"
+            )
     return problems
 
 
@@ -950,3 +959,14 @@ def test_scanner_fails_loudly_on_a_non_literal_patch_name(tmp_path: Path) -> Non
         assert str(error).startswith("tests/test_dynamic.py:5: facade patch whose attribute name is not a str literal")
     else:
         raise AssertionError("a non-literal facade patch name must fail loudly")
+
+
+def test_synthetic_unregistered_sibling_is_reported(tmp_path: Path) -> None:
+    _write(tmp_path, FACADE, _FACADE_SRC)
+    _write(tmp_path, "services/orchestrator/file_journal_context.py", "def helper():\n    pass\n")
+    _write(tmp_path, "services/orchestrator/file_journal_newmixin.py", "class _NewMixin:\n    pass\n")
+    cluster_map = _synthetic_map(facade=["LIMIT", "Repository", "_stat_signature"], context=["helper"])
+    assert coverage_problems(tmp_path, cluster_map) == [
+        "services/orchestrator/file_journal_newmixin.py: file_journal sibling is not a registered cluster; "
+        "add it to CLUSTERS and the map"
+    ]
