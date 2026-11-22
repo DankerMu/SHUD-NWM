@@ -414,7 +414,7 @@ Slice triage (T1, #3264, tasks 8.1-8.3):
   - C (one-basin half): `retry_attempt_floor`. F: `cohort_retry_attempt_floors` + `member_charged_retry_attempt`. M: `split_retry_job_identity` / `retry_suffix_attempt` (stacked; malformed tail → attempt 0), `_next_retry_attempt_for_stage` with a minimal stage. N: `_retry_attempt_from_basins`. Q: `effective_retry_attempt`, `_next_current_master_retry_identity`.
   - `_pipeline_retry_job_id` (9.1): attempt 0 / -1 / 1 / 3 → `_retry_1` / `_retry_1` / `_retry_1` / `_retry_3`.
   - Stage attempt reads (9.3): `_state_retry_attempt` (`stage=None` → the flat `retry_count`; a stage set → the flat `retry_count` is excluded, only matching rows' suffixes and `stage_retry_attempt_floors` count, a non-matching stage row adds 0); `_stage_job_sort_key` (a persisted `retry_count` wins over the suffix; the suffix is parsed only when the count is missing; no clamp; `removesuffix("_retry_0")`; malformed tail → 0 — pinned as different from `effective_retry_attempt`'s max on the same input); `_job_retry_attempt` (stage None → recorded count only; non-matching stage → 0); `stage_retry_attempt_floors`.
-  - Limits (9.4): `DEFAULT_RETRY_LIMIT == 3`; `RetryConfig().max_retries == 3`; `_state_retry_limit` (`retry_limit` wins over `max_retries`; empty → `DEFAULT_RETRY_LIMIT`; non-int → 0); `NHMS_SCHEDULER_RETRY_LIMIT` unset / empty / non-int → 3, `5` → 5, `-1` → -1, at config construction; `SLURM_GATEWAY_MAX_RETRIES` unset → 3, `5` → 5, `-1` → validation error, through `RetryConfig.from_settings(SlurmGatewaySettings())`. Pinned divergences: `_state_retry_limit` non-int → 0 vs `_env_int` non-int → default; `-1` accepted by the scheduler env vs rejected by the gateway env; the two env vars independent (one set, the other unchanged).
+  - Limits (9.4): `DEFAULT_RETRY_LIMIT == 3`; `RetryConfig().max_retries == 3`; `_state_retry_limit` (`retry_limit` wins over `max_retries`; empty → `DEFAULT_RETRY_LIMIT`; non-int → 0); `NHMS_SCHEDULER_RETRY_LIMIT` unset / empty / non-int → 3, `5` → 5, `-1` → -1 from `_env_int` (`scheduler_runtime_roots.py:754`) and → 0 at config construction (`scheduler_config/config.py:479` clamps `max(int(self.retry_limit), 0)`); `SLURM_GATEWAY_MAX_RETRIES` unset → 3, `5` → 5, `-1` → validation error, through `RetryConfig.from_settings(SlurmGatewaySettings())`. Pinned divergences: `_state_retry_limit` non-int → 0 vs `_env_int` non-int → default; `-1` accepted by the scheduler env vs rejected by the gateway env; the two env vars independent (one set, the other unchanged).
 - Stub-driven rows (8.1), mandatory — if one cannot be reached with the stated stub, stop and report; it may not move to the index:
   - A and E mint half: `_floored_cycle_stage_retry_job_id` with a stub self (`repository.get_pipeline_job`), context (`run_id`, `active_basins[*].state_evidence`) and stage.
   - `_retry_cycle_stage_job_id` (N precedence, `:205-208`): `context.retry_attempt` set and positive (wins over stacked rows); `0` and absent (falsy: fall through to `_next_retry_attempt_for_stage`, driven with a non-empty `existing_jobs` so the result is `_retry_(max+1)`, not `_retry_1`); negative (the only value that reaches the `<= 0 → 1` clamp).
@@ -437,7 +437,7 @@ Slice triage (T1, #3264, tasks 8.1-8.3):
 - [x] 9.1 Id formatting. Add `retry_job_id(base, attempt)`, keeping the `max(attempt, 1)` clamp, and delegate the hand-built sites whose output the clamp cannot change: `chain_runtime_utils.py:448-449`, `chain_forecast_orchestrator_cycle.py:289`, `file_journal_retry_helpers.py:55`. The fourth, `file_orchestration_journal.py:12458-12459` (unclamped, stacking), is deferred to 9.2. Retarget their table rows.
 - [x] 9.2 Attempt formulas. `retry_identity` gains `next_stage_attempt`, `mint_attempt(floors, is_occupied)`, `inline_retry_attempt`, `next_after_failure_master`, `next_after_failure_non_master`, `restart_stage_from_basins`, plus two names D2 does not list, `reservation_submission_attempt` and `next_effective_attempt` (needed by the 9.5 guard's empty allowlist). Delegated at HEAD cb5d3568b: `chain.py:837` `_next_retry_attempt_for_stage`, `chain_forecast_execution.py:624` floored mint (skip loop), `chain_forecast_orchestrator_cycle.py:288` and `:667-676` / `:740-749`, `file_journal_retry_helpers.py:51-55`, `file_orchestration_journal.py:12456-12459` (non-master, the last hand-built id site) and `:12678` (manual), `chain_runtime_utils.py:330` `_restart_stage_from_basins`. Deliberately not moved: `_mint_cycle_stage_retry_job_id` (`chain_forecast_execution.py:573`, composition only), `_retry_cycle_stage_job_id:206-210` (claim precedence, late binding), `_retry_attempt_from_basins` (`chain_runtime_utils.py:357`, no `+1`; its judgement already lives in the owner), and the floor-applies binding check (`chain_forecast_execution.py:650-651`). Row L becomes a plain-data row.
 - [x] 9.3 Stage attempt reads. Add `stage_attempt(row_attempts, floor=None)` and delegate `scheduler_state_rows.py:517-656` (stage-less, canonical and non-canonical arms) and the `_stage_job_sort_key` parser (`stage_job_sort_attempt`), plus the seven scheduler-side manual `+ 1` sites in `scheduler_state_manual_retry.py` (`next_manual_attempt`, unclamped). Deliberately not moved: `stage_retry_attempt_floors`, `_job_retry_attempt`, and the `_fallback_previous_attempt` max.
-- [ ] 9.4 Limit and status sets.
+- [x] 9.4 Limit and status sets. Done at 649f4ee8b: `retry_identity` now holds `DEFAULT_RETRY_LIMIT`, `MANUAL_RETRYABLE_STATUSES` and `UPSTREAM_REFRESH_RETRYABLE_STATUSES` (frozensets, literal contents). `scheduler_state_types` re-imports the limit (`# noqa: F401`), `RetryConfig.max_retries` defaults to it, and `chain_forecast_orchestrator_cycle.py:238,247` read the two sets. The `retry.py:65-66` sets are not redirected (#3319).
   - The owner holds the default limit constant; `DEFAULT_RETRY_LIMIT` and `RetryConfig`'s default read it. `SlurmGatewaySettings.max_retries` keeps its literal default (the gateway must not import the orchestrator), and a parity test asserts that it equals the owner constant.
   - `NHMS_SCHEDULER_RETRY_LIMIT` and `SLURM_GATEWAY_MAX_RETRIES` keep their readers.
   - The two hard-coded status sets move to the owner unchanged.
@@ -1307,6 +1307,242 @@ Slice triage (T2-3, #3267, task 9.3):
   3. Topology and coercion stay at the sites as module-global lookups: compat propagation, the `chain.py:576` alias, the `inf` raise points.
   4. The four Deviations (Change) are applied as recorded: two extra owner names, the manual-site scope, the non-moves, and the section-3 T1 rows kept on their delegates. No facade file changes.
   5. No T1 literal is edited.
+
+Slice triage (T2-4, #3268, task 9.4):
+- Issue type: refactor (pure move; no output changes for any input). Fixture level: expanded (agree). Two expanded triggers: persisted or shared state (`issue-risk-contract.md:22`: the limit gates every retry decision that mints a durable `pipeline_job.job_id`, and the two sets gate which terminal rows get re-run), and the project's orchestrator/state-machine trigger (`openspec/project-profile.md:107`).
+  - Minimal mergeable slice: atomic (agree). Two constants and their readers. The limit and the sets share no code and could merge separately, but a split costs a D5 batch slot and buys no verification. Decision: one PR.
+- Governing invariant: every site returns the same value as today for every input. The default is 3 everywhere, and each of the two predicates gives the same answer for every status, context and job. The T1 table stays green with every expected value unchanged.
+- Recon at HEAD 649f4ee8b (master, after #3322). The production files 9.4 edits are byte-identical to 43d750061, the base of the observations.
+  1. The default limit has three definitions:
+     - `scheduler_state_types.py:11` `DEFAULT_RETRY_LIMIT = 3`, an `int`.
+       - Re-exported by name: `scheduler_state.py:162`, and `scheduler.py:72` in its `# noqa: F401` import list. It is listed in `SCHEDULER_STATE_COMPAT_REEXPORT_NAMES` (`scheduler_state_compat.py:17`).
+       - The compat installer does not wrap non-function names. It only checks `facade_reexports[name] is not owner_value` (`:249-251`), which holds for the int `3` whichever module defines it.
+       - Readers of the name:
+         - `scheduler_config/config.py:175` reads `_scheduler.DEFAULT_RETRY_LIMIT`, a facade attribute read at construction time.
+         - `scheduler_state_rows.py` `_state_retry_limit` uses it as the empty-state default, through a function-local import from `scheduler_state_types`.
+         - Tests: the `tests/test_retry_accounting_table.py` import plus its limit rows. `tests/test_cohort_member_charge.py:131` names it in a docstring only, which stays true.
+       - No test or module monkeypatches it (`git grep -n 'setattr.*DEFAULT_RETRY_LIMIT'` is empty).
+     - `retry.py:201` `RetryConfig.max_retries: int = 3`, on a frozen dataclass, evaluated at class creation.
+       - `from_settings` (`:204-210`) passes `settings.max_retries`.
+       - `RetryConfig()` is called with no argument at `file_orchestration_journal.py:12298` (`config or RetryConfig()`) and at `chain_forecast_orchestrator_cycle.py:124`.
+       - The only production caller of `FileJournalRetryService(repository)` with no config is `scripts/node22_manual_retry_failed_runs.py:254`. The scheduler builds the service through `scheduler_core.py:97` with `RetryConfig.from_settings(SlurmGatewaySettings())`.
+       - So both defaults are live: the owner constant is the effective default for the script, and the gateway literal is the default for the scheduler.
+       - The class is aliased as `chain.RetryConfig` (`chain.py:94`, `chain_compat_static.py:265`), which is not touched.
+     - `services/slurm_gateway/config.py:60` `max_retries: int = Field(default=3, ge=0)`, a literal. The env var `SLURM_GATEWAY_MAX_RETRIES` is read through `model_config` (`:65-66`). `slurm_gateway` imports nothing from `services.orchestrator` (`git grep` is empty). The literal stays.
+  2. Both env readers stay as they are:
+     - `NHMS_SCHEDULER_RETRY_LIMIT`:
+       - `scheduler_config/config.py:174-176` `default_factory` calls `_env_int` (`scheduler_runtime_roots.py:754`). Unset, empty and non-int all give the default; anything else gives `int(...)`, so `-1` returns -1.
+       - `config.py:479` `max(int(self.retry_limit), 0)` then clamps, so `-1` reads **0** at config construction.
+     - `SLURM_GATEWAY_MAX_RETRIES` is read by pydantic with `ge=0`, so `-1` raises a `ValidationError`.
+     - The T1 block's limits bullet is corrected in this fixture to "`_env_int` → -1; the config's `retry_limit` → 0 via the `config.py:479` clamp" (#3268 carry-over).
+       - Baseline pins:
+         - `test_env_int_reads_the_scheduler_retry_limit[negative-accepted]` → -1;
+         - `test_scheduler_config_retry_limit_env[negative-accepted-clamped-to-0]` → 0;
+         - `test_divergence_negative_limit_scheduler_accepts_gateway_rejects`, which asserts both values and the gateway's `ValidationError`.
+       - Observed at 43d750061, with the env unset / `""` / `abc` / `5` / `-1`: `_env_int` gives 3/3/3/5/-1, and `ProductionSchedulerConfig(...).retry_limit` gives 3/3/3/5/0.
+       - `_state_retry_limit` gives 3 for `{}`, 0 for `{"retry_limit": "abc"}`, and 2 for `{"retry_limit": 2, "max_retries": 5}`.
+  3. The two hard-coded status sets, the only ones #3319 names, are inline `in {...}` displays in `ForecastOrchestratorCycleMixin` static methods in `chain_forecast_orchestrator_cycle.py`. #3319 cites them at `:234/:243`; 9.2 moved them down.
+     - `:236`, in `_terminal_stage_needs_manual_retry` (`:216`): `status in {"failed", "submission_failed", "permanently_failed", "cancelled", "partially_failed"}`. It runs after the `reservation_lost` arm (`:218-229`), `_terminal_stage_needs_forced_resubmit` (`:230`) and the `context.retry_attempt is None` check (`:233`).
+     - `:245`, in `_terminal_stage_can_retry_after_upstream_refresh` (`:239`): `if status not in {"failed", "submission_failed", "partially_failed"}: return False`. It runs after the `refreshed_upstream_finished_at is None` check (`:243`) and before `_pipeline_job_terminal_time` (`:247`).
+     - Both compile to `frozenset` constants (observed in `fn.__code__.co_consts`). So neither set has a name, and no `is` comparison, mutation or monkeypatch can observe it. `str(job.get("status") or "")` keeps the membership test hashable.
+     - Callers: `chain_forecast_execution.py:238,248`. Tests that cover them: `test_file_orchestration_journal.py`, `test_forced_resubmit_veto.py`, `test_orchestration_chain.py`, `test_warm_start_chaining.py`, and `test_retry_accounting_table.py`, which drives both over the whole status-vocab union.
+     - Relations to the named sets in `retry.py`, which T1 already pins:
+       - `:236` equals `MANUAL_RETRY_SOURCE_STATUSES`;
+       - `:245` equals `FAILED_RETRY_STATUSES - {"permanently_failed"}`;
+       - the two differ by `{permanently_failed, cancelled}`.
+
+       #3319 item 2 owns any change, including replacing `:236` with the named set.
+     - Truth tables observed over the 17-status vocab union: manual = {cancelled, failed, partially_failed, permanently_failed, submission_failed}; refresh = {failed, partially_failed, submission_failed}.
+  4. Compat propagation (`scheduler_state_compat.py:169-235`) acts only on `_`-prefixed `FunctionType` names. The limit is an int and the sets are inline, so nothing here is patched through the facade.
+- Blast radius:
+  - Files changed:
+    - `services/orchestrator/retry_identity.py`: three constants after `RETRY_JOB_ID_MARKER`, and the owner list in the docstring. It stays stdlib-only, so there is no `status_vocab` import and no cycle.
+    - `scheduler_state_types.py:11`.
+    - `retry.py:201`, plus one import.
+    - `chain_forecast_orchestrator_cycle.py:236,245`, plus the names added to the `:86-93` import block.
+    - `tests/test_retry_accounting_table.py`.
+    - The umbrella `tasks.md`: the 9.4 tick and wording.
+  - Not changed: `slurm_gateway/config.py`, `scheduler_config/config.py`, `scheduler_runtime_roots.py`, `scheduler_state_rows.py` (the function-local import stays), `scheduler.py`, `scheduler_state.py`, `scheduler_state_compat.py`, `chain.py`, both inventories, `docs/runbooks/failed-basin-retry.md` (the default `3` stays true), and `scripts/node22_manual_retry_failed_runs.py`.
+  - A wrong move would change a retry budget, either blocking a candidate early or letting it past its limit. It could also let a `permanently_failed` or `cancelled` row be re-run after an upstream refresh (the #2404 / #1845 geometry). Both are persisted-attempt decisions.
+- Non-goals:
+  - Changing any T1 expected value.
+  - Merging the two env knobs.
+  - Changing `_state_retry_limit`'s non-int → 0.
+  - Replacing `:236` with `MANUAL_RETRY_SOURCE_STATUSES`, or aligning `:245` (#3319 item 2).
+  - The AST guard (9.5).
+  - The non-master id shape.
+- Sibling surfaces that must stay:
+  - `retry.py:65-66` `FAILED_RETRY_STATUSES` / `MANUAL_RETRY_SOURCE_STATUSES`. These are mutable `set`s derived from `status_vocab`. Their readers are `file_orchestration_journal.py:12833,12839` and `scripts/node22_manual_retry_failed_runs.py:127`. They duplicate the owner literal by value, and that duplicate stays; T1 pins the two equal.
+  - Reported, not moved:
+    - `file_orchestration_migration.py:80` `_FAILED_STATUSES` has the same five elements, but it is the migration-only predecessor check (`:1963`).
+    - `chain_forecast_execution.py:327` (`{failed, submission_failed, reservation_lost, permanently_failed}`) is a result-status set.
+  - `_env_int`, the `config.py:479` clamp, `_state_retry_limit`, and the gateway literal with its `ge=0`.
+- Change (9.4):
+  1. `retry_identity.py` gains three constants with literal contents only:
+     - `DEFAULT_RETRY_LIMIT = 3`;
+     - `MANUAL_RETRYABLE_STATUSES = frozenset({"failed", "submission_failed", "permanently_failed", "cancelled", "partially_failed"})`;
+     - `UPSTREAM_REFRESH_RETRYABLE_STATUSES = frozenset({"failed", "submission_failed", "partially_failed"})`.
+  2. `scheduler_state_types.py:11` replaces the assignment with `from services.orchestrator.retry_identity import DEFAULT_RETRY_LIMIT  # noqa: F401`, following the `scheduler_state.py:156` re-export convention (isort places it after `packages.common`), so the name stays a module attribute for the three re-exports. A bare by-name import fails ruff F401, and `ruff --fix` would delete it. `retry.py:201` becomes `max_retries: int = DEFAULT_RETRY_LIMIT`.
+  3. In the cycle file, `:236` becomes `status in MANUAL_RETRYABLE_STATUSES` and `:245` becomes `status not in UPSTREAM_REFRESH_RETRYABLE_STATUSES`. Both names are imported by name in the `:86-93` block, following the file's convention, so they are module globals at the site.
+  - Deviations from D2's wording ("the default limit constant; the two status sets, unchanged"):
+    - (a) D2 names no owner names, so these three names are new.
+    - (b) The sets are `frozenset`s, the same type and value as today's compiled constants.
+    - (c) The gateway keeps its literal, and the parity test is what binds it to the owner.
+    - (d) `retry.py:65-66` are not redirected.
+- Tests: `tests/test_retry_accounting_table.py`, sections 4 and 6.
+  - Rule: no expected literal is edited. The existing rows stay as they are: `test_default_limit_constants`, `test_state_retry_limit`, the env, divergence and independence rows, and the three status-set rows.
+  - New owner rows use `retry_identity.<name>` attribute access, so on unchanged code only those rows are red, not the whole collection.
+  - Delegation to the owner is shown by the owner mutation or by an AST check, not by `is` or `==` on a small int (the T2-1 precedent).
+  - Limits, 7 rows:
+    - L1 `test_owner_default_retry_limit`: `retry_identity.DEFAULT_RETRY_LIMIT == 3` and `type(...) is int`.
+    - L2 `test_retry_config_default_max_retries`: `RetryConfig.__dataclass_fields__["max_retries"].default == 3` and `RetryConfig().max_retries == 3`. It is kept separate from `test_default_limit_constants` so that an owner mutation reaches it; that test asserts `DEFAULT_RETRY_LIMIT` first.
+    - L3 `test_gateway_default_equals_owner_limit`, 2 rows:
+      - `SlurmGatewaySettings.model_fields["max_retries"].default == retry_identity.DEFAULT_RETRY_LIMIT`, which does not depend on the env;
+      - `SlurmGatewaySettings().max_retries == retry_identity.DEFAULT_RETRY_LIMIT`, with both limit env vars cleared.
+    - L4 `test_limit_defaults_read_the_owner`, 2 params:
+      - in `retry.py`, the `RetryConfig.max_retries` `AnnAssign` value is `ast.Name(id="DEFAULT_RETRY_LIMIT")`, and the module has an `ImportFrom` of it from `services.orchestrator.retry_identity`;
+      - in `scheduler_state_types.py`, there is no module-level `Assign`/`AnnAssign` to `DEFAULT_RETRY_LIMIT`, and there is an `ImportFrom` of it from `services.orchestrator.retry_identity`.
+    - L5 `test_gateway_config_does_not_import_the_orchestrator`: the AST of `services/slurm_gateway/config.py` has no import of `services.orchestrator`. No other guard enforces this; the layering guard scans only `packages/` and `workers/`.
+  - Status sets, 4 owner rows:
+    - `MANUAL_RETRYABLE_STATUSES` equals the five-element frozenset, and its type is `frozenset`.
+    - The same check for the three-element refresh set.
+    - `MANUAL_RETRYABLE_STATUSES == retry.MANUAL_RETRY_SOURCE_STATUSES`.
+    - `UPSTREAM_REFRESH_RETRYABLE_STATUSES == retry.FAILED_RETRY_STATUSES - {"permanently_failed"}`.
+  - Status sets, 2 site rows, `test_terminal_stage_predicates_read_the_owner_names`:
+    - `monkeypatch.setattr(chain_forecast_orchestrator_cycle, "MANUAL_RETRYABLE_STATUSES", frozenset({"succeeded"}))` flips `_terminal_stage_needs_manual_retry`: `succeeded` → True and `failed` → False.
+    - The same check for the refresh name.
+    - These rows catch a site that reverts to an equal literal, which no value row can see.
+  - Status-set delegate rows, 30. They are green on unchanged code, and their values were OBSERVED. They pin the status coercion and the evaluation order, which stay at the site.
+    - Manual, 12 rows. Defaults: `context.retry_attempt=1`, `slurm_job_id="4000"`, `stage="forecast"`.
+      - True: `failed` with `retry_attempt=0`; `cancelled`; `permanently_failed`.
+      - False:
+        - `failed` with `retry_attempt=None`;
+        - `succeeded`;
+        - `status=None`, `"FAILED"`, `" failed"`, status missing, `status=5`;
+        - `partially_failed` with `retry_attempt=None`;
+        - `reservation_lost` with no `slurm_job_id`.
+    - Refresh, 18 rows. Default: `refreshed_upstream_finished_at = 2026-05-01T06:00Z` (R).
+      - True: `failed` with no time; `finished_at == R`; `R-1h`; `partially_failed` at `R-1h`.
+      - False:
+        - refreshed `None` with `failed`;
+        - `R+1s`;
+        - `submission_failed` at `R+1s`;
+        - `permanently_failed` at `R-1h`;
+        - `cancelled` with no time;
+        - `status=None`, missing, `"FAILED"`, `" failed"`, `5` and `["failed"]` (6 rows);
+        - `cancelled` with `finished_at="x"` (the status check runs before the time parse);
+        - refreshed `None` with `failed` and `finished_at="x"`.
+      - Raises: `failed` with `finished_at="x"` → `ValueError`.
+  - New rows total 43: 7 limits, 4 owner set rows, 2 site rows and 30 delegate rows.
+    - On unchanged code, 11 are red (L1, L3 ×2, L4 ×2, the 4 owner set rows, the 2 site rows) and 32 are green (L2, L5, the 30 delegate rows). The implementer recounts this and records the observed split.
+    - The headers of sections 4 and 6 gain "owner-held default limit and status sets".
+- Spec: no delta.
+  - The change's `specs/job-retry-mechanism/spec.md:3-21` ADDs the requirement, and it already lists "the default retry-limit constant" and "the manual-retryable and upstream-refresh-retryable status sets".
+  - `:17` says the two env overrides keep their current readers, and `:20-21` says the owner "SHALL NOT change its result for any input".
+  - The new rows fall under two scenarios: "Historical retry cases are pinned in one table" and "Divergent paths are pinned as they are" (the latter lists the status-set difference).
+  - Docs: `docs/runbooks/failed-basin-retry.md:252` names `_terminal_stage_needs_manual_retry` as an entry point, which stays true.
+- Must preserve:
+  - Every T1 expected value: `git diff master -- tests/test_retry_accounting_table.py` shows only added rows and docstring lines.
+  - The default is 3 at every reader, and both env readers are unchanged: `-1` gives -1 from `_env_int`, 0 at config construction, and a `ValidationError` at the gateway.
+  - The two predicates keep their evaluation order and the `str(job.get("status") or "")` coercion.
+  - `retry_identity.py` imports only the stdlib. `slurm_gateway/config.py` keeps its literal and imports nothing from the orchestrator.
+  - This diff is empty: `git diff --stat master -- services/orchestrator/chain.py services/orchestrator/scheduler.py services/orchestrator/scheduler_state.py services/orchestrator/scheduler_state_compat.py services/orchestrator/scheduler_state_rows.py services/orchestrator/scheduler_config services/orchestrator/scheduler_runtime_roots.py services/slurm_gateway`.
+- Risk packs:
+  - Selected:
+    - Legacy compatibility (re-exports, the compat installer, the `RetryConfig` alias). Covered by T1, the existing pins, the owner, parity and AST rows, and the mutations.
+    - Config / project setup (the two env readers and the three defaults). Covered by the existing limit rows plus L1-L5.
+  - Not selected: Concurrency, Public API, File IO, Schema, Auth, Resource limits, Release, Documentation (the runbook lines stay true), and Error handling (the only raise, the `ValueError` at `:247`, is pinned by one row).
+- Required evidence. Predictions come from the code. If an observed set differs, stop and report.
+  1. Baseline before any production edit, at the recorded HEAD sha:
+     - `uv run pytest -q tests/test_retry_accounting_table.py` passes 321.
+     - Add the green rows (L2, L5 and the delegate rows) and run them on unchanged code; they pass with the values above.
+     - Hash every production file to be edited.
+  2. Pre-change red: add the red rows. Expected failures:
+     - an `AttributeError` on `retry_identity.<name>` for L1, L3 and the owner set rows;
+     - the site rows fail on `monkeypatch.setattr` of a missing attribute (`raising=True`);
+     - L4 fails for both params: `retry.py`'s value is an `ast.Constant`, not an `ast.Name`, and `scheduler_state_types.py` still has the `Assign`.
+
+     Everything else is green.
+  3. After the change, the same command passes 321 + 43. Classify every line of the table-file diff as an addition or a docstring change.
+  4. Mutations. Apply each one, run it on the table file, then restore the file and confirm its hash.
+     - M1, owner `DEFAULT_RETRY_LIMIT` 3 → 4. Predicted red:
+       - L1, L2, L3 ×2;
+       - `test_default_limit_constants`;
+       - the `test_state_retry_limit` empty and blank default rows;
+       - the unset, empty and non-int rows of both `test_env_int_reads_the_scheduler_retry_limit` and `test_scheduler_config_retry_limit_env`;
+       - `test_divergence_non_int_limit_state_reads_0_env_reads_default`;
+       - `test_limit_envs_are_independent_gateway_set`.
+
+       Green: `test_limit_envs_are_independent_scheduler_set` and every gateway env row.
+     - M2, gateway literal 3 → 4. Predicted red: L3 ×2, `test_gateway_max_retries_env[unset]`, `test_limit_envs_are_independent_scheduler_set`. Green: L1, L2, `test_default_limit_constants`, `test_limit_envs_are_independent_gateway_set`.
+     - M3, revert `RetryConfig.max_retries` to the literal 3: only the `retry.py` param of L4 is red. M4, revert `scheduler_state_types.py:11` to the literal: only the `scheduler_state_types` param of L4 is red.
+     - M5, the gateway config imports the owner constant: only L5 is red.
+     - M6, `MANUAL_RETRYABLE_STATUSES` drops `"cancelled"`. Predicted red:
+       - the owner row and the manual relation row;
+       - `test_manual_retry_inline_status_set_equals_manual_retry_source_statuses` and `test_the_two_inline_status_sets_differ`;
+       - the manual `cancelled` delegate row.
+
+       The site row stays green, because it replaces the set.
+     - M7, `UPSTREAM_REFRESH_RETRYABLE_STATUSES` adds `"permanently_failed"`. Predicted red:
+       - the owner row and the refresh relation row;
+       - `test_upstream_refresh_inline_status_set_equals_failed_minus_permanently_failed` and `test_the_two_inline_status_sets_differ`;
+       - the refresh `permanently_failed` `R-1h` delegate row.
+     - M8, swap the two names at `:236` and `:245`.
+       - Predicted red:
+         - `test_manual_retry_inline_status_set_equals_manual_retry_source_statuses`, `test_upstream_refresh_inline_status_set_equals_failed_minus_permanently_failed` and `test_the_two_inline_status_sets_differ`;
+         - both site rows;
+         - five delegate rows: manual `cancelled` and manual `permanently_failed` (True → False), refresh `permanently_failed` at `R-1h` and refresh `cancelled` with no time (False → True), and refresh `cancelled` with `finished_at="x"` (False → `ValueError`).
+       - Green: the 4 owner set rows.
+     - M9, revert one site to the equal inline literal (`:236`, then `:245` separately). Predicted red: only that site's site row. The value rows stay green, which is why the site rows and residual grep (c) exist.
+     - Any other red result in the table file is reported, not absorbed. The required pins are not part of the mutation runs; they are evidence item 5, run on unmutated code only.
+  5. The required existing pins pass. Derive the list mechanically with the awk pass below, which reads top-level `def test_` lines, and write its output to a local pin list before running it:
+
+     ```bash
+     pat='_terminal_stage_needs_manual_retry|_terminal_stage_can_retry_after_upstream_refresh|DEFAULT_RETRY_LIMIT|RetryConfig[(][)]|_state_retry_limit|NHMS_SCHEDULER_RETRY_LIMIT|SLURM_GATEWAY_MAX_RETRIES|FileJournalRetryService[(][A-Za-z_.]*[)]|SCHEDULER_STATE_COMPAT_REEXPORT_NAMES|install_scheduler_state_compat'
+     for f in $(git grep -lE "$pat" -- 'tests/*.py' | grep -v test_retry_accounting_table.py); do
+       awk -v F="$f" -v P="$pat" '/^(async )?def test_/ {match($0,/def test_[A-Za-z0-9_]+/); name=substr($0,RSTART+4,RLENGTH-4)} $0 ~ P && name!="" {print F"::"name}' "$f"
+     done | sort -u
+     ```
+
+     - Observed at 43d750061: 29 node ids, and running those ids with `uv run pytest -q` passes 32.
+     - Re-derive the list at the PR's HEAD and confirm it is unchanged.
+     - The list is a lower bound: it misses tests that reach these names only through helpers or class methods. CI is the completeness gate.
+  6. Residual greps over `-- services packages scripts`, compared by content:
+     - (a) Limit definitions and literal defaults: `git grep -nE 'DEFAULT_RETRY_LIMIT *=|max_retries: int *=|max_retries *= *Field|(retry_limit|max_retries)[A-Za-z_]* *(: *int)? *= *3( |$)|default=3[,)]'`.
+       - Baseline: `retry.py:201`, `scheduler_state_types.py:11`, `slurm_gateway/config.py:60`.
+       - After: `scheduler_state_types.py:11` no longer matches. `retry.py:201` still matches, now as `= DEFAULT_RETRY_LIMIT`, which is intended. The owner's `DEFAULT_RETRY_LIMIT = 3` is added. `slurm_gateway/config.py:60` stays on purpose.
+     - (b) `DEFAULT_RETRY_LIMIT` readers: `git grep -nE 'DEFAULT_RETRY_LIMIT'`. After: the baseline minus the `scheduler_state_types.py:11` assignment, plus the owner definition, the `scheduler_state_types` and `retry.py` import lines, and `retry.py:201` (`max_retries: int = DEFAULT_RETRY_LIMIT`).
+     - (c) Hard-coded retryable sets (`git grep -nE '\{ *"failed", *"submission_failed"'`). Baseline: `packages/common/status_vocab.py:93,95`, `chain_forecast_execution.py:327`, `chain_forecast_orchestrator_cycle.py:236,245`, `file_orchestration_migration.py:80`. After: `:236,:245` are gone and the owner's two literals are added. The other four stay on purpose.
+     - (d) Named sets: `git grep -nE '(MANUAL_RETRY_SOURCE_STATUSES|FAILED_RETRY_STATUSES|_FAILED_STATUSES) *='`. Baseline: `file_orchestration_migration.py:80`, `retry.py:65,66`. After: unchanged.
+     - Any other hit is a missed site. A `DEFAULT_RETRY_LIMIT` mention in the `retry_identity.py` docstring is an expected extra hit; record it rather than stopping.
+  7. Facade audit. Neither governed facade is edited (the Must-preserve `git diff --stat` is empty).
+     - `uv run python scripts/governance/audit_repo_entropy.py --format json --structural-base-ref master` must show no `compatibility-facade-growth` signal for `scheduler.py` or `chain.py`.
+     - Compare the full finding set with the master baseline.
+     - Editing `chain_forecast_orchestrator_cycle.py` shifts lines for the grandfathered refs in `scripts/governance/entropy_audit/line_reference_baseline.json`. Confirm the audit adds no new line-reference finding.
+  8. Verification policy (owner decision 2026-11-22): no local full suite.
+     - Local: the table, the required pins, mutations M1-M9, `uv run ruff check . --no-cache`, `openspec validate redesign-orchestration-core --strict --no-interactive`, and the residual greps.
+     - CI is the completeness gate: the full suite, every shard.
+  9. node-27, per D5 ("plus node-27 real-DB suites when those suites import the code").
+     - The import graph was checked with a fresh `uv run --no-sync python` process per `integration`-marked file, checking `sys.modules` for the four touched modules (`retry_identity`, `retry`, `scheduler_state_types`, `chain_forecast_orchestrator_cycle`).
+     - 16 files import at least one touched module:
+       - Nine import `retry_identity`, `retry` and `scheduler_state_types` (two of them also import the cycle module); these are the nine #3267 ran.
+       - Seven import `scheduler_state_types` only: `test_model_activation_audit_integration.py`, `test_mvt_national_identity_probe_cycles_integration.py`, `test_mvt_national_identity_probe_digest_integration.py`, `test_mvt_national_identity_probe_integration.py`, `test_real_database_integration.py`, `test_river_ts_read_path_surrogate_keys_coverage_integration.py`, `test_river_ts_read_path_surrogate_keys_integration.py`.
+     - Run `-m integration` over all 16 on throwaway `nhms_it_*` DBs (`mkdir -p /home/nwm/tmp && export TMPDIR=/home/nwm/tmp`).
+     - Expected: everything passes and 0 DBs are left over. Run `df -h / /home` before and after.
+  10. node-22: the D5 pure-move batch, task 9.7. Batch t2b2 (#3320, #3321, #3322) is full, so 9.4 opens the next batch.
+      - ff deploy at a pass boundary, then one idle pass (`status=planned`, `restart_reconcile.status=completed`, `lock.lock_type=file`) and one submitting pass (`status=submitted`).
+      - 9.4 is ticked in the final push, with no trailing docs commit.
+      - The PR merges with `Part of #3268` until the batch has run.
+- Review focus:
+  1. The default is 3 at every reader, and each reader still resolves its name at the same time:
+     - `RetryConfig` at class creation;
+     - `_scheduler.DEFAULT_RETRY_LIMIT` at config construction;
+     - `_state_retry_limit` through its unchanged function-local import.
+  2. The set contents and the predicates' order and coercion are copied verbatim. `:245` stays a deny-list (`not in`) and `:236` stays an allow-list.
+  3. The gateway literal is kept, and the parity test both binds it and checks layering. The owner stays stdlib-only.
+  4. The env readers and the `-1` handling are unchanged.
+  5. The duplicates that stay are recorded as deliberate: `retry.py:65-66`, `file_orchestration_migration.py:80`, `chain_forecast_execution.py:327`. #3319 owns any unification.
+  6. No T1 literal is edited, and no governed facade file is touched.
 
 ## 10. F1 — Compat-defined production helpers move to owners; facade resolution guard
 

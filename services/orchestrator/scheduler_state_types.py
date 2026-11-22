@@ -6,9 +6,9 @@ from datetime import datetime
 from typing import Any, Protocol
 
 from packages.common import status_vocab as _vocab
+from services.orchestrator.retry_identity import DEFAULT_RETRY_LIMIT  # noqa: F401
 
 CANDIDATE_STATE_TASK_RESULT_LIMIT = 16
-DEFAULT_RETRY_LIMIT = 3
 DEFAULT_CANDIDATE_STATE_JOB_LIMIT = 100
 DEFAULT_CANDIDATE_STATE_EVENT_LIMIT = 100
 STATE_M23_COMPARISON_FIELDS = (

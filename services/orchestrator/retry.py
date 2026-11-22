@@ -8,6 +8,7 @@ from typing import Any
 from packages.common import status_vocab as _vocab
 from packages.common.redaction import redact_payload
 from services.orchestrator.persistence import PipelineJob
+from services.orchestrator.retry_identity import DEFAULT_RETRY_LIMIT
 from services.orchestrator.scheduler_state_types import DOWNSTREAM_RESTART_STAGES
 from services.slurm_gateway.config import SlurmGatewaySettings
 
@@ -198,7 +199,7 @@ def compute_backoff_seconds(retry_count: int, backoff_schedule: list[int] | None
 
 @dataclass(frozen=True)
 class RetryConfig:
-    max_retries: int = 3
+    max_retries: int = DEFAULT_RETRY_LIMIT
     backoff_schedule: list[int] = field(default_factory=lambda: list(DEFAULT_BACKOFF_SCHEDULE))
 
     @classmethod
