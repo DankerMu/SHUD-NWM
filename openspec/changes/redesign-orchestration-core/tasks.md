@@ -2139,7 +2139,7 @@ Slice triage (F1-2, #3271, tasks 10.1, 10.3):
 
 ## 11. F2 — Delete installers and `_COMPAT_` tables
 
-- [ ] 11.0a Chain side, test-only first: delete the test assertions that read `_CHAIN_*_COMPAT_*` tables (`tests/test_orchestration_chain.py`, including the inventory-text tests that also read tables at :1246, :1286, :12146, :12471; `tests/test_file_journal_read_blocked_consumers.py:255-257`). Inventory-text tests that read no table stay for F3.
+- [x] 11.0a Chain side, test-only first: delete the test assertions that read `_CHAIN_*_COMPAT_*` tables (`tests/test_orchestration_chain.py`, including the inventory-text tests that also read tables at :1246, :1286, :12146, :12471; `tests/test_file_journal_read_blocked_consumers.py:255-257`). Inventory-text tests that read no table stay for F3.
 - [ ] 11.0b Scheduler side, test-only first: delete the `_SCHEDULER_*_COMPAT_*` assertions, including `tests/test_production_scheduler.py:1086-1129` and the inventory-text tests that also read tables (e.g. `:816`). Inventory-text tests that read no table stay for F3.
 - [ ] 11.0c Scheduler state-compat patch propagation: rewrite the propagation in `scheduler_state_compat.py:169-219` as an explicit owner function, with a test that a patch on the facade is seen by the `scheduler_state_*` owners. The installer still runs.
 - [ ] 11.1 Chain side.
@@ -2158,6 +2158,82 @@ Slice triage (F1-2, #3271, tasks 10.1, 10.3):
 
 Suggested fixture level: expanded - legacy compatibility surface and import-time behaviour.
 Minimal mergeable slice: 11.0a and 11.0b (test-only) first; 11.0c next; then 11.1 (chain side) and 11.2 (scheduler side), which are independent; neither facade imports the other's compat modules.
+
+Slice triage (F2-1, #3290, task 11.0a):
+- Issue type: test (deletion and retarget). Fixture level: compact (agree): test-only, with no production code change.
+  - Width: one PR, covering one assertion family across two test files.
+  - D5 (`design.md:226-227`): F2's test-only parts are verified by CI only.
+- Recon at c4e1dcd34:
+  - `git grep -nE "_CHAIN_[A-Z0-9_]*COMPAT_[A-Z0-9_]*" -- tests` gives 212 lines:
+    - 211 in `tests/test_orchestration_chain.py`, in 11 clusters: `:1227-1310`, `:10351-10418`, `:10490-10532`, `:10583`, `:10698-10753`, `:10802-10854`, `:10951-11002`, `:11051-11140`, `:11374-11476`, `:11526-11530`, `:11824`;
+    - 1 in `tests/test_file_journal_read_blocked_consumers.py:250-257`.
+  - Read forms:
+    - direct attribute reads (`legacy_chain._CHAIN_X_COMPAT_Y`);
+    - `vars(legacy_chain)` prefix scans;
+    - inventory-text token strings (`"…" in inventory_text`);
+    - absence probes (`not hasattr(legacy_chain, "<name>")`, `:11106-11112`).
+  - The chain compat modules install only `_CHAIN_*` names (`chain_compat_static.py:725`, `chain_compat_runtime.py:427-478`) and write no behaviour. Deleting table assertions therefore removes no coverage of behaviour that 11.1 changes. Chain-side patch propagation is covered by `:10543-10546` and `:10880-10881` (no table read, unchanged) and by the retargeted binding loops below.
+  - The issue's and 11.0a's line refs `:12146` and `:12471` are stale at c4e1dcd34: they now point at unrelated tests. The table-reading inventory tests are the 11 clusters above.
+- Rules. Every assertion that reads a table gets exactly one label. Only the label names echo R2a (`tasks.md:76-82`); the definitions below govern, and there is no (c).
+  - Decision test: replace each table-derived name list with its HEAD literal. The assertion is (b) if either of these holds afterwards:
+    - a `_CHAIN_*_COMPAT_*` table, a `vars()` scan or another `_CHAIN_*` attribute is still an operand;
+    - the assertion now compares only literals, e.g. `tuple(f for f, _ in bindings) == fields`.
+
+    Otherwise it is (a).
+  - **(b) delete.** These assertions are about the table or the self-check: its contents, length or uniqueness, `*_MISSING == ()`, the `vars()` prefix scan, `MappingProxyType`-ness, and `*_FORWARDERS[n] is owner.x` (a tautology, since the table is built from `getattr(owner, owner_name)`). A test left with no assertion is deleted whole.
+  - **(a) retarget.** The table only supplies names to a behavioural assertion about owner or facade objects. Replace the table read with a literal tuple or dict copied from the table's HEAD value. Otherwise the assertion stays byte-identical. Cases:
+    - `set(chain_stage_execution.__all__) == {"StageExecutionDependencies", *owner_names}`;
+    - `StageExecutionDependencies.__dataclass_fields__ == dependency_fields`;
+    - `callable(getattr(legacy_chain.ForecastOrchestrator, facade_name))`;
+    - `:11454` `is not getattr(chain_manifests, owner_name)`;
+    - the worker-adapter dynamic_adapters behaviour loop.
+    - `*_FACADE_ALIASES[n] is <owner>.n` (`:10519`, `:10532`, `:11132`) and `:11446` (`FACADE is OWNER`). These tables are import-time snapshots of `chain.__dict__`, so they assert that each facade alias is the owner's object. Retarget them as `getattr(legacy_chain, n) is getattr(<owner>, n)` over the literal names.
+    - The dependency-binding loops, all (a):
+      - `:1304-1306` (`_array_accounting_dependencies()`);
+      - `:10537-10541` and `:10865-10868` (`_chain_stage_execution_dependencies()`);
+      - `:11476-11480` (the owner signature accepts each argument);
+      - `:11524-11527` and `:11822-11825` (the forwarder passes the facade binding as the owner kwarg).
+
+      The `_CHAIN_MANIFEST_COMPAT_DEPENDENCY_BINDINGS` literal is defined once per test.
+    - Mechanics:
+      - In `(*compat_tokens, ...)` inventory loops (`:10416`, `:10583`, `:10802`, `:10951`, `:11290`, `:11374`, `:11530`), drop only `*compat_tokens` and the scan. Never materialise the scan as literal `_CHAIN_*` strings.
+      - A loop or `inventory_text` binding left empty is deleted.
+      - Loop headers may drop variables that only fed deleted (b) lines (ruff B007).
+      - Where the test already has an `expected_*` literal equal to the table (e.g. worker-adapter `:10698-10704`, persistence `:10984`), reuse it instead of making a new copy.
+  - **Kept for F3.** Inventory-text assertions that only check a token string appears in the inventory doc read no table and stay unchanged. Where such a test also has table-reading assertions, only those go.
+  - **Kept (absence probe).** The `not hasattr(legacy_chain, "<name>")` assertions (`:11106-11112`) read no table and stay unchanged. They are listed in the after-count residual set.
+  - `tests/test_file_journal_read_blocked_consumers.py:250-257` is (b): delete the comment, both imports and the assertion.
+    - `ForecastOrchestrator._retry_job_for_stage_result` stays asserted callable by the retry retarget at `:11134-11135`, which uses the literal from the `chain_compat_static.py:301` block.
+    - The owner function stays covered at `:270` and `:582`.
+  - The `:11072-11074` loop (`"forwarder" not in` over a test-local literal) is vacuous. It goes with the classification table it belongs to, as (b).
+  - Behaviour tests are otherwise unchanged. No assertion is weakened, and no behavioural assertion is deleted.
+- Out of scope:
+  - production code;
+  - the scheduler side (11.0b, #3291);
+  - inventory-text tests;
+  - `tests/test_facade_name_resolution.py`, which only collects fewer names afterwards.
+- Carry-overs (`.workplans/3270/carry-overs.md`):
+  - #1 and #2 are deferred to the 11.1 fixture; `test_facade_name_resolution.py` is untouched here.
+  - #3 has nothing to carry on the chain side, because the compat modules install only `_CHAIN_*`. The scheduler side is 11.0c.
+- Must preserve: `git diff --stat master -- services apps packages workers scripts db` is empty. Every behavioural assertion survives, either as it was or retargeted.
+  - Deviation: the issue says delete, but assertions whose subject is owner or facade behaviour are retargeted instead, per D3 "behaviour tests are unchanged". This is recorded in the PR body.
+- Risk packs: legacy compatibility (no coverage lost beyond the self-check tables F2 deletes). Not selected: everything else.
+- Required evidence:
+  1. A ledger at `.workplans/3290/ledger.md`. For each touched test, give each table-reading assertion's label, old and new text for each (a), and the literal-equals-HEAD-table check for each (a) literal. The check is `uv run --no-sync python -c "import services.orchestrator.chain as c; assert c.<TABLE> == <literal>"` run at c4e1dcd34, with its output pasted.
+  2. Before/after counts:
+     - the collected-test count of the two files;
+     - `git grep -nE "_CHAIN_[A-Z0-9_]*COMPAT_" -- tests`: 212 lines before, and after exactly the residual set. That set is the inventory-text token literals at `:1254-1258`, `:10373-10377` and `:10962-10976`, plus the absence probes at `:11108-11110`. These line numbers are at c4e1dcd34; the ledger lists the final lines.
+     - `git grep -nE "chain_compat_(static|runtime)" -- tests` leaves only `tests/test_orchestrator_first_import.py:41,44` and `tests/test_file_journal_full_tree_budget_contract.py:374`, which are 11.3's scope.
+  3. The touched files are green, and so is `tests/test_facade_name_resolution.py`.
+  4. Clean runs of `uv run --no-sync ruff check . --no-cache`, `git diff --check` and `openspec validate redesign-orchestration-core --strict --no-interactive`.
+- Verification (owner policy 2026-11-22: no local full suite):
+  - Locally, run:
+    - `tests/test_orchestration_chain.py`
+    - `tests/test_file_journal_read_blocked_consumers.py`
+    - `tests/test_facade_name_resolution.py`
+    - the inventory and facade guards: `tests/test_entropy_audit_facade_guard_aliases.py`, `tests/test_entropy_audit_facade_guard_forwarders.py`, `tests/test_entropy_audit_instruction_inventory.py`
+  - CI: the full sharded suite.
+  - No node-27 or node-22 run: the change is test-only.
 
 ## 12. F3 — Delete the compatibility inventories and the facade guard
 

@@ -247,15 +247,6 @@ def test_journal_import_does_not_load_the_chain_execution_module() -> None:
     )
     assert completed.stdout.strip() == "False"
 
-    # And the chain's static compat inventory still tracks the classifier as a
-    # chain-local bridge symbol: the guard is added inside the existing function,
-    # never by renaming or moving it.  ``chain`` first: ``chain_compat_static``
-    # is imported BY it and is only fully initialised through that entrypoint.
-    import services.orchestrator.chain  # noqa: F401
-    from services.orchestrator import chain_compat_static
-
-    assert "_retry_job_for_stage_result" in chain_compat_static._CHAIN_RETRY_COMPAT_LOCAL_METHOD_NAMES
-
 
 def test_both_consumer_ends_key_on_the_single_discriminator_definition() -> None:
     """Task 4.1: one definition, two consumers -- no second drifting local copy."""
