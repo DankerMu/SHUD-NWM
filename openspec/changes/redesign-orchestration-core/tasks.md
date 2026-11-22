@@ -2762,7 +2762,7 @@ Slice triage (J0, #3275, tasks 13.1-13.3):
 ## 14. J1 — Retention mixin
 
 - [ ] 14.1 Move C18 (Appendix B) into `services/orchestrator/file_journal_retention.py` as a mixin that the class composes. The retention dataclasses stay importable from the facade. Update the cluster map. J0, `tests/test_file_journal_late_lookup_seams.py` and `tests/test_scheduler_journal_retention_archive.py` stay unchanged and green.
-  - J1-J5 carry-over from J0 (#3275): set 1 renders a `_UNSET` default as `=facade._UNSET`, so the facade keeps its `_UNSET` binding from `file_journal_paths` even after the last class-body use leaves it (`# noqa: F401` or `__all__`); likewise, facade-only imports (`COHORT_MEMBERSHIP_*`, `journal_read_lane`) may be dropped under F401 without touching set 4, whose live side counts only sibling imports already pinned as 4(a).
+  - J1-J5 carry-over from J0 (#3275): set 1 renders a `_UNSET` default as `=facade._UNSET`, and set 4 requires every pinned 4(a) name (e.g. `FileJournalRetentionCycle*`, `OperatorBindReceipt`, `PERMANENT_FAILURE_SOURCE_STATUSES`) to keep resolving on the facade. When a slice moves such a name, or the last class-body use of `_UNSET`, out of the facade, the facade keeps the re-import with `# noqa: F401`. Adding it to `__all__` is not an option: `tests/test_file_orchestration_journal_facade.py` requires every `__all__` name to have a consumer. Facade-only imports (`COHORT_MEMBERSHIP_*`, `journal_read_lane`) may be dropped under F401 without touching set 4, whose live side counts only sibling imports already pinned as 4(a).
 - [ ] 14.2 Verification: CI, then node-22 batch per D5.
 
 Suggested fixture level: expanded - moves persisted-state writer code.

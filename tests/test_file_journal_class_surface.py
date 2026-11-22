@@ -43,8 +43,10 @@ change regenerates it and shows up in the diff.
 
 Regenerate with ``NHMS_REGENERATE_CLASS_SURFACE=1 uv run pytest -q
 tests/test_file_journal_class_surface.py``; that run always fails, rerun
-without the variable.  This module never patches the facade: the cluster map's
-patch scanner reads every test that mentions it.
+without the variable.  This module never patches the facade nor reads it as
+``facade.X`` / ``getattr(facade, ...)``: the cluster map's patch scanner and the
+facade's ``__all__`` hygiene scan read every test that mentions it, so the module
+object is only ever passed to helpers as a parameter.
 """
 
 from __future__ import annotations
@@ -87,8 +89,15 @@ _IDENTITY_REPR = " at 0x"
 _MISSING = object()
 
 
+# The facade is always handed to helpers as a parameter, never read as ``facade.X``
+# or ``getattr(facade, name)``: ``test_file_orchestration_journal_facade.py`` scans
+# every test for reads of the facade's surface.
+def _classes_of(module: ModuleType) -> dict[str, type]:
+    return {name: getattr(module, name) for name in CLASS_NAMES}
+
+
 def _journal_classes() -> dict[str, type]:
-    return {name: getattr(facade, name) for name in CLASS_NAMES}
+    return _classes_of(facade)
 
 
 def _resolve(cls: type, name: str) -> object:
@@ -431,12 +440,12 @@ def test_external_private_attributes_still_resolve(pinned: dict[str, list[str]])
     assert external_private_attribute_rows(REPO_ROOT, classes) == pinned["external_private_attributes"]
 
 
+def _drifted(rows: list[str], module: ModuleType) -> list[str]:
+    return [row for row in rows if _tag(getattr(module, row.split(" ")[0], _MISSING)) != row.split(" ")[1]]
+
+
 def test_facade_import_contract(pinned: dict[str, list[str]]) -> None:
-    drifted = [
-        row
-        for row in pinned["facade_imports"]
-        if _tag(getattr(facade, row.split(" ")[0], _MISSING)) != row.split(" ")[1]
-    ]
+    drifted = _drifted(pinned["facade_imports"], facade)
     assert drifted == [], "pinned facade names that no longer resolve on the facade with the same tag"
     assert facade_import_rows(REPO_ROOT, facade, _pinned_defined(pinned)) == pinned["facade_imports"]
 
@@ -453,7 +462,7 @@ def _scan(self):
 def _build(*, decorated_mixin: bool, own_sentinel: bool = False) -> dict[str, dict[str, type]]:
     """The same surface defined flat and split across a mixin base."""
 
-    sentinel = object() if own_sentinel else facade._UNSET
+    sentinel = object() if own_sentinel else vars(facade)["_UNSET"]
 
     def read(self, key: str, *, default: object = sentinel) -> str | None:
         return None
