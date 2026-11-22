@@ -1,10 +1,7 @@
 from __future__ import annotations
 
-import sys
 from collections.abc import Callable, MutableMapping
-from contextlib import contextmanager
 from functools import wraps
-from threading import RLock
 from types import FunctionType, MappingProxyType, ModuleType
 from typing import Any
 
@@ -180,49 +177,11 @@ def install_scheduler_state_compat(
     )
     originals = {name: getattr(owner_module, name) for name in export_names}
     wrappers: dict[str, Callable[..., Any]] = {}
-    lock = RLock()
-
-    def compat_override(name: str, original: Any) -> Any:
-        value = facade_globals.get(name, original)
-        wrapper = wrappers.get(name)
-        if wrapper is not None:
-            return None if value is wrapper else value
-        return None if value is original else value
-
-    def compat_target_modules(name: str) -> tuple[ModuleType, ...]:
-        targets: list[ModuleType] = []
-        for module_name, module in sys.modules.items():
-            if not module_name.startswith("services.orchestrator.scheduler_state"):
-                continue
-            if isinstance(module, ModuleType) and hasattr(module, name):
-                targets.append(module)
-        if owner_module not in targets and hasattr(owner_module, name):
-            targets.append(owner_module)
-        return tuple(targets)
-
-    @contextmanager
-    def compat_bindings() -> Any:
-        with lock:
-            previous: dict[tuple[ModuleType, str], Any] = {}
-            for name, original in originals.items():
-                override = compat_override(name, original)
-                if override is None:
-                    continue
-                for module in compat_target_modules(name):
-                    key = (module, name)
-                    previous[key] = getattr(module, name)
-                    setattr(module, name, override)
-            try:
-                yield
-            finally:
-                for (module, name), value in previous.items():
-                    setattr(module, name, value)
 
     def compat_wrapper(name: str, original: Callable[..., Any]) -> Callable[..., Any]:
         @wraps(original)
         def wrapped(*args: Any, **kwargs: Any) -> Any:
-            with compat_bindings():
-                return original(*args, **kwargs)
+            return original(*args, **kwargs)
 
         return wrapped
 
@@ -261,9 +220,6 @@ def install_scheduler_state_compat(
         "_SCHEDULER_STATE_COMPAT_EXPORT_NAMES": export_names,
         "_SCHEDULER_STATE_COMPAT_ORIGINALS": originals,
         "_SCHEDULER_STATE_COMPAT_WRAPPERS": wrappers,
-        "_SCHEDULER_STATE_COMPAT_LOCK": lock,
-        "_scheduler_state_compat_override": compat_override,
-        "_scheduler_state_compat_bindings": compat_bindings,
         "_scheduler_state_compat_wrapper": compat_wrapper,
         "_SCHEDULER_STATE_COMPAT_WRAPPER_NAMES": wrapper_names,
         "_SCHEDULER_STATE_COMPAT_REEXPORT_NAMES": SCHEDULER_STATE_COMPAT_REEXPORT_NAMES,
