@@ -69,6 +69,66 @@ The file-journal scheduler SHALL expose a row-scoped operator CLI that converts 
 - **WHEN** `--journal-root` is a symlink loop or a literal unexpanded tilde path
 - **THEN** the loop root fails through the typed operational error path before the authority append with no traceback and zero journal bytes, and the tilde root's success receipt locator equals the expanded authority root actually used by repository reads and writes
 
+### Requirement: A terminal run-manifest-missing retry SHALL consult the per-model forcing witness
+
+The scheduler SHALL consult the per-model forcing witness for run-manifest-missing
+retries: when a terminal-success skip (`terminal_hydro_success` or
+`terminal_pipeline_success`) that lacks a run-manifest initial state is replaced
+on the non-strict lane by the `retry_terminal_run_manifest_missing` forced
+resubmit that restarts at `forecast`, it SHALL consult the per-model
+forcing witness for the candidate's own `(source, cycle, basin_version_id,
+model_id)` before the retry can be emitted. When no witness is found, the
+decision SHALL be the stable missing-forcing blocker (reason
+`missing_forcing_package_uri` or `forcing_version_row_absent`), returned
+verbatim from the guard, and no forecast work SHALL be submitted. When the
+witness is found, the retry decision, its reason, and its `restart_stage` SHALL
+be unchanged and its evidence SHALL carry the forcing provenance.
+
+Before that replacement, the scheduler SHALL first evaluate the §8.7
+journal-predecessor identity quarantine for the same skip. A quarantine retry or
+breaker-blocked decision SHALL replace the skip instead, carry quarantine
+provenance, count toward the §8.7 breaker, and consult the per-model forcing
+witness exactly as the quarantine leg does for a manifest-present skip. Only when
+the quarantine yields no decision SHALL the `retry_terminal_run_manifest_missing`
+retry be emitted. This ordering applies in the file-journal lane, which is the only
+candidate-state lane: the DB lane, which recorded no journal init-state token,
+was deleted with `PsycopgOrchestratorRepository` in R3 (#3260). A manifest-missing loop whose lineage matches still has no retry
+budget of its own; that residual risk is not addressed here.
+
+#### Scenario: Run-manifest-missing retry without own forcing blocks
+
+- **WHEN** a non-strict-lane candidate is terminal success, its evidence lacks a
+  run-manifest initial state, the quarantine yields no decision, and no forcing
+  witness exists for its own model
+- **THEN** the candidate SHALL be `blocked` with reason `missing_forcing_package_uri`
+  or `forcing_version_row_absent`, satisfying the stable missing-forcing blocker
+  contract
+- **AND** no forecast work SHALL be submitted
+
+#### Scenario: Run-manifest-missing retry with own forcing is unchanged
+
+- **WHEN** the same candidate's own forcing package is witnessed and the
+  quarantine yields no decision (the journal token matches, no id is recorded,
+  or the base key differs)
+- **THEN** the decision SHALL remain `retry_terminal_run_manifest_missing` with
+  `restart_stage: "forecast"` and its evidence SHALL carry the forcing provenance,
+  identical to the pre-change behavior
+
+#### Scenario: Stale lineage with a missing manifest is quarantined
+
+- **WHEN** a non-strict-lane `terminal_hydro_success` skip lacks a run-manifest
+  initial state and its journal init-state token is stale for the cycle's
+  expected lineage
+- **THEN** the decision is the journal-predecessor quarantine retry, the model is
+  counted by `canonical_quarantine_rerun_model_ids`, and the forcing witness is
+  consulted
+
+#### Scenario: The breaker stops a repeating manifest-missing rerun
+
+- **WHEN** the same shape recurs until the §8.7 breaker threshold
+- **THEN** the decision is `blocked_journal_predecessor_identity_quarantine` and
+  no forecast rerun is submitted
+
 ## REMOVED Requirements
 
 ### Requirement: Hydro run status sets have one definition and a parity lock

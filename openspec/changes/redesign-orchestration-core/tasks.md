@@ -477,6 +477,7 @@ Slice triage (R2c-4, #3311, task 4.6):
 - [x] 5.2 Delete the Appendix C R3 symbols and their SQL-text tests, plus `tests/test_real_database_integration.py:339-502` (each test confirmed SQL-only on node-27). Keep the `OrchestratorRepository` protocol. Update the inventory text and tests.
 - [x] 5.3 Add the Appendix D R3 spec deltas, including the MODIFIED `file-orchestration-journal` contract-test requirement already in this change. Update `docs/runbooks/node22-db-retirement-runbook.md:51`, which names the deleted class.
 - [x] 5.4 Verification: node-27 real-DB suites that remain pass. On node-22, one idle pass and one submitting pass.
+- [ ] 5.5 Delete the SQL `candidate_state` body and the lineage max-lead-hours helper left orphaned by R3-2, and rewrite stale R3 prose, line references and DB-lane spec wording (#3315, R3 follow-up). Verification: CI, plus the issue's acceptance greps.
 
 Suggested fixture level: expanded - persistence layer deletion.
 Minimal mergeable slice: 5.1 as a test-only PR; then 5.2 + 5.3 + 5.4 as the deleting PR.
@@ -529,6 +530,60 @@ Slice triage (R3-2, #3260, tasks 5.2, 5.3, 5.4):
   4. Full suite plain green (proxy env unset); ruff; `openspec validate --strict`; CI full suite.
   5. node-27 (5.4): remaining real-DB suites pass on throwaway `nhms_it_*` DBs: `-m integration tests/test_real_database_integration.py tests/test_qhh_production_bootstrap_scheduler.py tests/test_orchestration_chain.py tests/test_readonly_db_discovery_integration.py tests/test_integration_gate.py` plus `tests/test_node27_*_integration.py`. Expected: all pass, leftover DBs 0.
   6. node-22 (5.4): one idle pass and one submitting pass after the ff deploy at a pass boundary, stepping through every earlier merged slice SHA first; if not done when the PR is ready it merges with `Part of #3260` and 5.4 unticked.
+
+Slice triage (R3-3, #3315, task 5.5):
+- Issue type: deletion plus doc/spec hygiene. No runtime behaviour changes: the SQL `candidate_state` body takes `self` and calls `self._fetch_optional` / `self._fetch_all`, which no surviving class provides. Its only caller was `PsycopgOrchestratorRepository`, deleted in R3-2 (#3260).
+  - Fixture level: compact. Upstream suggested level: expanded (task group 5). Override: the only legacy-compatibility surface is the `chain._max_lead_hours_from_lineage` facade alias and its inventory entry, which have no importer (`git grep` returns only the definition, the alias and the inventory line); everything else is comments, docs and change-local spec text. It touches no live code path, shared contract or schema.
+  - Width: one PR. The line-reference rewrites (C) must land with the deletion (A1) that shifts their targets.
+- Recon at c6cd5610c, re-verified against the issue body:
+  - A1: `chain_repository_state.py:459-647`, with the reads at `:476`, `:505`, `:552`, `:590`, `:612`. `candidate_state_from_rows` begins at `:650`.
+  - A2: `chain_runtime_utils.py:605` and its `chain.py:608` alias, plus `docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md:367`.
+  - B1: `file_orchestration_journal.py:1956` (the issue says `:1953`).
+  - B2-B4 and C1-C4: unchanged from the issue.
+  - D: six `chain_repository_state.py:*` baseline keys plus the stale `safe_fs.py:10` key.
+  - E1-E7: as in the issue; the implementer re-greps them.
+- Change list (implementer): A1, A2, B1-B4, C1-C4, D and E1-E7, exactly as the issue body's Scope and Approach describe them.
+  - Comments and docstrings name symbols, not new line numbers.
+  - The baseline is regenerated with `--write-baseline`, and its diff only removes keys.
+  - Test prose in `tests/test_production_scheduler.py` that cites `chain_repository_state.py:>=650` may become symbol references, but is not required (issue Out of scope).
+- Spec (orchestrator, change-local, in this PR's final push):
+  - The #3315 addendum (from the #3261 review):
+    - `production-scheduler-orchestration` "A terminal run-manifest-missing retry SHALL consult the per-model forcing witness" (main `:1297-1349`): its "DB lane ... returns none there ... DB-lane behavior is unchanged" sentence is now a MODIFIED block saying the file-journal lane is the only candidate-state lane.
+    - Main `:761` ("SQL completed-pipeline probe") is already superseded by R3's REMOVED + ADDED pair; no edit.
+    - `job-retry-mechanism` "Cycle-granularity manual retry markers…" (change delta, from R4): the "DB read path" alignment clauses and of the three DB-parity AND bullets, two are removed and one is rewritten to keep only the suffix-widening fact.
+      - Every journal-path rule and every scenario name stays.
+      - The membership predicate now reads "SHALL follow this predicate" instead of "SHALL align with the DB read path's".
+  - PR #3325 round-1 carry-overs (`.workplans/3311/carry-overs.md`, P2):
+    - In `slurm-array-runner-integration` "Array-capable model stages": the `db_free_required_path_unsafe` example is narrowed to the ENOTDIR/ELOOP root rows observed, and the `_SYMLINK` code to a final-segment loop.
+    - In the workspace-root loop requirement: the out-of-workspace lock-loop clause cites `test_resolve_residue_config_final_segment_loop_converges_to_structured_refusal[NHMS_SCHEDULER_LOCK_ROOT-expected_blockers1]`, and the rows 19-20 clause is narrowed to the preflight block with `SCHEDULER_ROOT_WORKSPACE_ROOT_OUT_OF_APPROVED_ROOT` (`workspace_root`).
+    - Appendix D: the R2c-4 row names PR #3325's body as the durable copy of the observed table.
+- Out of scope (reported):
+  - R4/R5, the T1 table, and the test-file line references outside the checker's scan.
+  - `openspec/glossary.md:37`.
+  - `multibasin-state-idempotency/spec.md:10`.
+  - From PR #3325: `scheduler_runtime.py:956`, `:1358` and `:1482` (`!= "not_required"`, now always true) and the `evidence_safe_paths` second-order follow-up.
+- Must preserve: `candidate_state_from_rows` and its defaults stay byte for byte; so does every live code path. The `OrchestratorRepository` protocol stays.
+- Risk packs: Legacy compatibility (no live caller, no facade/inventory drift). The entropy facade guard and the line-reference checker stay green. Not selected: everything else.
+- Required evidence:
+  1. The issue's acceptance greps, each with its output. The `_max_lead_hours_from_lineage` grep is scoped `-- services scripts tests docs`, because this block names the symbol (a deviation recorded in the PR body).
+  2. The `line_reference_baseline.json` diff: removals only.
+  3. `git diff master -- services/orchestrator/chain_repository_state.py` deletes `:459-647` and nothing else (no change from `def candidate_state_from_rows` on); `ruff check --no-cache .` passes.
+  4. The PR body lists the E1-E4 and E7 rewrites as old → new.
+- Verification (owner policy 2026-11-22: no local full suite):
+  - Local tests:
+    - `tests/test_entropy_audit_line_references.py`
+    - the facade guards `tests/test_entropy_audit_facade_guard_aliases.py` and `tests/test_entropy_audit_facade_guard_forwarders.py`
+    - `tests/test_entropy_audit_instruction_inventory.py`
+    - `tests/test_file_orchestration_journal.py`
+    - `tests/test_file_journal_repository_semantics.py`
+    - `tests/test_orchestration_chain.py`
+    - `tests/test_import_layering_guard.py`
+    - `tests/test_retry_accounting_ast_guard.py`
+    - every test that greps `CHAIN_COMPATIBILITY_INVENTORY.md` / `SCHEDULER_COMPATIBILITY_INVENTORY.md` (`git grep -l COMPATIBILITY_INVENTORY -- tests`)
+  - Local checks: ruff and `openspec validate`.
+  - CI: the full sharded suite replaces the issue's "full suite green" criterion.
+  - node-22: none. This is a deviation from D5 (design.md:227), recorded in the PR body: the deleted body and helper have no referent (acceptance greps 1-2, the A1 import greps), so a pass exercises no changed path; module import is covered by CI's unit shards.
+  - node-27: none. No integration-marked suite references the deleted symbols (they were removed in R3-2).
 
 ## 6. R4 — Delete the SQL `RetryService`
 

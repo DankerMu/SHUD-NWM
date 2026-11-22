@@ -88,9 +88,6 @@
   "scripts/node27_timeseries_compression_live_evidence.py": {
     "scripts/node27_timeseries_compression_bundle_author.py:21-25": 3
   },
-  "scripts/node27_timeseries_compression_prearm.py": {
-    "packages/common/safe_fs.py:10": 1
-  },
   "scripts/node27_timeseries_retention.py": {
     "`:180": 1,
     "`:260": 1,
@@ -118,7 +115,6 @@
   },
   "services/orchestrator/file_orchestration_journal.py": {
     "chain_manifests.py:386": 1,
-    "chain_repository_state.py:510-515": 1,
     "scheduler_backfill_predecessor.py:226": 1
   },
   "services/orchestrator/operator_action_listing.py": {
@@ -172,9 +168,6 @@
     "scheduler_config/config.py:792": 1,
     "scheduler_runtime.py:650": 1
   },
-  "services/orchestrator/scheduler_config/path_modes.py": {
-    "scheduler_runtime_roots.py:576-590": 1
-  },
   "services/orchestrator/scheduler_evidence.py": {
     "scheduler_execution.py:738-754": 1
   },
@@ -221,18 +214,12 @@
     "`:669": 1,
     "`:749": 1,
     "`:843": 1,
-    "chain_repository_state.py:845-847": 1,
     "chain_source_cycle.py:685": 1,
     "scheduler_preflight.py:539-543": 1,
     "scheduler_state_decision.py:269": 1,
     "scheduler_state_failure.py:1401": 1
   },
   "services/orchestrator/scheduler_state_manual_retry.py": {
-    "`:510": 1,
-    "chain_repository_state.py:548-558": 1,
-    "chain_repository_state.py:884-891": 1,
-    "chain_repository_state.py:889-891": 1,
-    "chain_repository_state.py:902-916": 1,
     "scheduler_state_rows.py:417-423": 1,
     "scheduler_state_rows.py:481-486": 1
   },

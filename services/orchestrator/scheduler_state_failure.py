@@ -343,7 +343,7 @@ def _downstream_recorded_error_code(state: Mapping[str, Any]) -> str | None:
     then the failed stage's own failed job row.  Events never participate: an
     event-only code has no production shape, because ``candidate_state_from_rows``
     projects a ``failed_task`` event to the top-level ``error_code``
-    (chain_repository_state.py:845-847) with a ``NODE_FAILURE`` fallback
+    (the state dict's ``error_code`` entry, ``failed_task`` first) with a ``NODE_FAILURE`` fallback
     (chain_source_cycle.py:685,693), so a failed_task always leaves a non-empty
     top-level code for the first carrier above to find.
 

@@ -1339,9 +1339,10 @@ class _BoundedReadSequence(Sequence[Any]):
 def test_candidate_state_projection_does_not_scan_task_results_past_overflow_sentinel() -> None:
     """Read-count half of ``test_psycopg_candidate_state_does_not_scan_task_results_past_overflow_sentinel``.
 
-    Pinned on the shared projection both repositories call
-    (``chain_repository_state.candidate_state_from_rows``), with the same rows the SQL twin's
-    fetches returned: a lazy ``task_results`` is never read past the 17th item.
+    Pinned on the projection the journal repository calls
+    (``chain_repository_state.candidate_state_from_rows``; until R3, #3260, the SQL repository
+    called it too), with the rows the deleted SQL twin's stubbed fetches returned: a lazy
+    ``task_results`` is never read past the 17th item.
     """
 
     from services.orchestrator.chain_repository_state import candidate_state_from_rows

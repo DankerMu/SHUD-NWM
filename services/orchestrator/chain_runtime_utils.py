@@ -602,17 +602,6 @@ def _first_optional_int(*values: Any) -> int | None:
     return None
 
 
-def _max_lead_hours_from_lineage(value: Any) -> int | None:
-    if isinstance(value, str):
-        try:
-            value = json.loads(value)
-        except json.JSONDecodeError:
-            return None
-    if not isinstance(value, Mapping):
-        return None
-    return _optional_int(value.get("max_lead_hours"))
-
-
 def _basin_max_lead_hours(basin: Mapping[str, Any]) -> int | None:
     """Configured ``max_lead`` policy (hours) for a cohort basin's warm-start chaining."""
     for key in ("max_lead_hours", "warm_start_max_lead_hours"):

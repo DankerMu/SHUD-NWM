@@ -242,12 +242,14 @@ def _state_completed_stage_evidence_names_job(state: Mapping[str, Any], entity_i
     ``..._retry_2`` ancestor and refuse a pin the twin grants.
 
     The OTHER writer of this key copies the repaired mapping into it
-    (``chain_repository_state.py:884-891``), and that payload (:230-246) carries no ``job_id``
+    (``chain_repository_state.candidate_state_from_rows``'s ``repaired_restart_projected``
+    branch), and that payload (:230-246) carries no ``job_id``
     key at all — ``mapping.get("job_id")`` is then ``None``, the comparison is against ``""``,
     and a marker entity id can never equal it.  So the copy path produces no false hit.
 
     That copy is no longer the only way this key coexists with repaired evidence.  Since #1461
-    the scan is an independent ``if`` (``chain_repository_state.py:902-916``), so repaired
+    the scan is an independent ``if`` (the ``_best_completed_stage_success_evidence`` scan in
+    ``candidate_state_from_rows``, guarded by ``not repaired_restart_projected``), so repaired
     evidence carrying no ``restart_stage`` leaves the SCAN's payload here, ``job_id`` and all.
     That is the source-cycle variant's shape.  The manual-stage variant reaches it structurally —
     the one ``_FORECAST_STAGE_ORDER`` member with no ``_stage_after`` is ``state_save_qc`` — but
@@ -391,7 +393,8 @@ def _unresolvable_marker_entity_pins_attempt(state: Mapping[str, Any], event: Ma
       guard suppressed the scan, or its stage has no ``_stage_after`` successor at all
       (``download``/``state_save_qc``/``publish`` queue targets, whose producer can never name
       them); widening that producer is refused because the same mapping drives restart routing
-      (``chain_repository_state.py:889-891``);
+      (the ``restart_stage`` / ``restart_from_stage`` assignments of
+      ``chain_repository_state.candidate_state_from_rows``'s repaired-copy branch);
     * the target was repaired after the write without ``repaired_stage_evidence`` naming it
       (that mapping keeps one winner too);
     * the target was re-activated after the write — resubmitted out of a non-terminal failure
@@ -553,10 +556,9 @@ def _state_has_candidate_scope_failed_job(state: Mapping[str, Any]) -> bool:
     SAME step (the foreign-model filter pair in ``candidate_state``'s
     ``pipeline_jobs=``/``pipeline_events=`` derivations, #1288) — dropping the row half alone
     would leave an orphaned marker that re-enters the pin decision through
-    ``_unresolvable_marker_entity_pins_attempt``; on the DB path the event query returns only
-    ``pipeline_job`` events whose ``entity_id`` is selected from the same job predicate, bound
-    to the same values, that the jobs query runs (``chain_repository_state.py:548-558`` against
-    ``:510-515``).  A surviving marker therefore proves real job rows exist beside it.
+    ``_unresolvable_marker_entity_pins_attempt`` (until R3, #3260, the SQL repository's event
+    query gave the same guarantee by selecting ``entity_id`` from its jobs predicate).  A
+    surviving marker therefore proves real job rows exist beside it.
 
     Within the job/hydro sources:
 

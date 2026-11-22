@@ -18249,7 +18249,8 @@ def test_runtime_threads_falls_back_to_one_without_any_allocation_hint(tmp_path:
 
 
 # ---------------------------------------------------------------------------
-# #1572: real-DB candidate-state projection oracle (node-27)
+# #1572: file-journal candidate-state projection oracle (local; the node-27
+# real-DB half was deleted with the SQL repository in R3, #3260)
 # ---------------------------------------------------------------------------
 
 
@@ -18269,13 +18270,15 @@ def _integration_candidate_rows(
     extra_rows: int,
     friendly: bool,
 ) -> list[dict[str, Any]]:
-    """The one row geometry shared by the DB seed and the file-journal seed.
+    """The reverse/friendly row geometry seeded into the file journal.
 
     Reverse: the ``*_forecast_retry_87`` row carries the maximum stage attempt
     and sits at the OLD end of the freshness window behind ``job_limit`` fresher
     other-stage rows.  Friendly: the retry row is the NEWEST row (in-window).
-    Both builders feed the SAME payloads into ``ops.pipeline_job`` and into
-    ``FileOrchestrationJournalRepository.append_historical_pipeline_job``.
+    The payloads feed
+    ``FileOrchestrationJournalRepository.append_historical_pipeline_job``; until
+    R3 (#3260) the same payloads also seeded ``ops.pipeline_job`` for the
+    node-27 real-DB oracle.
     """
 
     rows: list[dict[str, Any]] = []
@@ -18364,11 +18367,12 @@ def test_file_journal_candidate_state_reverse_and_friendly_geometry_matches_db_c
     Seeds the SAME reverse and friendly row geometries through the real
     ``FileOrchestrationJournalRepository.append_historical_pipeline_job``
     public durable write API and reads candidate state through the real
-    repository.  Asserts the same DB-facing contract the node-27 integration
-    test proves against ``ops.pipeline_job``: true totals, pure-freshness
-    top-job-limit IDs, hard returned-row bound, stage-scoped forecast attempt
-    87, and cross-stage per-stage attempt parity — all WITHOUT the shared
-    direct projection.
+    repository.  Asserts the candidate-state contract the node-27 integration
+    test proved against ``ops.pipeline_job`` until R3 (#3260) deleted it with
+    the SQL repository (the test name keeps its historical ``db_contract``
+    suffix): true totals, pure-freshness top-job-limit IDs, hard returned-row
+    bound, stage-scoped forecast attempt 87, and cross-stage per-stage attempt
+    parity — all WITHOUT the shared direct projection.
     """
     from services.orchestrator.file_orchestration_journal import (
         FileOrchestrationJournalRepository,

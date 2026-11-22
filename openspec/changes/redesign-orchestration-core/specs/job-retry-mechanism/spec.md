@@ -216,7 +216,7 @@ records the cycle failure being repaired, and counting it would
 make the only-failure-left arm unreachable; the module enforces
 this exclusion itself with a row-identity predicate — an id-less
 synthesized row (every legitimate production row carries a job id
-on both read paths) is never a live-failure source, closing the
+on the journal read path) is never a live-failure source, closing the
 top-level `pipeline_status` leak on job-row-less synthesized and
 compacted states, while the production projections' shape
 guarantee — a surviving marker proves real job rows exist beside
@@ -299,16 +299,18 @@ already mandates for the cross-pass failure policy. Marker-shaped events remain 
 blocker scanning regardless of attribution (a foreign marker must
 never be treated as an active blocker suppressing the candidate's
 own manual retry), and candidate-state event-row visibility on the
-journal/DB read paths is unchanged for cycle-granularity markers and
+journal read path is unchanged for cycle-granularity markers and
 model-less cycle-scope rows — those cycle-wide events stay visible in
 every candidate's raw state for diagnostics. Candidate-state
-membership for pipeline job rows on the journal (db-free) read path
-SHALL align with the DB read path's candidate-state predicate: a row
+membership for pipeline job rows on the journal read path (the only
+candidate-state read path; the DB read path was deleted with
+`PsycopgOrchestratorRepository` in R3, #3260) SHALL follow this
+predicate: a row
 whose run id is the candidate's own run id belongs to the candidate;
 a row whose run id carries the cycle-scope run grammar belongs to the
 candidate only when its `model_id` is empty (the model-less cohort
 contract — such rows stay visible to every candidate in the cycle,
-including the journal-only widening to rows whose run id extends the
+including the widening to rows whose run id extends the
 cycle run id with a suffix, which this rule leaves in place) or names
 the candidate itself; a row naming a foreign `model_id` is excluded
 from the candidate's job rows, and a `pipeline_job`-entity event
@@ -322,8 +324,7 @@ foreign model's manual retry marker can neither report
 cycle-level gates draw different lines: the duplicate-submission
 gates (the active-pipeline and active-slurm-jobs scans) keep their
 wider unconditional cycle-run ROW VISIBILITY unchanged — their
-active-job scans and the DB read path's counterparts deliberately
-share that width — but visibility is not terminal-completion
+active-job scans deliberately keep that width — but visibility is not terminal-completion
 authority. The active-pipeline gate's hydro-active suppression
 answers a candidate-scoped question ("has THIS candidate already
 completed, making its ACTIVE hydro placeholder stale?") and SHALL
@@ -332,21 +333,14 @@ the candidate's ACTIVE hydro arm. Its local terminal-completion
 conjunction excludes a row whose `model_id` is non-empty and names
 another model while its run id is exactly the cycle run id; the
 candidate's own completion rows and model-less cycle-scope cohort
-completion rows retain suppression authority. This aligns the
-journal active verdict's direction with the DB active-pipeline gate,
-whose source/cycle/model-qualified ACTIVE hydro arm is combined with
-its active-job arm by a plain `UNION ALL` and has no terminal-
-completion suppression clause. The completed-pipeline gate likewise
+completion rows retain suppression authority. The completed-pipeline gate likewise
 answers a candidate-scoped question ("has THIS candidate
 completed") and SHALL NOT count the same foreign-model row as the
 candidate's completion: completion is proven only by the
 candidate's own rows (its own run id or its own `model_id`), by
 model-less cycle-scope cohort completion rows (which stay
 cycle-wide — every candidate completes through them), or by the
-candidate's own completed hydro run. This aligns the journal
-completion verdict's direction with the DB completed-pipeline gate,
-which reads `hydro.hydro_run` under a source/cycle/model three-key
-restriction and never sees another model's job rows. Both
+candidate's own completed hydro run. Both
 candidate-scoped exclusions live in their gate-local terminal-
 completion conjunctions, not in the shared row-match predicate that
 feeds the duplicate-submission scans. On the
@@ -377,12 +371,8 @@ drive the retry decision it was written to request.
 - **AND** the candidate's own row with `run_id` equal to the cycle
   run id and the candidate's own `model_id` remains visible, and a
   marker targeting it keeps its adoption and pinning semantics
-- **AND** the DB read path gives the same candidate-state membership
-  verdict for these rows — the foreign-model named row is excluded
-  there by the `model_id IS NULL` guard on its cycle-run clause and
-  the candidate's own named row is included by its model clause —
-  while the suffix-extended model-less row remains a journal-only
-  widening that this change leaves in place
+- **AND** the suffix-extended model-less row stays visible, a widening
+  of the cycle-scope run grammar that this change leaves in place
 - **AND** with the foreign-model row and its marker in place, the
   cycle-level duplicate-submission gates (active-pipeline,
   active-slurm-jobs) answer exactly as before the exclusion — the
@@ -422,11 +412,6 @@ drive the retry decision it was written to request.
 - **AND** on the same fixture the active-pipeline and
   active-slurm-jobs answers are byte-for-byte unchanged, proving
   the shared row-match predicate was not narrowed
-- **AND** the DB read path already answers `False` for the foreign
-  shape — its completed-pipeline gate reads `hydro.hydro_run` under
-  the source/cycle/model three-key restriction — so the journal and
-  DB verdicts now agree in direction for this shape instead of
-  diverging
 
 #### Scenario: Foreign-model completion cannot suppress the candidate's active hydro run
 
@@ -442,10 +427,6 @@ drive the retry decision it was written to request.
   every listed hydro-status and terminal-stage combination — the
   foreign completion is visible to the wide row scan but cannot
   suppress this candidate's ACTIVE hydro arm
-- **AND** the DB active-pipeline gate answers `True` in the same
-  direction because its source/cycle/model-qualified ACTIVE hydro
-  arm is a plain union member and has no terminal-completion
-  suppression clause
 - **AND** replacing the foreign row with either the candidate's own
   terminal-completion row (its own `fcst_...` run id or its own
   `model_id` on the exact cycle run id) or a model-less cycle-scope

@@ -117,7 +117,7 @@ The production scheduler SHALL submit heavy download/canonical/forcing/SHUD/pars
 WHEN Slurm execution is enabled and `DATABASE_URL` is missing, points to localhost, or points to a remote host
 THEN the Slurm preflight does not require a database endpoint: it records `checks.database` with `required: false`, `db_free_runtime: true` and `compute_node_reachable: "not_required"`, and emits no `SLURM_PREFLIGHT_DATABASE_URL_*` blocker for any of the three (the scheduler is always DB-free; `ProductionSchedulerConfig` pins `scheduler_db_free_required` to `true`)
 AND a configured `DATABASE_URL`, local or remote, is refused by the DB-free runtime preflight as `database_url_forbidden` (`DATABASE_URL`): `run_once()` returns `preflight_blocked` with `execution_boundary` and `lock.reason` both `db_free_runtime_preflight_blocked`, the scheduler lock is not acquired, and no Slurm job is created
-AND a missing `DATABASE_URL` is the expected DB-free state and is not refused on that ground (#3311 observed-behaviour rows 1-3).
+AND a missing `DATABASE_URL` is the expected DB-free state and is not refused on that ground (#3311 observed-behaviour rows 1-3, table restated in PR #3325 body).
 
 #### Scenario: project-local runtime roots
 
@@ -152,7 +152,7 @@ AND records a storage preflight blocker.
 WHEN Slurm execution is enabled and a configured allowed storage root cannot be canonically resolved — its ancestor is a regular file (`ENOTDIR`), an ancestor denies traversal (`EACCES`), it is a symlink loop (`ELOOP`), or it does not exist (`ENOENT`) — as detected by errno from strict resolution
 THEN scheduler configuration construction never aborts because of it; the configuration layer hands the value down without adjudicating, admitting it into `allowed_storage_roots` lexically for the three non-`ENOENT` errnos and as the non-strict real path for `ENOENT`
 AND the root is admitted as a containment base with no blocker of its own on every plane of the run: the storage preflight emits no `ALLOWED_STORAGE_ROOTS_*` blocker, the scheduler runtime-root preflight emits no `SCHEDULER_ROOT_ALLOWED_ROOTS_*` blocker, and the DB-free lane emits no `db_free_allowed_root_unsafe` blocker; every plane lists the root in its allowed-roots evidence, so for a given filesystem state the evidence planes produced by one run never contradict each other, and the adjudication never escapes as an unhandled exception
-AND this admission is adjudicated by `docs/adr/0009-path-canonicalization-dereference-doctrine.md` clause 3: the admitted root serves only as a containment base and carries no assertion that it exists, and a path judged against it is dereferenced before any verdict is committed — a DB-free required path placed under such a root (for example `NHMS_SCHEDULER_JOURNAL_ROOT`) is itself refused as `db_free_required_path_unsafe`
+AND this admission is adjudicated by `docs/adr/0009-path-canonicalization-dereference-doctrine.md` clause 3: the admitted root serves only as a containment base and carries no assertion that it exists, and a path judged against it is dereferenced before any verdict is committed — a DB-free required path placed under such a root is itself adjudicated by the DB-free runtime preflight's required-path blockers (for example `NHMS_SCHEDULER_JOURNAL_ROOT` under an `ENOTDIR` or `ELOOP` root is refused as `db_free_required_path_unsafe`)
 AND the same holds whether or not the pass carries repair authority (`repair_missing_forcing` false and true)
 AND an allowed root that remains merely missing after canonicalization (ENOENT) is never treated as unsafe and never escapes configuration construction or the storage preflight as an unhandled exception
 AND blocker paths and allowed-roots evidence obey the runtime-root preflight's existing evidence-safe masking discipline (`[local-path]`) (#3311 observed-behaviour rows 4-11, 24-25).
@@ -162,7 +162,7 @@ AND blocker paths and allowed-roots evidence obey the runtime-root preflight's e
 WHEN the scheduler configures an object-store, published-artifact, log, runtime, or temp root — a root that is not a containment base for other configured paths — whose final path component cannot be canonically resolved for a reason other than absence (for example a symlink loop)
 THEN scheduler configuration construction never aborts: the configuration layer hands down the non-strict canonicalised value without adjudicating, producing the same canonical form and the same subsequent verdict across supported CPython versions
 AND when Slurm execution is enabled, the storage preflight records the unsafe-path storage preflight blocker for the roots it consults (`SLURM_PREFLIGHT_OBJECT_STORE_ROOT_UNSAFE_PATH`, `SLURM_PREFLIGHT_LOG_ROOT_UNSAFE_PATH`, `SLURM_PREFLIGHT_RUNTIME_ROOT_UNSAFE_PATH`) and rejects submission before creating Slurm jobs
-AND the scheduler runtime-root preflight refuses the object-store, published-artifact, runtime and temp roots it judges as `SCHEDULER_ROOT_<FIELD>_SYMLINK`; it does not judge the log root
+AND when such a root's final segment is a symlink loop, the scheduler runtime-root preflight refuses the object-store, published-artifact, runtime and temp roots it judges as `SCHEDULER_ROOT_<FIELD>_SYMLINK`; it does not judge the log root
 AND a root that is merely missing (ENOENT) keeps the existing construction-time semantics — configuration construction performs no existence validation and the canonicalised value is identical to the previous non-strict resolution product (#3311 observed-behaviour rows 12-16).
 
 #### Scenario: safe template and environment export
@@ -250,7 +250,7 @@ The refusal of a workspace root that is itself a symlink loop SHALL be attribute
 - **GIVEN** a lock root configured as a symlink loop
 - **WHEN** the configuration is constructed
 - **THEN** construction does not raise
-- **AND** a loop outside the workspace is refused by the root preflight as `SCHEDULER_ROOT_LOCK_ROOT_OUT_OF_WORKSPACE` (`lock_root`), and a loop inside the workspace as `SCHEDULER_ROOT_LOCK_ROOT_SYMLINK` (`lock_root`); for the latter `run_once()` returns `preflight_blocked` with `execution_boundary` and `lock.reason` both `scheduler_root_preflight_blocked` and the lock is not acquired (#3311 observed-behaviour row 21)
+- **AND** a loop outside the workspace is refused by the root preflight as `SCHEDULER_ROOT_LOCK_ROOT_OUT_OF_WORKSPACE` (`lock_root`) (`test_resolve_residue_config_final_segment_loop_converges_to_structured_refusal[NHMS_SCHEDULER_LOCK_ROOT-expected_blockers1]`), and a loop inside the workspace as `SCHEDULER_ROOT_LOCK_ROOT_SYMLINK` (`lock_root`); for the latter `run_once()` returns `preflight_blocked` with `execution_boundary` and `lock.reason` both `scheduler_root_preflight_blocked` and the lock is not acquired (#3311 observed-behaviour row 21)
 - **AND** the confinement helper `_confined_path`, called directly, keeps its "must be under workspace_root" wording verbatim (`test_resolve_residue_confined_path_keeps_non_loop_containment_refusal`)
 
 #### Scenario: The non-loop workspace-root refusals are untouched
@@ -258,7 +258,7 @@ The refusal of a workspace root that is itself a symlink loop SHALL be attribute
 - **GIVEN** in turn a workspace root that is a regular file and a workspace root whose mode denies traversal
 - **WHEN** the configuration is constructed and the root preflight runs
 - **THEN** construction does not raise
-- **AND** the regular-file workspace root is refused as `SCHEDULER_ROOT_WORKSPACE_ROOT_OUT_OF_APPROVED_ROOT` (`workspace_root`) with `SCHEDULER_ROOT_LOCK_ROOT_UNSAFE_PATH` / `SCHEDULER_ROOT_EVIDENCE_ROOT_UNSAFE_PATH`, and the untraversable one as `SCHEDULER_ROOT_WORKSPACE_ROOT_OUT_OF_APPROVED_ROOT` with `SCHEDULER_ROOT_LOCK_ROOT_NOT_WRITABLE` / `SCHEDULER_ROOT_EVIDENCE_ROOT_NOT_WRITABLE` (#3311 observed-behaviour rows 19-20)
+- **AND** the scheduler runtime-root preflight is blocked with `SCHEDULER_ROOT_WORKSPACE_ROOT_OUT_OF_APPROVED_ROOT` (`workspace_root`) for each (#3311 observed-behaviour rows 19-20, table restated in PR #3325 body)
 
 ## REMOVED Requirements
 
