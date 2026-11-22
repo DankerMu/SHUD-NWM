@@ -65,6 +65,9 @@ input.
 - **THEN** an AST guard test fails and names the module and line
 - **AND** calls to the owner's parsers, regex matches and `in` membership tests on
   the marker that do not mint a new id or attempt are allowed.
+- **AND** the guard is a syntactic check: every form T2 removed is caught, and
+  any shape it is later found to miss is recorded in the guard and closed by
+  tightening it, never by an allowlist entry.
 
 ## MODIFIED Requirements
 

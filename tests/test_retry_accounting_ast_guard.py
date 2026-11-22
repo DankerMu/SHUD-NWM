@@ -62,16 +62,21 @@ Violation kinds (the failure message is ``path:lineno kind``):
   f-string in any other argument -- the subject, ``string=`` -- is scanned as
   usual, so ``re.fullmatch(PATTERN, f"{base}_retry_{n}")`` flags;
 * ``id-concat``: ``BinOp`` ``Add`` / ``Mod`` with a marker operand, or a
-  ``Mod`` whose left side is a str constant and whose right side has a marker
-  direct element (the right operand itself, a Tuple's elements or a Dict's
-  values): ``"%s%s%d" % (base, RETRY_JOB_ID_MARKER, n)``;
+  ``Mod`` -- whatever its left side (a literal, a name, an attribute) --
+  whose right side is a Tuple with a marker element or a Dict with a marker
+  value: ``"%s%s%d" % (base, RETRY_JOB_ID_MARKER, n)``, ``fmt % (b,
+  RETRY_JOB_ID_MARKER, n)``;
 * ``id-format``: ``.format`` / ``.format_map`` with a marker receiver (a
   marker constant or an alias such as ``TPL = "{}_retry_{}"``), a marker
-  positional argument or keyword value, or -- for ``format_map`` -- a marker
-  value of a Dict literal argument;
-* ``id-join``: ``join`` with a marker receiver, or with an argument that is a
-  marker or a List / Tuple / Set literal with a marker element.  Generator and
-  comprehension arguments are not entered, so ``", ".join(j for j in ids if
+  positional argument or keyword value, a marker value of a ``**{...}`` Dict
+  literal, or -- for ``format_map`` -- a marker value of a Dict literal
+  argument;
+* ``id-join``: ``join`` with a marker receiver, or with an argument that is,
+  or structurally contains, a marker: from each argument the guard descends
+  through ``BinOp`` (both sides), ``IfExp`` (body and ``orelse``),
+  ``Starred`` and List / Tuple / Set literal elements, as in ``"".join([b,
+  RETRY_JOB_ID_MARKER] + [str(n)])``.  It never enters a generator, a
+  comprehension or a call, so ``", ".join(j for j in ids if
   RETRY_JOB_ID_MARKER in j)`` stays clean;
 * ``id-augassign``: ``x += <marker>``;
 * ``marker-split``: ``rsplit`` / ``split`` / ``partition`` / ``rpartition`` /
@@ -112,8 +117,15 @@ body) is not flagged, and a later rebinding does not clear it.  Taint does
 not cross a function boundary in either direction: closures and callers are
 not followed.
 
-Known, documented misses.  These are the only accepted gaps; each has a
-not-flagged bite row, so tightening one later is a deliberate edit:
+The guard is a syntactic heuristic, not a proof.  It catches every form T2
+removed (the 26 pre-T2 hits at ``5570a72b4``) and the common construction,
+split and increment shapes listed above.  The misses below are known
+examples, and the list is not exhaustive.  Each listed miss has a not-flagged
+bite row, so tightening one later is a deliberate edit.  A new miss found
+later is fixed by tightening the guard or by adding a row; it never needs an
+allowlist entry.
+
+Known misses:
 
 * ``f"{a}x_retry_{n}"``: the marker does not start a constant part.  Accepted
   so that unrelated text stays clean;
@@ -350,9 +362,7 @@ class _RetryAccountingScan(ast.NodeVisitor):
             return False
         if self.is_marker(node.left) or self.is_marker(node.right):
             return True
-        if not (
-            isinstance(node.op, ast.Mod) and isinstance(node.left, ast.Constant) and isinstance(node.left.value, str)
-        ):
+        if not isinstance(node.op, ast.Mod):
             return False
         right = node.right
         elements = right.elts if isinstance(right, ast.Tuple) else right.values if isinstance(right, ast.Dict) else []
@@ -384,15 +394,36 @@ class _RetryAccountingScan(ast.NodeVisitor):
     def _format_operands(node: ast.Call, func: ast.Attribute) -> Iterator[ast.AST]:
         yield func.value
         yield from node.args
-        yield from (keyword.value for keyword in node.keywords)
+        for keyword in node.keywords:
+            yield keyword.value
+            if keyword.arg is None and isinstance(keyword.value, ast.Dict):
+                yield from keyword.value.values
         if func.attr == "format_map" and node.args and isinstance(node.args[0], ast.Dict):
             yield from node.args[0].values
+
+    @staticmethod
+    def _join_parts(node: ast.AST) -> Iterator[ast.AST]:
+        """``node`` and what it structurally holds; never a generator, comprehension or call."""
+
+        yield node
+        if isinstance(node, ast.BinOp):
+            children: list[ast.AST] = [node.left, node.right]
+        elif isinstance(node, ast.IfExp):
+            children = [node.body, node.orelse]
+        elif isinstance(node, ast.Starred):
+            children = [node.value]
+        elif isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+            children = list(node.elts)
+        else:
+            children = []
+        for child in children:
+            yield from _RetryAccountingScan._join_parts(child)
 
     @staticmethod
     def _join_elements(node: ast.Call, func: ast.Attribute) -> Iterator[ast.AST]:
         yield func.value
         for arg in node.args:
-            yield from arg.elts if isinstance(arg, (ast.List, ast.Tuple, ast.Set)) else [arg]
+            yield from _RetryAccountingScan._join_parts(arg)
 
     def visit_Call(self, node: ast.Call) -> None:
         func = node.func
@@ -583,6 +614,24 @@ _MUST_FLAG: list[tuple[str, str, list[tuple[int, str]]]] = [
     ("chained-alias", 'A = "_retry_"\nB = A\njob_id = base + B + str(n)', [(3, "id-concat")]),
     # ``join`` over a Tuple literal, and the narrowness of the regex exemption.
     ("join-tuple-literal", 'job_id = "".join((base, "_retry_", str(n)))', [(1, "id-join")]),
+    ("join-list-concat", 'job_id = "".join([b, RETRY_JOB_ID_MARKER] + [str(n)])', [(1, "id-join")]),
+    ("join-ifexp", 'job_id = "".join([b, RETRY_JOB_ID_MARKER, str(n)] if x else [])', [(1, "id-join")]),
+    ("join-starred", 'job_id = "".join([*[b, RETRY_JOB_ID_MARKER], str(n)])', [(1, "id-join")]),
+    # ``%`` with a non-literal template, and ``.format(**{...})``.
+    ("percent-name-template", 'FMT = "%s%s%d"\nj = FMT % (b, RETRY_JOB_ID_MARKER, n)', [(2, "id-concat")]),
+    (
+        "percent-parameter-template",
+        "def f(fmt, b, n):\n    return fmt % (b, RETRY_JOB_ID_MARKER, n)",
+        [(2, "id-concat")],
+    ),
+    ("percent-attribute-template", "j = self.fmt % (b, RETRY_JOB_ID_MARKER, n)", [(1, "id-concat")]),
+    ("percent-name-template-dict", 'j = FMT % {"m": RETRY_JOB_ID_MARKER}', [(1, "id-concat")]),
+    (
+        "format-double-star-dict",
+        'j = "{b}{m}{n}".format(**{"b": b, "m": RETRY_JOB_ID_MARKER, "n": n})',
+        [(1, "id-format")],
+    ),
+    ("annotated-alias", 'SEP: str = "_retry_"\njob_id = base + SEP + str(n)', [(2, "id-concat")]),
     ("fstring-into-non-re-match", 'ok = pattern.match(f"{base}_retry_{n}")', [(1, "id-fstring")]),
     ("fstring-into-re-sub", 'import re\ns = re.sub("x", "y", f"{b}_retry_{n}")', [(2, "id-fstring")]),
     ("fstring-into-re-subject", 'import re\nok = re.fullmatch(PATTERN, f"{base}_retry_{n}")', [(2, "id-fstring")]),
@@ -593,6 +642,12 @@ _MUST_FLAG: list[tuple[str, str, list[tuple[int, str]]]] = [
         [(2, "id-concat")],
     ),
     # Taint: other adders, annotated assignment, ``async def`` and ``lambda`` scopes.
+    ("plus1-insert-taint", "xs = []\nxs.insert(0, retry_suffix_attempt(j))\nn = max(xs) + 1", [(3, "parser+int")]),
+    (
+        "plus1-appendleft-taint",
+        "q = deque()\nq.appendleft(retry_suffix_attempt(j))\nn = q[0] + 1",
+        [(3, "parser+int")],
+    ),
     ("plus1-set-add-taint", "s = set()\ns.add(retry_suffix_attempt(j))\nn = max(s) + 1", [(3, "parser+int")]),
     (
         "plus1-extend-taint",
@@ -636,6 +691,8 @@ _MUST_NOT_FLAG: list[tuple[str, str]] = [
     ("field-name-percent", 'key = "%s_retry_count" % stage'),
     ("field-name-augassign", 'key = stage\nkey += "_retry_count"'),
     ("join-generator", 's = ", ".join(str(x) for x in xs)'),
+    ("join-ifexp-field-names", 's = ", ".join([a, "_retry_count"] if x else [b])'),
+    ("percent-name-template-field", 'key = FMT % (stage, "_retry_count")'),
     ("join-membership-filter", 's = ", ".join(j for j in ids if RETRY_JOB_ID_MARKER in j)'),
     (
         "local-alias-stays-in-its-function",

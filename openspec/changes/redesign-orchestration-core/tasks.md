@@ -1571,23 +1571,23 @@ Slice triage (T2-5, #3269, tasks 9.5, 9.7):
   - `tests/` is out of scope, because T1 and the owner tests build ids on purpose.
   - `services/orchestrator/retry_identity.py` is excluded by exact repo-relative path. It is the only exclusion.
   - The allowlist is empty, so there is no allowlist file.
-  - Marker = any of:
-    - a str constant that fully matches `_retry_\d*`;
-    - a str constant containing `(%[sdri]|\})_retry_(%|\{|\d|$)` (the `%` / `.format` placeholder forms).
-
-      Field names such as `f"{stage}_retry_count"`, `prefix + "_retry_attempt_floor"`, `"{}_retry_limit".format(x)` and `k.removesuffix("_retry_count")` are therefore not markers.
+  - Marker (current rules, after fix passes 1-2 of PR #3324). Any of:
+    - a str constant that starts with `_retry_` followed by `%`, `{`, a digit, or the end of the string;
+    - a str constant containing a `%` placeholder (with optional key, flags, width and precision) or a `}` immediately before such a `_retry_`;
     - the name `RETRY_JOB_ID_MARKER`, or an attribute with that name;
-    - a module-local alias, collected in a pre-pass from `X = "_retry_"`, `X = RETRY_JOB_ID_MARKER` and `from ... import RETRY_JOB_ID_MARKER as M`.
+    - a scoped alias: an assignment or annotated assignment of a marker or template constant (`X = "_retry_"`, `TPL = "{}_retry_{}"`, `X = RETRY_JOB_ID_MARKER`), or `from ... import RETRY_JOB_ID_MARKER as M`. A module-level alias holds everywhere; a function-level alias holds in that function and the functions nested in it.
+
+    Field names such as `"_retry_count"`, `f"{stage}_retry_count"`, `prefix + "_retry_attempt_floor"`, `"{}_retry_limit".format(x)` and `k.removesuffix("_retry_count")` are therefore not markers.
   - Violation kinds:
 
     | Kind | Matches |
     |---|---|
-    | `id-fstring` | an f-string with a marker `FormattedValue`, or with a constant part that is a marker (`_retry_` followed by a `FormattedValue`, or a full `_retry_\d*` part) |
-    | `id-concat` | `BinOp` `Add`/`Mod` with a marker operand |
-    | `id-format` | `.format` / `.format_map` on a marker-bearing constant |
-    | `id-join` | `join` with the marker as receiver or in its args |
+    | `id-fstring` | an f-string with a marker `FormattedValue`, or a constant part that is a marker. An f-string in the pattern position (`args[0]` / `pattern=`) of `re.compile` / `match` / `search` / `fullmatch` is exempt. |
+    | `id-concat` | `BinOp` `Add` with a marker operand; `Mod` with a marker template, or with a marker as a direct Tuple element or Dict value of the right operand (any left side) |
+    | `id-format` | `.format` / `.format_map` whose receiver is a marker, or with a marker as a positional argument, a keyword value, a `**{...}` Dict value or a `format_map` Dict value |
+    | `id-join` | `join` with the marker as receiver, or as a direct argument element. Elements are reached through List/Tuple/Set literals, `BinOp`, `IfExp` and `Starred`, but never through generators, comprehensions or calls. |
     | `id-augassign` | `x += <marker>` |
-    | `marker-split` | `rsplit`/`split`/`partition`/`rpartition`/`removesuffix`/`rstrip` with a marker first argument |
+    | `marker-split` | `rsplit` / `split` / `partition` / `rpartition` / `removesuffix` / `rstrip` with a marker as first argument or as `sep=` |
     | `parser+int` | `BinOp Add` of an int literal and an operand that derives from a reader, in either order |
     | `parser+=int` | `AugAssign Add` of an int on a name that derives from a reader |
 
@@ -1605,7 +1605,10 @@ Slice triage (T2-5, #3269, tasks 9.5, 9.7):
     - Measured at b494dc9a9: 0 hits. A new owner function, or a new `*attempt*` helper, is covered automatically.
     - A meta-test pins the four scheduler readers by module: `_state_retry_attempt` and `_job_retry_attempt` in `scheduler_state_rows`, `_fallback_previous_attempt` in `scheduler_state_manual_retry`, `_retry_attempt_from_basins` in `chain_runtime_utils`. Each still exists and is still matched by the rule.
     - The owner set is enumerated from the module's top-level `FunctionDef` nodes (AST of `retry_identity.py`, not `_`-prefixed), not with `inspect.isfunction`, so a future decorator cannot hide a function.
-  - Known, documented misses. These are the only accepted gaps. Each gets a not-flagged bite row, so tightening one later is a deliberate edit.
+  - Known misses. The guard is a syntactic heuristic, so this list gives examples and is not exhaustive.
+    - The guard catches every form T2 removed (the 26 pre-T2 hits) and the construction, split and increment shapes in the table.
+    - Each listed miss has a not-flagged bite row, so tightening one later is a deliberate edit.
+    - A miss found later is fixed by tightening the guard or by adding a row. It never needs an allowlist entry.
     - `f"{a}x_retry_{n}"`: the marker does not start a constant part. It is accepted so that unrelated text stays clean.
     - A counter read from row data plus one, e.g. `int(source.get("retry_count") or 0) + 1`. This is the pre-T2 non-master formula `file_orchestration_journal.py:12458`. It cannot be told apart from legitimate counters such as `file_orchestration_journal.py:3396` `submission_attempt + 1` and `scheduler_state_manual_retry.py:1127`.
     - A regex-group parse plus one: `int(re.match(r"(.*)_retry_(\d+)$", j).group(2)) + 1`.
@@ -1696,7 +1699,7 @@ Slice triage (T2-5, #3269, tasks 9.5, 9.7):
 - Risk packs: Legacy compatibility (the guard encodes the owner boundary; covered by the scan, the bite rows and the mutations). Not selected: runtime packs (no runtime change).
 - Review focus:
   1. The derived owner reader set and the four scheduler readers: a new owner function must be covered with no edit.
-  2. Each kind has a must-flag row and a near-miss row. The documented misses are the only accepted gaps.
+  2. Each kind has a must-flag row and a near-miss row. Every listed miss has a not-flagged row, and the list is stated as non-exhaustive.
   3. Taint stays per function and does not over-flag counters.
   4. The spec and design wording matches what the guard enforces.
   5. 9.7 is not ticked without recorded batch evidence.
