@@ -71,6 +71,9 @@
       "_stable_sha256",
       "_strip_redaction_placeholders"
     ],
+    "cohort": [
+      "_FileJournalCohortMixin"
+    ],
     "context": [
       "_fallback_value",
       "_forcing_context_from_mapping",
@@ -448,6 +451,9 @@
     "_utcnow": {
       "binding": "import",
       "callers": {
+        "cohort": [
+          "_FileJournalCohortMixin"
+        ],
         "events": [
           "_FileJournalEventsMixin"
         ],
