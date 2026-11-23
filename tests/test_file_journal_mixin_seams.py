@@ -43,12 +43,15 @@ from typing import Any
 import pytest
 
 import services.orchestrator.file_orchestration_journal as file_orchestration_journal
+from packages.common.contracts.time_normalization import utc_now
 from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
 
 MAP_PATH = Path(__file__).resolve().parent / "fixtures" / "file_journal_cluster_map.json"
 _MIXIN_UNIT_RE = re.compile(r"_FileJournal\w+Mixin")
 CYCLE_TIME = datetime(2026, 6, 28, tzinfo=UTC)
 MASTER_JOB_ID = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
+# The on-disk name of the facade's private `_RECONCILE_INVENTORY_MIGRATION_MARKER`.
+MIGRATION_MARKER = "reconcile-inventory-migration-v1.json"
 
 Act = Callable[[], None]
 
@@ -67,7 +70,10 @@ def _install_recorders(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[str]]:
 
         return proxy
 
-    monkeypatch.setattr(file_orchestration_journal, "_utcnow", recorder("_utcnow", file_orchestration_journal._utcnow))
+    # The facade binds `utc_now as _utcnow`; delegating to the origin keeps `_utcnow` a patch-only name
+    # outside the siblings (tests/test_file_orchestration_journal_facade.py), and the cluster map's
+    # origin table pins that binding.
+    monkeypatch.setattr(file_orchestration_journal, "_utcnow", recorder("_utcnow", utc_now))
     monkeypatch.setattr(
         file_orchestration_journal,
         "stat_no_follow",
@@ -245,11 +251,7 @@ def _reconcile_inventory_migration_marker(tmp_path: Path) -> Act:
 
     def act() -> None:
         assert list(repository._iter_reconcile_pipeline_job_records()) == []
-        marker = json.loads(
-            (repository.root / file_orchestration_journal._RECONCILE_INVENTORY_MIGRATION_MARKER).read_text(
-                encoding="utf-8"
-            )
-        )
+        marker = json.loads((repository.root / MIGRATION_MARKER).read_text(encoding="utf-8"))
         assert marker["completed_at"]
 
     return act
@@ -267,7 +269,7 @@ def _reconcile_inventory_direct_job_scan(tmp_path: Path) -> Act:
 def _reconcile_inventory_migration_residue_removal(tmp_path: Path) -> Act:
     repository = _repository(tmp_path)
     repository.root.mkdir(parents=True)
-    residue = repository.root / f".{file_orchestration_journal._RECONCILE_INVENTORY_MIGRATION_MARKER}.{'0' * 32}.tmp"
+    residue = repository.root / f".{MIGRATION_MARKER}.{'0' * 32}.tmp"
     residue.write_text("residue", encoding="utf-8")
 
     def act() -> None:
