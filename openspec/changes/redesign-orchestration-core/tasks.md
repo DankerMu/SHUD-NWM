@@ -2957,7 +2957,7 @@ Slice triage (J2b, #3278, tasks 15.2, 15.3):
 
 - [x] 16.1 Move C12 into `file_journal_reclaim.py`.
 - [x] 16.2 Move C14 into `file_journal_operator.py`. The receipt dataclasses stay importable from the facade.
-- [ ] 16.3 Move C16 into `file_journal_cohort.py`, with `project_forecast_cohort_tasks` moved whole.
+- [x] 16.3 Move C16 into `file_journal_cohort.py`, with `project_forecast_cohort_tasks` moved whole.
 - [ ] 16.4 Verification: CI, then node-22 batch per D5. J0 stays unchanged after each PR.
 
 Suggested fixture level: expanded - moves persisted-state writer code.
@@ -3147,6 +3147,116 @@ Slice triage (J3b, #3280, tasks 16.2, 16.4):
   - node-27: a fresh-process import check over all `integration`-marked files, then `-m integration` over the files that import the facade or `file_journal_operator`, on throwaway `nhms_it_*` DBs. Expected: all pass and 0 leftover DBs.
   - CI: the full suite.
   - node-22: the D5 pure-move batch (16.4), the second batch.
+
+Slice triage (J3c, #3281, tasks 16.3, 16.4):
+- Issue type: refactor (pure move). Fixture level: expanded (agree): it moves the forecast-cohort projection writers, which rewrite persisted master and member rows under the cycle lock. Width: one PR, atomic.
+- Recon at 21bcfad52, after J1, J2a, J2b, J3a and J3b merged. The Appendix B range for C16 (6184-6843 at 54556b1e7) has moved up by about 1555 lines; the HEAD ranges are below.
+  - C16 is 3 methods of `FileOrchestrationJournalRepository` in `services/orchestrator/file_orchestration_journal.py`. All are undecorated, none uses `LOGGER`, and none has an `_UNSET` default:
+    - public, attribution-wrapped, with docstrings:
+      - `project_forecast_cohort_tasks` `:4629-5146` (one function; task 16.3 moves it whole, it is not split);
+      - `defer_forecast_cohort_projection` `:5148-5192`;
+    - private, no docstring:
+      - `_defer_forecast_cohort_projection_unlocked` `:5194-5287`.
+  - Facade-defined names read at runtime, per method:
+    - `project_forecast_cohort_tasks`: `FileOrchestrationJournalError`, `PROJECTION_DERIVED_MASTER_STATUSES`, `TERMINAL_PIPELINE_STATUSES`;
+    - `defer_forecast_cohort_projection`: `FileOrchestrationJournalError`;
+    - `_defer_forecast_cohort_projection_unlocked`: `TERMINAL_PIPELINE_STATUSES`.
+
+    No signature annotation reads a facade-defined name (`Any`, `Mapping`, `Sequence`, `datetime` and `AcceptedSubmitCommitResult` all come from owner modules), so the sibling needs no `TYPE_CHECKING` block.
+  - Facade-resident patched name: `_utcnow`, read in `project_forecast_cohort_tasks` (5 sites) and `_defer_forecast_cohort_projection_unlocked` (1 site). The facade still uses it elsewhere, so the facade keeps its import.
+  - Names the facade imports from owner modules, which the sibling imports from those owners:
+    - `accepted_submit_identity`: `ACCEPTED_PROJECTION_FIELDS`, `ACCEPTED_SUBMIT_CONTRACT_VERSION`, `AcceptedSubmitCommitResult`, `AcceptedSubmitEvidenceError`, `AcceptedSubmitTransition`, `INIT_STATE_IDENTITY_FIELD`, `MAX_FORECAST_COHORT_MEMBERS`, `OPERATOR_VERIFIED_ABSENCE_DECISION`, `SLURM_BINDING_SOURCE_FIELD`, `accepted_submit_contract_is_current`, `accepted_submit_row_kind`, `apply_accepted_submit_transition`, `init_state_identity_for_task`, `matched_bound_reconciliation_source`, `normalize_candidate_projections`, `ordered_cohort_members`;
+    - `retry_identity`: `RETRY_ATTEMPT_FLOORS_FIELD`, `effective_retry_attempt`, `member_charged_retry_attempt`;
+    - `scheduler_state_types.ACTIVE_HYDRO_STATUSES`;
+    - `file_journal_retry_helpers`: `_bounded_candidate_projections`, `_durable_error_message`, `_journal_record_for_write`;
+    - `file_journal_candidates`: `_accepted_submit_source_cycle_from_job_id`, `_resolved_caller_evidence`;
+    - `file_journal_paths`: `_cycle_read_source_segments`, `_optional_safe_identity`;
+    - `file_journal_replay._dedupe_events`;
+    - `scheduler_state._format_utc`;
+    - `packages.common.contracts.time_normalization.format_cycle_time`;
+    - `collections.abc`: `Mapping`, `Sequence`.
+
+    Stdlib annotation-only names: `Any`, `datetime`.
+  - Expected F401 removals from the facade (no `Name` load remains after the move): `ACCEPTED_PROJECTION_FIELDS`, `MAX_FORECAST_COHORT_MEMBERS`, `init_state_identity_for_task`, `matched_bound_reconciliation_source`, `effective_retry_attempt`, `member_charged_retry_attempt`. None of them is in `__all__` or J0, and no module reads them through the facade (`git grep` at 21bcfad52 finds no `file_orchestration_journal.<name>` or `from …file_orchestration_journal import <name>` for any of the six). Verify this; ruff decides the final list.
+  - Lazy imports inside the three methods: none.
+  - Exception handlers: one, `except (AcceptedSubmitEvidenceError, IndexError) as error:` re-raising `… from error` (`:4726`). It trips neither BLE001 nor B904, so `pyproject.toml` needs no per-file-ignores row. Verify with ruff.
+  - Status literals. The real scan (`tests/test_status_literal_scan.scan_status_literals`) finds 5 hits inside C16 and these are the facade's only hits with those members:
+    - `{"succeeded", "partially_failed", "failed", "cancelled"}` once (`:4645`);
+    - `{"succeeded", "failed"}` four times (`:4734`, `:4754`, `:4807`, `:4811`).
+
+    So two rows of `tests/status_literal_allowlist.json` change their `file` key from the facade to `services/orchestrator/file_journal_cohort.py`, with `members` and `reason` unchanged: `["cancelled", "failed", "partially_failed", "succeeded"]` and `["failed", "succeeded"]`. The facade keeps its other six rows. The allowlist is ordered, so the two rows sort after the `file_journal_candidates.py` row and before the `file_journal_events.py` row. Precedent: J3a relocated the `["reservation_lost", "submission_failed"]` row.
+  - Consumers:
+    - production:
+      - `reconcile_inflight.py:187` calls `store.project_forecast_cohort_tasks(...)` through the instance;
+      - `chain_array_accounting.py:368` and `:447` read `project_forecast_cohort_tasks` and `defer_forecast_cohort_projection` with `getattr(orchestrator.repository, …, None)`; both resolve through the MRO;
+    - tests: 19 test files name one of the two public methods (list them with `git grep -lE "project_forecast_cohort_tasks|defer_forecast_cohort_projection" -- tests`), plus `tests/fixtures/file_journal_class_surface.json` (J0);
+    - instance-level patches at `tests/test_orchestration_chain.py:12441`, `:12506` and `:12511` (`monkeypatch.setattr(repository, "project_forecast_cohort_tasks", …)`);
+    - no class-level patch.
+  - `self` calls out of C16 (`_accepted_submit_job_for_id_unlocked`, `_append_journal_records_unlocked`, `_apply_records_to_model_rows`, `_cache_cycle_rows`, `_cycle_rows_by_model_unlocked`, `_locked_cycle_write`, `_materialize_latest_unlocked`, `_next_accepted_submit_event_id_unlocked`, `_next_sequence_unlocked`, `_pipeline_job_row`, `_validate_outgoing_record`, `_write_pipeline_job_direct_unlocked`, `_write_pipeline_job_unlocked`, `root`) resolve through the MRO while their owners stay in the facade.
+- Changes (implementer):
+  1. Create `services/orchestrator/file_journal_cohort.py`. It starts with a module docstring, then `from __future__ import annotations`, then one top-level class `_FileJournalCohortMixin`, decorated with `@_install_public_read_attribution`. Move the 3 methods verbatim and in HEAD order; only name resolution changes.
+  2. Name resolution follows the J1-J3b precedent:
+     - `_utcnow` is read off the facade at call time, as `file_orchestration_journal._utcnow()`. It is never bound by import and never imported from `time_normalization`.
+     - Facade-defined runtime names come from function-local facade imports. Place them right after the docstring in the two public methods and as the first statements of `_defer_forecast_cohort_projection_unlocked`, which has no docstring. Each method imports only the names its own body reads.
+     - Owner-module names are imported at the sibling's top level.
+     - The sibling never imports the facade at top level.
+     - Function-local import lists follow ruff isort order (constants first: `PROJECTION_DERIVED_MASTER_STATUSES, TERMINAL_PIPELINE_STATUSES, FileOrchestrationJournalError`); the facade's new `file_journal_cohort` import sorts after `file_journal_candidates` and before `file_journal_context`.
+  3. In the facade:
+     - Import `_FileJournalCohortMixin` and append it as a sixth base, one per line with a trailing comma, after `_FileJournalOperatorMixin`. The facade keeps its own decorator.
+     - Delete the 3 methods. `__all__` and all facade-defined names stay, including `PROJECTION_DERIVED_MASTER_STATUSES` and `TERMINAL_PIPELINE_STATUSES`.
+     - Remove the imports that become unused (F401). Exceptions: a pinned J0 4(a) name or `_UNSET` keeps `# noqa: F401`.
+  4. In the cluster map:
+     - Append `"cohort"` to `CLUSTERS` and add `clusters["cohort"] = ["_FileJournalCohortMixin"]`.
+     - Re-derive `patched[*].callers`. The expected only change is that `_utcnow` gains `"cohort": ["_FileJournalCohortMixin"]`.
+     - Update the docstring's cluster count ("fourteen clusters", "thirteen extraction clusters") and append `-> cohort` to the order sentence.
+  5. File-keyed guards:
+     - `tests/status_literal_allowlist.json`: re-key the two rows named above and nothing else. Run the real scan before and after; the hit multiset must be identical once the file key is ignored. The scan takes its file list from `git ls-files`, so run the "after" scan under `GIT_INDEX_FILE=<a temporary index that contains the new sibling>`; on the real index the untracked sibling is not scanned and the comparison false-fails.
+     - `pyproject.toml`: expected unchanged.
+     - Any other guard keyed by file path that names the facade for one of the 3 methods (search `tests/` for the method names next to `file_orchestration_journal.py`): repoint it and list it in `moves.md`. Comments that mention `project_forecast_cohort_tasks:NNNN` in tests are stale line references already and are out of scope.
+- Must preserve:
+  - The J0 data file and test are unchanged and green.
+  - `tests/test_file_journal_late_lookup_seams.py` and the five earlier J siblings are unchanged.
+  - No behaviour, signature, exception, log or on-disk format change. The moved `FunctionDef`s are AST-identical to HEAD after the documented rewrites.
+  - `project_forecast_cohort_tasks` stays one function.
+  - No `file.py:NNN` line reference is added in shipped Python.
+- Deviations, recorded in the PR body:
+  - `tests/test_file_journal_cluster_map.py` changes (`CLUSTERS` and its docstring);
+  - `tests/status_literal_allowlist.json`: two rows re-keyed (outside the issue's PR Boundary);
+  - the 16.3 tick in `tasks.md`;
+  - the D5 batch host: w3/w2 instead of the node-22 named in the issue's acceptance criteria and in design.md D5 (#3345).
+- Out of scope:
+  - splitting or simplifying `project_forecast_cohort_tasks`;
+  - moving `PROJECTION_DERIVED_MASTER_STATUSES` or `TERMINAL_PIPELINE_STATUSES`;
+  - C13 (#3282), C7 (#3283) and the other clusters;
+  - renaming;
+  - the J1-J3b carry-overs (including the `tests/test_hydro_status_set_parity.py` identity assertion that pins only the facade; this slice adds one more sibling read site of `ACTIVE_HYDRO_STATUSES` to that carry-over).
+- Required evidence (`.workplans/3281/`):
+  1. `ast-parity.md`, with three parts:
+     - For each of the 3 methods, compare `ast.dump` of HEAD's whole `FunctionDef` with the moved one, after dropping the inserted function-local facade imports (only `from services.orchestrator import file_orchestration_journal` and `from services.orchestrator.file_orchestration_journal import …`) and mapping `file_orchestration_journal._utcnow` back to `_utcnow`. They must be equal, and the docstring and line-by-line body text must match.
+     - The facade diff only deletes those methods, plus the import lines and the class header.
+     - Run the parity script against a tampered copy and show that it fails.
+  2. `red-runs.log`, each a temporary edit reverted afterwards (restore verified by sha256):
+     - (a) binding `_utcnow` by import in the sibling makes the late-lookup lint fail;
+     - (a') calling `utc_now` directly at every moved site makes `test_patched_callers_match_the_ast` fail;
+     - (b) dropping the mixin decorator makes J0 set 2 fail for the two public methods;
+     - (c) removing `"cohort"` from `CLUSTERS` makes the 13.2 unregistered-sibling message appear; the shape check and the callers check also fire;
+     - (d) leaving the two allowlist rows keyed to the facade makes `tests/test_status_literal_scan.py` fail in both directions (unlisted hit in the sibling, stale row for the facade) when run under a temporary index that contains the sibling; on the real index, where the sibling is untracked, only the stale-row half appears. Record both runs, as J3a did (`.workplans/3279/red-runs.log`).
+  3. `moves.md`: the two allowlist rows, with the status-literal scan before and after; "none" for every other file-keyed guard, or the list.
+  4. `checks.log`:
+     - `uv run --no-sync ruff check . --no-cache`, `git diff --check`, `openspec validate redesign-orchestration-core --strict --no-interactive`, and the local test list;
+     - each `git ls-files` scanner re-run in its own temporary index that contains the new file;
+     - the entropy tests that `git init` inside `tmp_path` run on the real index;
+     - a fresh-process import of the sibling that shows it loads neither the facade nor `reconcile`.
+- Verification:
+  - Locally:
+    - `tests/test_file_journal_*.py` and `tests/test_file_orchestration_journal*.py`;
+    - C16 consumers: every test file from the `git grep -l` above, plus the importers of `reconcile_inflight` and `chain_array_accounting`;
+    - `tests/test_entropy_audit_line_references.py`;
+    - `tests/test_status_literal_scan.py`, `tests/test_status_vocab_parity.py`, `tests/test_hydro_status_set_parity.py`, `tests/test_import_layering_guard.py`, `tests/test_orchestrator_first_import.py`, `tests/test_facade_name_resolution.py`;
+    - every test file that scans `services/**` or `tests/**` and names the facade or `file_journal_`.
+  - node-27: a fresh-process import check over all `integration`-marked files, then `-m integration` over the files that import the facade or `file_journal_cohort`, on throwaway `nhms_it_*` DBs. Expected: all pass and 0 leftover DBs.
+  - CI: the full suite.
+  - Compute node: the D5 pure-move batch (16.4), taken by the orchestrator after merge, not by the implementer. Owner decision 2026-11-23 (#3345; it supersedes closed #3343): production compute left node-22 for w3 (control) and w2. The production checkout keeps its path, `/scratch/frd_muziyao/NWM`, now on w3 (`ssh nwm-w3` logs in as `laoban`; the checkout is owned by `frd_muziyao`, reached with `sudo -iu frd_muziyao`), and is deployed by `git pull --ff-only` at a pass boundary exactly as D5 describes for node-22. Only the host changes; the cadence (one idle and one submitting pass per batch of at most three merged PRs or one day) does not.
 
 ## 17. J4 — Submit-lifecycle mixin
 
