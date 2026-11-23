@@ -42,21 +42,28 @@ and any ``<base>.<origin name>`` whose base is not bound to the facade module in
 that top-level unit (``safe_fs.stat_no_follow``, ``import ... safe_fs as s;
 s.stat_no_follow`` and the unaliased dotted form).  Other names of an origin
 module (``SafeFilesystemError``, ``format_cycle_time`` ...) stay allowed.
-Accepted limits of the origin rule:
+What the origin rule sees, and its accepted limits:
 
-* ``getattr(module, "<origin>")`` and ``importlib`` reads are not seen;
+* reads by string are not seen: ``getattr(module, "<origin>")`` and
+  ``module.__dict__["<origin>"]``;
+* ``importlib.import_module(...).<origin>`` IS reported: it is an attribute
+  read by name whose base is not a facade alias;
+* a star import (``from packages.common.safe_fs import *``) followed by a
+  bare-name call is not seen by this lint; ruff F403/F405 rejects that form;
+* any ``<obj>.<origin>`` is reported whatever ``<obj>`` is (``self``, a
+  reassigned module alias ``s = safe_fs; s.stat_no_follow``, a call result),
+  and so is a reassigned facade alias (``journal = file_orchestration_journal;
+  journal.stat_no_follow``): fail-closed false positives, with zero hits today;
 * facade aliases are matched by name over a whole top-level unit, so a name
   imported as the facade in one method of a class and bound to something else
   in another method of the same class (``fj = safe_fs; fj.stat_no_follow``)
   passes;
-* outside that case a module alias reassigned to a plain name
-  (``s = safe_fs; s.stat_no_follow``) is reported because ``s`` is not a facade
-  alias, and so is a reassigned facade alias (``journal =
-  file_orchestration_journal; journal.stat_no_follow``) -- a false positive,
-  fail-closed; no sibling reads an origin name through either today;
 * patched names the facade defines itself (``binding: def``, such as
-  ``_stat_signature``) have no origin; a module-local copy of one is guarded by
-  the behavioural seam tests in ``tests/test_file_journal_mixin_seams.py``.
+  ``_stat_signature``) have no origin, so this rule cannot see a local copy of
+  one; the behavioural seam tests in ``tests/test_file_journal_mixin_seams.py``
+  guard them, and the ``(_stat_signature, reconcile_inventory)`` pair there is
+  site-complete (every call site of the name in that mixin must read the
+  facade attribute).
 
 The patched-name scanner reads every ``tests/**/*.py`` that mentions the facade
 module and recognises:

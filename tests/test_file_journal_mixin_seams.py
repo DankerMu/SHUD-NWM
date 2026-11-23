@@ -23,8 +23,18 @@ A driver pins the reads its act executes, not every read in the mixin: one
 method that bypasses the facade while another still reads through it is the
 origin rule's job (``origin_bypass_problems`` in
 ``tests/test_file_journal_cluster_map.py``), which covers every import-bound
-name statically.  For ``_stat_signature``, which the facade defines itself and
-which therefore has no origin, these drivers are the only guard.
+name statically.  ``_stat_signature`` is the exception: the facade defines it
+itself, so it has no origin and its seam driver is its only guard.  That pair
+is therefore site-complete (``SITE_COMPLETE_PAIRS``): the recorder also notes
+the caller's line, the act executes every read, and the test asserts that the
+set of lines that read the name in the mixin's module equals the set of call
+sites the mixin's source has for it.  The expected sites are every call whose
+callee is named ``_stat_signature`` (the facade attribute call or a bare
+``_stat_signature(...)``), matched by line number: a read inside a comprehension or generator expression runs in that
+expression's frame, whose ``co_name`` is not the method's but whose line is the
+read's.  Deriving the sites from the facade attribute reads alone would be
+blind to the bypass it exists for (a local copy turns the attribute read into a
+bare call, which would leave both sets); a copy under another name is not seen.
 
 The recorders patch only names already in the map's ``patched`` table, with
 literal attribute names, so the map's patched-name scanner stays exact.
@@ -32,10 +42,12 @@ literal attribute names, so the map's patched-name scanner stays exact.
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 import sys
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -46,7 +58,8 @@ import services.orchestrator.file_orchestration_journal as file_orchestration_jo
 from packages.common.contracts.time_normalization import utc_now
 from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
 
-MAP_PATH = Path(__file__).resolve().parent / "fixtures" / "file_journal_cluster_map.json"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+MAP_PATH = REPO_ROOT / "tests" / "fixtures" / "file_journal_cluster_map.json"
 _MIXIN_UNIT_RE = re.compile(r"_FileJournal\w+Mixin")
 CYCLE_TIME = datetime(2026, 6, 28, tzinfo=UTC)
 MASTER_JOB_ID = "job_cycle_gfs_2026071200_forecast_fixture_forecast"
@@ -56,23 +69,32 @@ MIGRATION_MARKER = "reconcile-inventory-migration-v1.json"
 Act = Callable[[], None]
 
 
-def _install_recorders(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[str]]:
-    """Replace the five driven patched names with caller-recording proxies; return ``name -> caller modules``."""
+@dataclass(frozen=True)
+class CallerSite:
+    module: str
+    function: str
+    line: int
 
-    callers: dict[str, list[str]] = {}
+
+def _install_recorders(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[CallerSite]]:
+    """Replace the five driven patched names with caller-recording proxies; return ``name -> caller sites``."""
+
+    callers: dict[str, list[CallerSite]] = {}
 
     def recorder(name: str, real: Callable[..., Any]) -> Callable[..., Any]:
         seen = callers.setdefault(name, [])
 
         def proxy(*args: Any, **kwargs: Any) -> Any:
-            seen.append(sys._getframe(1).f_globals["__name__"])
+            frame = sys._getframe(1)
+            seen.append(CallerSite(frame.f_globals["__name__"], frame.f_code.co_name, frame.f_lineno))
             return real(*args, **kwargs)
 
         return proxy
 
-    # The facade binds `utc_now as _utcnow`; delegating to the origin keeps `_utcnow` a patch-only name
-    # outside the siblings (tests/test_file_orchestration_journal_facade.py), and the cluster map's
-    # origin table pins that binding.
+    # The recorder delegates to `utc_now`, which is what the facade binds as `_utcnow` today; reading the
+    # facade attribute here would make `_utcnow` a read outside the siblings
+    # (tests/test_file_orchestration_journal_facade.py).  The oracle is the caller's module, so the
+    # delegate's identity does not matter.
     monkeypatch.setattr(file_orchestration_journal, "_utcnow", recorder("_utcnow", utc_now))
     monkeypatch.setattr(
         file_orchestration_journal,
@@ -288,15 +310,34 @@ def _reconcile_inventory_anchor_listing(tmp_path: Path) -> Act:
     return act
 
 
-def _reconcile_inventory_canonical_job(tmp_path: Path) -> Act:
+def _reconcile_inventory_stat_signature_reads(tmp_path: Path) -> Act:
+    """Every ``_stat_signature`` read of the reconcile-inventory mixin, through the calls production makes.
+
+    The steady-state pass reads it in ``_canonical_reconcile_job_unlocked``'s non-strict snapshot.  The strict
+    inventory scan (``query_rollback_unsettled_jobs`` makes exactly this call) adds the strict recheck, and the
+    strict direct-job walk with an expected root signature (the call ``_iter_rollback_scope_pipeline_job_records``
+    makes) adds both root-signature comparisons.  The public rollback query itself needs a prepared rollback
+    fence, so the act drives the two mixin calls it is built from.
+    """
+
     from tests.gateway_reconcile_helpers import _file_cohort_repository
 
     repository = _file_cohort_repository(tmp_path, member_count=1, with_runtime_rows=False)
-    # The first pass runs the one-time migration; the act is a steady-state pass.
+    # The first pass runs the one-time migration; the act's passes are steady state.
     assert [row["job_id"] for row in repository._iter_reconcile_pipeline_job_records()] == [MASTER_JOB_ID]
+    # Captured before the recorders are installed, so the test's own root signature is not a recorded read.
+    real_signature = file_orchestration_journal._stat_signature
+    direct_root = repository.root / "pipeline-jobs"
 
     def act() -> None:
         assert [row["job_id"] for row in repository._iter_reconcile_pipeline_job_records()] == [MASTER_JOB_ID]
+        strict = repository._iter_reconcile_inventory_records(quiescence=True, strict_disappearance=True)
+        assert [row["job_id"] for row in strict] == [MASTER_JOB_ID]
+        walked = repository._iter_reconcile_direct_pipeline_job_paths(
+            strict_disappearance=True,
+            expected_root_signature=real_signature(direct_root),
+        )
+        assert [path.name for path in walked] == [f"{MASTER_JOB_ID}.json"]
 
     return act
 
@@ -313,8 +354,23 @@ PAIR_DRIVERS: dict[tuple[str, str], Callable[[Path], Act]] = {
     ("stat_no_follow", "reconcile_inventory"): _reconcile_inventory_direct_job_scan,
     ("unlink_no_follow", "reconcile_inventory"): _reconcile_inventory_migration_residue_removal,
     ("list_directory_no_follow_limited", "reconcile_inventory"): _reconcile_inventory_anchor_listing,
-    ("_stat_signature", "reconcile_inventory"): _reconcile_inventory_canonical_job,
+    ("_stat_signature", "reconcile_inventory"): _reconcile_inventory_stat_signature_reads,
 }
+# Pairs whose act executes every call site of the name in the mixin, checked line by line.
+SITE_COMPLETE_PAIRS = frozenset({("_stat_signature", "reconcile_inventory")})
+
+
+def _call_site_lines(path: Path, name: str) -> set[int]:
+    """Lines of every call in ``path`` whose callee is named ``name`` (an attribute or a bare name)."""
+
+    lines: set[int] = set()
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"), filename=str(path))):
+        if isinstance(node, ast.Call):
+            func = node.func
+            callee = func.attr if isinstance(func, ast.Attribute) else func.id if isinstance(func, ast.Name) else None
+            if callee == name:
+                lines.add(node.lineno)
+    return lines
 
 
 def _mixin_pairs_from_the_map() -> set[tuple[str, str]]:
@@ -327,6 +383,15 @@ def _mixin_pairs_from_the_map() -> set[tuple[str, str]]:
         for cluster, units in entry["callers"].items()
         if any(_MIXIN_UNIT_RE.fullmatch(unit) for unit in units)
     }
+
+
+def test_the_maps_mixin_names_are_the_repository_bases() -> None:
+    """The pair derivation keys on the ``_FileJournal...Mixin`` name; a mixin named otherwise must not drop out."""
+
+    clusters = json.loads(MAP_PATH.read_text(encoding="utf-8"))["clusters"]
+    mapped = {name for names in clusters.values() for name in names if _MIXIN_UNIT_RE.fullmatch(name)}
+    bases = {base.__name__ for base in FileOrchestrationJournalRepository.__bases__} - {"object"}
+    assert mapped == bases
 
 
 def test_every_mixin_caller_pair_of_the_map_has_exactly_one_driver() -> None:
@@ -351,7 +416,16 @@ def test_mixin_reads_the_patched_name_off_the_facade(
     act()
 
     module = f"services.orchestrator.file_journal_{cluster}"
-    assert module in callers[name], (
-        f"{module} did not read `{name}` off the facade at call time; "
-        f"the recorded callers are {sorted(set(callers[name]))}"
+    modules = sorted({site.module for site in callers[name]})
+    assert module in modules, (
+        f"{module} did not read `{name}` off the facade at call time; the recorded callers are {modules}"
     )
+    if (name, cluster) in SITE_COMPLETE_PAIRS:
+        source = REPO_ROOT / "services" / "orchestrator" / f"file_journal_{cluster}.py"
+        expected = _call_site_lines(source, name)
+        assert expected, f"no `{name}` call site found in {source}; the site oracle would be vacuous"
+        seen = {site.line for site in callers[name] if site.module == module}
+        assert seen == expected, (
+            f"`{name}` call sites in {source} that did not read the facade attribute: {sorted(expected - seen)}; "
+            f"facade reads at no call site: {sorted(seen - expected)}"
+        )
