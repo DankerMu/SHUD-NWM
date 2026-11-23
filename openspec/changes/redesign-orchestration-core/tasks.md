@@ -2956,7 +2956,7 @@ Slice triage (J2b, #3278, tasks 15.2, 15.3):
 ## 16. J3 — Reclaim, operator and cohort-projection mixins
 
 - [x] 16.1 Move C12 into `file_journal_reclaim.py`.
-- [ ] 16.2 Move C14 into `file_journal_operator.py`. The receipt dataclasses stay importable from the facade.
+- [x] 16.2 Move C14 into `file_journal_operator.py`. The receipt dataclasses stay importable from the facade.
 - [ ] 16.3 Move C16 into `file_journal_cohort.py`, with `project_forecast_cohort_tasks` moved whole.
 - [ ] 16.4 Verification: CI, then node-22 batch per D5. J0 stays unchanged after each PR.
 
@@ -3048,6 +3048,105 @@ Slice triage (J3a, #3279, tasks 16.1, 16.4):
   - node-27: a fresh-process import check over the `integration` files, then `-m integration` over the files that import the facade or `file_journal_reclaim`, on throwaway `nhms_it_*` DBs. Expect all to pass and no leftover DBs.
   - CI: the full suite.
   - node-22: the D5 pure-move batch, task 16.4. This is the second batch, after J1, J2a and J2b.
+
+Slice triage (J3b, #3280, tasks 16.2, 16.4):
+- Issue type: refactor (pure move). Fixture level: expanded (agree): it moves the operator demote/bind writers, which rewrite persisted reserved-job records. Width: one PR, atomic.
+- Recon at 33099522f, after J1, J2a, J2b and J3a merged. The Appendix B range for C14 (4904-5829 at 54556b1e7) has moved up by about 330 lines; the HEAD ranges are below.
+  - C14 is 5 methods of `FileOrchestrationJournalRepository` in `services/orchestrator/file_orchestration_journal.py`. All are undecorated, all have docstrings, none uses `LOGGER`, and none has an `_UNSET` default:
+    - public, attribution-wrapped:
+      - `demote_operator_verified_reserved_job` `:4571-4839`;
+      - `bind_operator_verified_reserved_job` `:5054-5302`;
+    - private:
+      - `_forcing_demote_input_refusal` `:4841-4875`;
+      - `_demote_operator_verified_forcing_locked` `:4877-5052`;
+      - `_bind_operator_verified_forcing_locked` `:5304-5495`.
+  - Facade-defined names read at runtime, per method:
+    - demote: `FileOrchestrationJournalError`, `OperatorDemoteReceipt`, `OperatorDemoteResult`, `ProjectionWarning`;
+    - `_forcing_demote_input_refusal`: `FileOrchestrationJournalError`;
+    - `_demote_operator_verified_forcing_locked`: the same four names as demote;
+    - bind: `FileOrchestrationJournalError`, `OperatorBindReceipt`, `OperatorBindResult`, `_OPERATOR_BIND_COMMIT_REFUSALS`, `_OPERATOR_BIND_SLURM_ID_RE`, `_OperatorBindAudit`;
+    - `_bind_operator_verified_forcing_locked`: `FileOrchestrationJournalError`, `OperatorBindReceipt`, `OperatorBindResult`, `_OPERATOR_BIND_FORCING_ARRAY_SPEC_RE`, `_OperatorBindAudit`.
+
+    Signature annotations also read facade-defined names, and a function-local import does not bind them: `OperatorDemoteReceipt` and `OperatorDemoteResult` (demote), `OperatorDemoteResult` (`_demote_operator_verified_forcing_locked`), `OperatorBindResult` (bind and `_bind_operator_verified_forcing_locked`). Import exactly these three from the facade under a top-level `if TYPE_CHECKING:` block (precedent `file_journal_retention.py:43`), in addition to the function-local imports. Without that block ruff reports F821 five times. The local `list[ProjectionWarning]` annotations are covered by the local import.
+  - Facade-resident patched name: `_utcnow`, read in demote, the demote forcing branch and the bind forcing branch. The facade still uses it elsewhere, so the facade keeps its import.
+  - Names the facade imports from owner modules, which the sibling imports from those owners:
+    - `accepted_submit_identity`: `ACCEPTED_SUBMIT_CONTRACT_VERSION`, `ACCEPTED_SUBMIT_CONTRACT_VERSION_FIELD`, `AcceptedSubmitTransition`, `OPERATOR_VERIFIED_ABSENCE_DECISION`, `accepted_submit_contract_is_current`, `accepted_submit_row_kind`, `apply_accepted_submit_transition`, `is_forecast_cohort_stage_name`, `normalize_slurm_accounting_submitted_at`;
+    - `scheduler_state_types.ACTIVE_HYDRO_STATUSES`;
+    - `reservation.SLURM_COMMENT_PREFIX`;
+    - `file_journal_retry_helpers`: `_accepted_submit_attempt_anchor`, `_bounded_cohort_members`, `_journal_record_for_write`, `_operator_evidence_text`, `_operator_owner_evidence_text`, `_projection_error_reason`, `_projection_error_type`, `_redact_durable_error_message_fields`, `_strict_utc_datetime`;
+    - `file_journal_candidates`: `_accepted_submit_source_cycle_from_job_id`, `_forcing_submitline_array_spec`;
+    - `file_journal_paths._optional_safe_identity`;
+    - `scheduler_state._format_utc`;
+    - `forcing_submit_identity`: `forcing_submit_identity_is_complete`, `is_forcing_stage_name`;
+    - `collections.abc.Mapping`.
+
+    Stdlib annotation-only names: `Any`, `datetime`.
+  - Expected F401 removals: `_forcing_submitline_array_spec`, `_operator_evidence_text`, `_operator_owner_evidence_text` and `is_forcing_stage_name`. None of them is in `__all__` or J0, and no module reads them through the facade. Verify this.
+  - The receipt dataclasses (`OperatorBindReceipt`, `OperatorBindResult`, `OperatorDemoteReceipt`, `OperatorDemoteResult`, `_OperatorBindAudit`, `ProjectionWarning`) and the `_OPERATOR_BIND_*` constants stay in the facade, per task 16.2. `operator_reserved_demotion.py` and others import them from there.
+  - Status literals: the 5 methods hold no `Tuple`/`Set`/`List` with two or more `str` members. Expected allowlist result: unchanged. Verify this with the real scan.
+  - Consumers:
+    - production: `operator_reserved_demotion.py:95` and `operator_reserved_bind.py:94`, both through the instance;
+    - tests: the shared helpers `tests/orchestrator_demote_reserved_job_helpers.py` and `tests/orchestrator_bind_reserved_job_helpers.py`, plus the `test_orchestrator_demote_*`, `test_orchestrator_bind_reserved_job_*`, `test_gateway_reconcile_*`, `test_hydro_run_attempt_triage.py` and `test_file_journal_legacy_unversioned_reserved_guard.py` files;
+    - an instance-level `monkeypatch.setattr(held_repository, "demote_operator_verified_reserved_job", ...)` at `tests/test_orchestrator_demote_cli_security.py:396`;
+    - no class-level patch.
+  - C14 calls into C13 (`permit_*_retry` and submit lifecycle) through `self`. These calls resolve through the MRO while C13 stays in the facade.
+- Changes (implementer):
+  1. Create `services/orchestrator/file_journal_operator.py`. It starts with a module docstring, then `from __future__ import annotations`, then one top-level class `_FileJournalOperatorMixin`, decorated with `@_install_public_read_attribution`. Move the 5 methods verbatim and in HEAD order; only name resolution changes. The docstring notes that the receipt dataclasses stay in the facade.
+  2. Name resolution follows the J1-J3a precedent:
+     - `_utcnow` is read off the facade at call time, as `file_orchestration_journal._utcnow()`. It is never bound by import and never imported from `time_normalization`.
+     - Facade-defined runtime names come from function-local facade imports placed right after the method docstring. Each method imports only the names its own body reads.
+     - Owner-module names are imported at the sibling's top level.
+     - The sibling never imports the facade at top level outside `TYPE_CHECKING`. That block holds only `OperatorBindResult`, `OperatorDemoteReceipt` and `OperatorDemoteResult`.
+     - The two existing lazy imports stay function-local and verbatim at their HEAD positions: `from services.orchestrator import reconcile` (`:4931`) and `from services.orchestrator.reconcile import _submitline_comment_key` (`:5147`). Do not hoist or merge them: `reconcile` imports the facade at load time, and the facade imports this sibling.
+     - Function-local import lists follow ruff isort order (`_OPERATOR_BIND_*` constants first); the facade's new `file_journal_operator` import sorts before `file_journal_reclaim`.
+  3. In the facade:
+     - Import `_FileJournalOperatorMixin` and append it as a fifth base, one per line with a trailing comma, after `_FileJournalReclaimMixin`. The facade keeps its own decorator.
+     - Delete the 5 methods. `__all__` and all facade-defined names stay.
+     - Remove the imports that become unused (F401). Exceptions: a pinned J0 4(a) name or `_UNSET` keeps `# noqa: F401`.
+  4. In the cluster map:
+     - Append `"operator"` to `CLUSTERS` and add `clusters["operator"] = ["_FileJournalOperatorMixin"]`.
+     - Re-derive `patched[*].callers`. The expected only change is that `_utcnow` gains `"operator": ["_FileJournalOperatorMixin"]`.
+     - Update the docstring's cluster count and order sentence.
+  5. File-keyed guards. Expected result: `tests/status_literal_allowlist.json` stays byte-identical and no row relocates. One addition: the four moved `except Exception` handlers (HEAD `:4800`, `:4817`, `:5014`, `:5026`) trip BLE001 outside the facade's `pyproject.toml:146` ignore. Add `"services/orchestrator/file_journal_operator.py" = ["BLE001"]` to `[tool.ruff.lint.per-file-ignores]` directly above the `file_journal_paths.py` row (`:145`), as #2945 did for `file_journal_paths.py`. Use no inline `# noqa`, add no B904, and leave the facade's row unchanged. Also check `line_reference_baseline.json`, the first-import allowlist and the facade `__all__` consumer rule. Any other deviation is stop-and-report.
+- Must preserve:
+  - The J0 data file and test are unchanged and green.
+  - `tests/test_file_journal_late_lookup_seams.py` and the four earlier J siblings are unchanged.
+  - No behaviour, signature, exception, log or on-disk format change. The moved `FunctionDef`s are AST-identical to HEAD after the documented rewrites.
+  - No `file.py:NNN` line reference is added in shipped Python.
+- Deviations, recorded in the PR body:
+  - `tests/test_file_journal_cluster_map.py` changes (`CLUSTERS` and its docstring);
+  - the 16.2 tick in `tasks.md`;
+  - `pyproject.toml`: one per-file-ignores row for `file_journal_operator.py` (outside the issue's PR Boundary).
+- Out of scope:
+  - moving the receipt dataclasses or `_OPERATOR_BIND_*` constants;
+  - C13 (#3282), C16 (#3281) and the other clusters;
+  - renaming;
+  - the J1-J3a carry-overs.
+- Required evidence (`.workplans/3280/`):
+  1. `ast-parity.md`, with three parts:
+     - For each of the 5 methods, compare `ast.dump` of HEAD's whole `FunctionDef` with the moved one, after dropping the inserted function-local imports (only `from services.orchestrator import file_orchestration_journal` and `from services.orchestrator.file_orchestration_journal import …`; a filter on `module == "services.orchestrator"` also strips the `reconcile` lazy import and false-reds `_demote_operator_verified_forcing_locked`) and mapping `file_orchestration_journal._utcnow` back to `_utcnow`. They must be identical, docstrings included.
+     - The facade diff only deletes those methods, plus the import lines and the class header.
+     - Run the parity script against a tampered copy and show that it fails.
+  2. `red-runs.log`, each a temporary edit reverted afterwards:
+     - (a) binding `_utcnow` by import in the sibling makes the late-lookup lint fail;
+     - (a') calling `utc_now` directly at every moved site makes `test_patched_callers_match_the_ast` fail;
+     - (b) dropping the mixin decorator makes J0 set 2 fail;
+     - (c) removing `"operator"` from `CLUSTERS` makes the 13.2 unregistered-sibling message appear; the shape check and the callers check also fire.
+  3. `moves.md`: "none", with the status-literal scan before and after.
+  4. `checks.log`:
+     - `uv run --no-sync ruff check . --no-cache`, `git diff --check`, `openspec validate redesign-orchestration-core --strict --no-interactive`, and the local test list;
+     - each `git ls-files` scanner re-run in its own temporary index that contains the new file;
+     - the entropy tests that `git init` inside `tmp_path` run on the real index.
+- Verification:
+  - Locally:
+    - `tests/test_file_journal_*.py` and `tests/test_file_orchestration_journal*.py`;
+    - C14 consumers (callers of the 5 methods, importers of the two helper modules, importers of `operator_reserved_demotion` / `operator_reserved_bind`), at 33099522f: `test_file_journal_legacy_unversioned_reserved_guard.py`, `test_file_orchestration_journal.py`, `test_gateway_reconcile_binding_provenance_normalizer.py`, `test_gateway_reconcile_comment_fallback_guard.py`, `test_hydro_run_attempt_triage.py`, `test_hydro_status_set_parity.py`, `test_operator_action_listing_held_reservations.py`, `test_orchestration_chain.py`, `test_orchestrator_bind_reserved_job_cas.py`, `test_orchestrator_bind_reserved_job_cli.py`, `test_orchestrator_bind_reserved_job_forcing.py`, `test_orchestrator_bind_reserved_job_lane.py`, `test_orchestrator_demote_cli_security.py`, `test_orchestrator_demote_core_cas.py`, `test_orchestrator_demote_projection_faults.py`, `test_orchestrator_demote_reclaim_lifecycle.py`, `test_orchestrator_demote_reserved_job_forcing.py`, `test_scheduler_journal_root_authority.py`;
+    - `tests/test_entropy_audit_line_references.py`;
+    - `tests/test_status_literal_scan.py`, `tests/test_status_vocab_parity.py`, `tests/test_import_layering_guard.py`, `tests/test_orchestrator_first_import.py`, `tests/test_facade_name_resolution.py`, `tests/test_operator_action_listing.py`, `tests/test_operator_action_status_closure.py`;
+    - every test file that scans `services/**` or `tests/**` and names the facade or `file_journal_`.
+  - node-27: a fresh-process import check over all `integration`-marked files, then `-m integration` over the files that import the facade or `file_journal_operator`, on throwaway `nhms_it_*` DBs. Expected: all pass and 0 leftover DBs.
+  - CI: the full suite.
+  - node-22: the D5 pure-move batch (16.4), the second batch.
 
 ## 17. J4 — Submit-lifecycle mixin
 
