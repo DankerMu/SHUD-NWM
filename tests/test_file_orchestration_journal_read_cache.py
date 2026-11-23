@@ -916,32 +916,40 @@ def test_cycle_write_owner_assignments_confined_to_init_and_window() -> None:
     """#1595 — task 3.11: AST guard on `_cycle_write_owner` writes.
 
     Assignment may appear only in `__init__` (to None) and in
-    `_locked_cycle_write`.  Covers Assign, AnnAssign, AugAssign and
-    setattr(self, ...) forms.
+    `_locked_cycle_write`, both in the facade module.  Covers Assign,
+    AnnAssign, AugAssign and setattr(self, ...) forms (`setattr(...)` as a
+    bare builtin call or as an attribute call).  Scans the facade and every
+    `services/orchestrator/file_journal_*.py` sibling, so a repository mixin
+    cannot write the owner marker; the allowed set is file-qualified, so a
+    sibling method that happens to be named `__init__` or
+    `_locked_cycle_write` does not pass.
     """
-    source_path = Path(journal_module.__file__)
-    tree = ast.parse(source_path.read_text(encoding="utf-8"))
+    facade_path = Path(journal_module.__file__)
+    module_paths = [facade_path, *sorted(facade_path.parent.glob("file_journal_*.py"))]
 
-    sites: list[tuple[int, str]] = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Assign):
-            for target in node.targets:
-                if _is_owner_target(target):
-                    sites.append((node.lineno, "Assign"))
-        elif isinstance(node, ast.AnnAssign) and _is_owner_target(node.target):
-            sites.append((node.lineno, "AnnAssign"))
-        elif isinstance(node, ast.AugAssign) and _is_owner_target(node.target):
-            sites.append((node.lineno, "AugAssign"))
-        elif isinstance(node, ast.Call) and _is_setattr_owner(node):
-            sites.append((node.lineno, "setattr"))
+    sites: list[tuple[Path, ast.Module, int, str]] = []
+    for source_path in module_paths:
+        tree = ast.parse(source_path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if _is_owner_target(target):
+                        sites.append((source_path, tree, node.lineno, "Assign"))
+            elif isinstance(node, ast.AnnAssign) and _is_owner_target(node.target):
+                sites.append((source_path, tree, node.lineno, "AnnAssign"))
+            elif isinstance(node, ast.AugAssign) and _is_owner_target(node.target):
+                sites.append((source_path, tree, node.lineno, "AugAssign"))
+            elif isinstance(node, ast.Call) and _is_setattr_owner(node):
+                sites.append((source_path, tree, node.lineno, "setattr"))
 
-    allowed = {"__init__", "_locked_cycle_write"}
+    assert len(module_paths) > 1, "no file_journal_* sibling found — the sibling scan is vacuous"
+    allowed = {(facade_path, "__init__"), (facade_path, "_locked_cycle_write")}
     assert sites, "no _cycle_write_owner write sites found — guard is vacuous"
-    for lineno, form in sites:
+    for source_path, tree, lineno, form in sites:
         fn = _enclosing_function_for_line(tree, lineno)
-        assert fn in allowed, (
+        assert (source_path, fn) in allowed, (
             f"_cycle_write_owner written at {source_path}:{lineno} ({form}) in {fn!r}; "
-            "allowed only in __init__ and _locked_cycle_write"
+            f"allowed only in __init__ and _locked_cycle_write of {facade_path}"
         )
 
 
@@ -955,15 +963,33 @@ def _is_owner_target(target: ast.AST) -> bool:
 
 
 def _is_setattr_owner(node: ast.Call) -> bool:
+    is_setattr = (isinstance(node.func, ast.Name) and node.func.id == "setattr") or (
+        isinstance(node.func, ast.Attribute) and node.func.attr == "setattr"
+    )
     return (
-        isinstance(node.func, ast.Attribute)
-        and node.func.attr == "setattr"
+        is_setattr
         and len(node.args) >= 2
         and isinstance(node.args[0], ast.Name)
         and node.args[0].id == "self"
         and isinstance(node.args[1], ast.Constant)
         and node.args[1].value == "_cycle_write_owner"
     )
+
+
+def test_setattr_owner_matcher_sees_the_bare_and_the_attribute_call() -> None:
+    calls = [
+        node
+        for node in ast.walk(
+            ast.parse(
+                'setattr(self, "_cycle_write_owner", 1)\n'
+                'builtins.setattr(self, "_cycle_write_owner", 1)\n'
+                'setattr(self, "_write_lock", 1)\n'
+                'setattr(other, "_cycle_write_owner", 1)\n'
+            )
+        )
+        if isinstance(node, ast.Call)
+    ]
+    assert [_is_setattr_owner(call) for call in calls] == [True, True, False, False]
 
 
 def _enclosing_function_for_line(tree: ast.AST, lineno: int) -> str | None:
