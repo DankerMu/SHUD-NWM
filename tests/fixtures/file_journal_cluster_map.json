@@ -267,6 +267,9 @@
       "journal_read_lane",
       "reset_journal_read_counters"
     ],
+    "reclaim": [
+      "_FileJournalReclaimMixin"
+    ],
     "release": [
       "_FileJournalReleaseMixin"
     ],
@@ -449,6 +452,9 @@
           "FileJournalRetryService",
           "FileOrchestrationJournalRepository",
           "_historical_pipeline_event_row"
+        ],
+        "reclaim": [
+          "_FileJournalReclaimMixin"
         ],
         "release": [
           "_FileJournalReleaseMixin"
