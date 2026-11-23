@@ -276,6 +276,9 @@
     "reclaim": [
       "_FileJournalReclaimMixin"
     ],
+    "reconcile_inventory": [
+      "_FileJournalReconcileInventoryMixin"
+    ],
     "release": [
       "_FileJournalReleaseMixin"
     ],
@@ -447,6 +450,9 @@
         "paths": [
           "_iter_discovered_files",
           "_require_journal_segment_lineage"
+        ],
+        "reconcile_inventory": [
+          "_FileJournalReconcileInventoryMixin"
         ]
       },
       "cluster": "facade"
@@ -470,6 +476,9 @@
         ],
         "reclaim": [
           "_FileJournalReclaimMixin"
+        ],
+        "reconcile_inventory": [
+          "_FileJournalReconcileInventoryMixin"
         ],
         "release": [
           "_FileJournalReleaseMixin"
@@ -498,12 +507,12 @@
     "list_directory_no_follow_limited": {
       "binding": "import",
       "callers": {
-        "facade": [
-          "FileOrchestrationJournalRepository"
-        ],
         "paths": [
           "_iter_discovered_files",
           "_iter_retention_surface_files"
+        ],
+        "reconcile_inventory": [
+          "_FileJournalReconcileInventoryMixin"
         ]
       },
       "cluster": "facade"
@@ -548,6 +557,9 @@
           "_iter_discovered_files",
           "_iter_retention_surface_files"
         ],
+        "reconcile_inventory": [
+          "_FileJournalReconcileInventoryMixin"
+        ],
         "retention": [
           "_FileJournalRetentionMixin"
         ]
@@ -557,8 +569,8 @@
     "unlink_no_follow": {
       "binding": "import",
       "callers": {
-        "facade": [
-          "FileOrchestrationJournalRepository"
+        "reconcile_inventory": [
+          "_FileJournalReconcileInventoryMixin"
         ]
       },
       "cluster": "facade"
