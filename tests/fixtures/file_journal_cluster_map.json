@@ -184,6 +184,9 @@
       "_stat_signature",
       "_validate_record_complexity"
     ],
+    "operator": [
+      "_FileJournalOperatorMixin"
+    ],
     "paths": [
       "_CYCLE_RUN_ID_RE",
       "_CycleSourceDiscovery",
@@ -452,6 +455,9 @@
           "FileJournalRetryService",
           "FileOrchestrationJournalRepository",
           "_historical_pipeline_event_row"
+        ],
+        "operator": [
+          "_FileJournalOperatorMixin"
         ],
         "reclaim": [
           "_FileJournalReclaimMixin"
