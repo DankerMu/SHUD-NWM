@@ -2955,13 +2955,99 @@ Slice triage (J2b, #3278, tasks 15.2, 15.3):
   - node-22: the D5 pure-move batch (15.3).
 ## 16. J3 — Reclaim, operator and cohort-projection mixins
 
-- [ ] 16.1 Move C12 into `file_journal_reclaim.py`.
+- [x] 16.1 Move C12 into `file_journal_reclaim.py`.
 - [ ] 16.2 Move C14 into `file_journal_operator.py`. The receipt dataclasses stay importable from the facade.
 - [ ] 16.3 Move C16 into `file_journal_cohort.py`, with `project_forecast_cohort_tasks` moved whole.
 - [ ] 16.4 Verification: CI, then node-22 batch per D5. J0 stays unchanged after each PR.
 
 Suggested fixture level: expanded - moves persisted-state writer code.
 Minimal mergeable slice: 16.1 alone; 16.2 and 16.3 are their own PRs.
+
+Slice triage (J3a, #3279, tasks 16.1, 16.4):
+- Issue type: refactor (pure move). Fixture level: expanded (agree): it moves the reservation-reclaim writer, which rewrites persisted pipeline-job records. Width: one PR, atomic.
+- Recon at 73c42d8fb, after J1, J2a and J2b merged. The Appendix B range for C12 is 3227-3474 at 54556b1e7; it has shifted about 90 lines.
+  - C12 is a single method of `FileOrchestrationJournalRepository`:
+    - `reclaim_pipeline_job_reservation`, `:3137-3383`, in `services/orchestrator/file_orchestration_journal.py`;
+    - public and attribution-wrapped, undecorated, with no docstring;
+    - it takes no `_UNSET` defaults.
+  - Module-level names it reads at runtime:
+    - Facade-defined: `FileOrchestrationJournalError`.
+    - Facade-resident patched name: `_utcnow`. The facade uses it elsewhere too, so the facade keeps its import.
+    - Imported into the facade from owner modules:
+      - `accepted_submit_identity`: `AcceptedSubmitTransition`, `OPERATOR_VERIFIED_ABSENCE_DECISION`, `SLURM_ACCOUNTING_SUBMITTED_AT_FIELD`, `SLURM_BINDING_SOURCE_FIELD`, `accepted_submit_contract_is_current`, `accepted_submit_row_kind`, `apply_accepted_submit_transition`;
+      - `file_journal_retry_helpers`: `_accepted_submit_attempt_anchor`, `_accepted_submit_master_identity`, `_is_legacy_unversioned_forecast_cohort_master`;
+      - `file_journal_candidates`: `_cycle_time_from_job`, `_source_id_from_job`;
+      - `file_journal_paths._optional_safe_identity` and `scheduler_state._format_utc`;
+      - `forcing_submit_identity`: `forcing_attempt_comment_for`, `forcing_member_identity_is_complete`.
+    - `field` is a local variable (Store context), not `dataclasses.field`. Do not import it.
+    - Annotation-only: `Any`.
+  - Expected F401 removal: `forcing_attempt_comment_for`. Its only facade uses are at `:3319`, inside C12, and in a `:5622` comment. It is not in `__all__` and not in J0. Production modules import it from `forcing_submit_identity`, not from the facade. Verify.
+  - Status literals: the method holds the `{"submission_failed", "reservation_lost"}` set literal (`:3230`). It is the facade's only literal with those members, so the facade row at `tests/status_literal_allowlist.json:36` is re-keyed to `services/orchestrator/file_journal_reclaim.py`.
+  - Consumers:
+    - production: `reservation.py:261` calls `getattr(repository, "reclaim_pipeline_job_reservation", None)` inside `reserve_candidate` (`:171`); the chain reaches it via `chain_forecast_orchestrator_cycle.py:818` (`_chain.reserve_candidate`). The scheduler reaches it only through the chain;
+    - tests: 39 direct calls across 16 files; the fakes in `tests/test_orchestration_chain.py:364,666,11047` and `tests/gateway_reconcile_helpers.py:86`, and the `OrchestratorRepository` Protocol stub at `chain.py:387`, are other classes;
+    - no class-level patch of the name.
+  - The class header is already 120 characters, so a fourth base needs a wrapped base list. Use one base per line with a trailing comma (below): it passes E501/I and `ruff format` leaves it unchanged.
+- Changes (implementer):
+  1. New `services/orchestrator/file_journal_reclaim.py`. It starts with a module docstring, then `from __future__ import annotations`, then one top-level class, `_FileJournalReclaimMixin`, decorated `@_install_public_read_attribution`. Move the method verbatim; only name resolution changes.
+  2. Name resolution follows the J1, J2a and J2b precedent:
+     - `_utcnow` is read off the facade at call time, as `file_orchestration_journal._utcnow()`. It is never bound by import, at top level or in a function body, and never imported from `time_normalization`.
+     - `FileOrchestrationJournalError` comes from a function-local facade import, placed as the first statements of the body because the method has no docstring.
+     - Every other owner-module name is imported at the sibling's top level from its owner.
+     - The sibling never imports the facade at top level outside `TYPE_CHECKING`.
+  3. Facade changes:
+     - Import `_FileJournalReclaimMixin` and wrap the class header to one base per line, in this order:
+       ```python
+       class FileOrchestrationJournalRepository(
+           _FileJournalRetentionMixin,
+           _FileJournalEventsMixin,
+           _FileJournalReleaseMixin,
+           _FileJournalReclaimMixin,
+       ):
+       ```
+       The facade keeps its own decorator.
+     - Delete the method. `__all__` and the facade-defined names stay.
+     - Remove facade imports the move leaves unused (F401). Exceptions: a pinned J0 4(a) name and `_UNSET` stay, marked `# noqa: F401`.
+  4. Cluster map: append `"reclaim"` to `CLUSTERS` and add `clusters["reclaim"] = ["_FileJournalReclaimMixin"]`. Re-derive `patched[*].callers`; the expected only change is that `_utcnow` gains `"reclaim": ["_FileJournalReclaimMixin"]`. Update the docstring's cluster count and order sentence.
+  5. File-keyed guards. Run the status-literal scan with the new file indexed. Expected: delete `:36` and insert `{"file": "services/orchestrator/file_journal_reclaim.py", "members": ["reservation_lost", "submission_failed"], "reason": "distinct-vocabulary"},` between `:24` (`file_journal_events.py`) and `:25` (the first `file_journal_retry_helpers.py` row); there is no `file_journal_release.py` row. Relocate, never just delete. Also check `line_reference_baseline.json`, `pyproject.toml` per-file-ignores, the first-import allowlist and the facade `__all__` consumer rule. A deviation from the expected result is stop-and-report.
+- Must preserve:
+  - The J0 data file is byte-identical, and the J0 test is unchanged and green.
+  - These files are unchanged: `tests/test_file_journal_late_lookup_seams.py`, `file_journal_retention.py`, `file_journal_events.py`, `file_journal_release.py`.
+  - No behaviour, signature, exception, log or on-disk format change. The moved `FunctionDef` is AST-identical to HEAD's after the documented rewrites.
+  - No `file.py:NNN` line reference is added in shipped Python.
+- Deviations to record in the PR body:
+  - `tests/test_file_journal_cluster_map.py`: `CLUSTERS` and its docstring;
+  - the one `tests/status_literal_allowlist.json` relocation;
+  - the 16.1 tick in `tasks.md`.
+- Out of scope:
+  - C14 (#3280) and C16 (#3281), and every other cluster;
+  - renaming anything;
+  - the J1-J2b carry-overs: seam tests, the spec cluster count, the `_cycle_write_owner` guard, and the release docstring clause.
+- Required evidence, in `.workplans/3279/`:
+  1. `ast-parity.md`:
+     - `ast.dump` of HEAD's whole `FunctionDef` against the moved one, after dropping the inserted function-local imports and mapping `file_orchestration_journal._utcnow` back to `_utcnow`; they must be identical;
+     - the facade diff only deletes the method, plus the import lines and the class header.
+  2. `red-runs.log`, each a temporary edit reverted afterwards:
+     - (a) binding `_utcnow` by import in the sibling makes the late-lookup lint fail;
+     - (a') calling `utc_now` directly at every moved site makes `test_patched_callers_match_the_ast` fail;
+     - (b) dropping the mixin decorator makes J0 set 2 fail;
+     - (c) removing `"reclaim"` from `CLUSTERS` makes the 13.2 unregistered-sibling message appear; the shape check and the callers check also fire;
+     - (e) keeping the facade allowlist row instead of relocating it makes the status-literal scan report a stale facade row and an unlisted sibling literal. Run it with `file_journal_reclaim.py` indexed (temporary index); untracked, only the stale-row half fires.
+  3. `moves.md`: the relocation, with the scan output before and after.
+  4. `checks.log`:
+     - `uv run --no-sync ruff check . --no-cache`, `git diff --check`, `openspec validate redesign-orchestration-core --strict --no-interactive`, and the local test list;
+     - each `git ls-files` scanner re-run in its own temporary index with the new file;
+     - the entropy tests that `git init` inside `tmp_path` run on the real index.
+- Verification:
+  - Locally:
+    - `tests/test_file_journal_*.py` and `tests/test_file_orchestration_journal*.py`;
+    - every test file that calls `reclaim_pipeline_job_reservation`, found by grep;
+    - every test file that calls `reserve_candidate` or imports `tests/forcing_submit_ambiguity_helpers.py` / `tests/orchestrator_bind_reserved_job_helpers.py` (which wrap it), plus every test file that imports `services.orchestrator.reservation`. At 73c42d8fb these are: `test_file_journal_legacy_unversioned_reserved_guard.py`, `test_forcing_submit_ambiguity.py`, `test_forcing_submit_ambiguity_reservation.py`, `test_gateway_reconcile_grace_guard.py`, `test_gateway_reconcile_idempotency_barrier.py`, `test_gateway_reconcile_reservation_lifecycle.py`, `test_operator_action_listing_held_reservations.py`, `test_orchestration_chain.py`, `test_orchestrator_bind_reserved_job_cas.py`, `test_orchestrator_bind_reserved_job_cli.py`, `test_orchestrator_bind_reserved_job_forcing.py`, `test_orchestrator_demote_reclaim_lifecycle.py`, `test_orchestrator_demote_reserved_job_forcing.py`, `test_orchestrator_first_import.py`;
+    - `tests/test_status_literal_scan.py`, `tests/test_status_vocab_parity.py`, `tests/test_import_layering_guard.py`, `tests/test_orchestrator_first_import.py`, `tests/test_facade_name_resolution.py`, `tests/test_operator_action_listing.py`, `tests/test_operator_action_status_closure.py`;
+    - every test file that scans `services/**` or `tests/**` and names the facade or `file_journal_`.
+  - node-27: a fresh-process import check over the `integration` files, then `-m integration` over the files that import the facade or `file_journal_reclaim`, on throwaway `nhms_it_*` DBs. Expect all to pass and no leftover DBs.
+  - CI: the full suite.
+  - node-22: the D5 pure-move batch, task 16.4. This is the second batch, after J1, J2a and J2b.
 
 ## 17. J4 — Submit-lifecycle mixin
 
