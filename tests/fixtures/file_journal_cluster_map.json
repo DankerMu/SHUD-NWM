@@ -353,6 +353,9 @@
       "_strict_utc_datetime",
       "_strip_internal_fields",
       "_validate_accepted_submit_evidence"
+    ],
+    "submit": [
+      "_FileJournalSubmitMixin"
     ]
   },
   "module": "services/orchestrator/file_orchestration_journal.py",
@@ -473,6 +476,9 @@
         ],
         "retry_helpers": [
           "_journal_record_for_write"
+        ],
+        "submit": [
+          "_FileJournalSubmitMixin"
         ]
       },
       "cluster": "facade"
