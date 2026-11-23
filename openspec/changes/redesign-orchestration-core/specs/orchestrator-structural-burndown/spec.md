@@ -36,3 +36,10 @@ name the new partitions.
 - **THEN** the sorted suffix set equals the pre-split baseline of 410
 - **AND** no frozen pre-#1809 guard literal remains, and the five expected
   commands name the gateway-reconcile glob.
+
+### Requirement: The journal cluster map SHALL be a checked-in artifact before any extraction
+`tests/fixtures/file_journal_cluster_map.json` SHALL assign every top-level definition of `services/orchestrator/file_orchestration_journal.py` and of every `services/orchestrator/file_journal_*.py` sibling to exactly one registered cluster. The registered clusters are `facade`, the seven extraction clusters `context`, `read_attribution`, `primitives`, `replay`, `candidates`, `paths`, `retry_helpers`, and the repository-mixin clusters `retention`, `events`, `release`, `reclaim`, `operator`, `cohort`, `submit`, `reconcile_inventory`; a later mixin module SHALL be registered as a further cluster before it can exist on disk. The map SHALL list, for every name that any test monkeypatches on the facade (found by searching `tests/` for `file_orchestration_journal.<name>` patch targets and for `setattr(<alias>, "<name>"`), its cluster and the clusters of all its call sites. A test SHALL fail when a top-level definition is unassigned, assigned twice, or when a patched name is assigned to a cluster other than `facade` while one of its call sites is assigned elsewhere without the late-lookup rule below.
+
+#### Scenario: Map covers the file
+- **WHEN** the map test runs at the commit that introduces the map
+- **THEN** every top-level `def`/`class`/assignment name in the facade is assigned exactly once and every patched name is listed with its call-site clusters
