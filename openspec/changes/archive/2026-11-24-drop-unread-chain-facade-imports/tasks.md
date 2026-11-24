@@ -109,4 +109,4 @@ Must preserve:
   tests/test_orchestrator_first_import.py tests/test_orchestration_chain.py
   tests/test_production_scheduler.py`; `uv run ruff check --no-cache .`;
   `openspec validate drop-unread-chain-facade-imports --strict --no-interactive`.
-- [ ] 3.6 node-27: the files of 3.5, zero unexpected skips.
+- [x] 3.6 node-27: the files of 3.5, zero unexpected skips.
