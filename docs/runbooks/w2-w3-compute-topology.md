@@ -27,7 +27,7 @@ archive。容量、行数、耗时一律以实测为准，本文不记绝对数�
   user manager（以生产用户 ssh 登录、`su -`、`loginctl enable-linger`），scheduler 定时器、
   slurm-gateway、journal-backup 会在 w2 上再起一套，与 w3 并发跑 pass。w2 上生产用户只通过 Slurm
   作业出现；要看文件用运维账号。2026-11-24 实测 w2 上生产用户没有 user manager、没有 linger、
-  没有进程；目前没有机械防护，只有这条纪律。
+  没有进程；目前没有机械防护，只有这条纪律（主机侧防护见 #3359）。
 - 两台主机上除 NHMS 外还有 yd producer（每小时 cron，`/scratch/frd_muziyao/yd`），与 NHMS
   共用 Slurm 账户：**不要按用户取消 Slurm 作业**。
 
@@ -78,7 +78,7 @@ w2 上的进程走 NFS，两边会同时拿到同一把锁。实测见
 - slurmd 有 `RequiresMountsFor` drop-in（`/etc/systemd/system/slurmd.service.d/10-nhms-mounts.conf`）：
   w3 要求 `/scratch/frd_muziyao`、`/ghdc/data`；w2 另外要求 runs、`/users/frd_muziyao`、
   `/volume/nwm`。所列挂载不在，slurmd 不起，节点不接作业。
-- **已知缺口：w3 的 drop-in 不含 runs。** w2 不在时，w3 的 runs 挂载因 `nofail` 被跳过，slurmd
+- **已知缺口（#3359）：w3 的 drop-in 不含 runs。** w2 不在时，w3 的 runs 挂载因 `nofail` 被跳过，slurmd
   照常起来；这时落在 w3 上的作业会把结果写进挂载点下面的本地空目录，等 runs 后来挂上就被盖住。
   w3 重启后、接作业前，先确认 `findmnt /scratch/frd_muziyao/nhms-prod/workspace/runs` 的来源是
   w2 的导出。
