@@ -149,7 +149,7 @@ disk for file-level assertions.
   tests/test_file_journal_repository_semantics.py
   tests/test_file_orchestration_migration.py`, `uv run ruff check --no-cache .`,
   `openspec validate keep-foreign-model-rows-out-of-latest --strict --no-interactive`.
-- [ ] 3.4 node-27: the four files of 3.3 plus `tests/test_production_scheduler.py`
+- [x] 3.4 node-27: the four files of 3.3 plus `tests/test_production_scheduler.py`
   and `tests/test_orchestration_chain.py`, zero unexpected skips.
 - [x] 3.5 Production scan result attached to the PR (done before
   implementation: 0 hits on the w3 journal mirror, coverage limits stated).
