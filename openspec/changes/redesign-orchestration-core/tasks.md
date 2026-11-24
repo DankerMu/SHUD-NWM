@@ -3479,7 +3479,7 @@ Slice triage (J5, #3283, tasks 18.1, 18.2):
 
 ## 19. Archive
 
-- [ ] 19.0 J-series carry-overs (#3350): the origin rule in the late-lookup lint, behavioural seam tests for the repository mixins, the `_cycle_write_owner` guard over the siblings, the status-set identity pin on siblings (#3347), comment fixes in three siblings, and the spec delta for the extraction requirement.
+- [x] 19.0 J-series carry-overs (#3350): the origin rule in the late-lookup lint, behavioural seam tests for the repository mixins, the `_cycle_write_owner` guard over the siblings, the status-set identity pin on siblings (#3347), comment fixes in three siblings, and the spec delta for the extraction requirement.
 - [ ] 19.1 In the final push of whichever slice merges last:
   - tick every task;
   - give each touched capability spec a real Purpose paragraph where it says TBD;
@@ -3528,8 +3528,10 @@ Slice triage (J close-out, #3350, tasks 19.0, 19.1):
 - Deviations, recorded in the PR body:
   - two pushes, against the CI cost rule that the last push is the complete end state: the archive depends on compute-node passes that only exist a day after the test work is ready, so the test push and the archive push each cost one full CI run; nothing else is pushed between the two;
   - this PR closes #3347 although it also edits comment text in three production files (#3347's own criterion says "No production file changes"; the comment edits belong to #3350's scope item 4 and change no AST);
-  - one driven method per (name, mixin) pair instead of the method list in #3350's body (three events methods, the release and recover writers, retention member removal): the origin rule covers the other sites statically.
-- Out of scope: per-site seam tests (the origin rule covers partial bypass statically); moving more code; narrowing the facade's per-file-ignores row; splitting the larger siblings; refreshing stale `file.py:NNN` references in test docstrings other than the block #3347 names.
+  - one driven method per (name, mixin) pair instead of the method list in #3350's body (three events methods, the release and recover writers, retention member removal): the origin rule covers the other sites of the import-bound names statically. `_stat_signature` is facade-defined and has no origin, so its pair (`reconcile_inventory`) is site-complete instead: the recorded call lines must equal the call sites derived from the mixin's AST (round-1 review, P2);
+  - the seam oracle: #3350's body asks for a counting stub and for the stub's timestamp to reach the written record. The tests use a recorder of the caller's module and assert that the mixin's module is among the callers, with no value assertion, because the facade's own append path also reads `_utcnow` and writes `created_at`, so both of the issue's assertions hold even when the mixin's site bypasses the facade. The cost: the value a mixin writes after reading the clock is not checked here;
+  - the origin rule decides by name, so it also rejects a reassigned facade alias and the same attribute name on an unrelated object (fail-closed, zero hits today); its limits are in the spec delta and in the test module's docstring.
+- Out of scope: per-site seam tests for the import-bound names (the origin rule covers partial bypass of those statically); moving more code; narrowing the facade's per-file-ignores row; splitting the larger siblings; refreshing stale `file.py:NNN` references in test docstrings other than the block #3347 names.
 - Required evidence (`.workplans/3350/`):
   1. `red-runs.log`, each a temporary edit reverted afterwards (restore verified by sha256):
      - origin rule: in the events mixin, which has several `_utcnow` sites, replace one `file_orchestration_journal._utcnow()` site with a direct `utc_now()` behind `from packages.common.contracts.time_normalization import utc_now`; and in the reconcile-inventory mixin replace one `stat_no_follow` site with `safe_fs.stat_no_follow(…)` behind `from packages.common import safe_fs`. The lint fails and names the sibling; record that `test_patched_callers_match_the_ast` stays green for both (this is the partial bypass the old guards missed);
