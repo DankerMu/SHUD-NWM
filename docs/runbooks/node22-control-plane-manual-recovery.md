@@ -1,5 +1,18 @@
 # node-22 Control-Plane Manual Recovery Runbook
 
+> **计算角色主机说明（2026-11-23 起）**：本文里的 "node-22" 指 NHMS **计算角色**，现由
+> LAN 主机 w3（控制）+ w2 承载；原主机 `210.77.77.22` 已退出 NWM 计算，仅作 rollback archive。
+> 路径、生产用户、unit 名、Slurm 分区与账户都没变，文中的计算侧命令在 w3 上以生产用户执行：
+> 凡是字面写着 `ssh -p 32099 frd_muziyao@210.77.77.22` 的命令，一律改为登录 w3 后执行，
+> **不得**在原主机上执行（那里的 journal 副本已经过期）。活动 checkout 的 `.venv` 经 NFS 被
+> w3 / w2 共用，"不得在活动 checkout 里重建环境"的禁令照旧适用。主机布局、存储、Slurm、部署与
+> 冷启动见 [`w2-w3-compute-topology.md`](w2-w3-compute-topology.md)。
+
+> **回滚提示**：原主机上的 scheduler journal 副本停在 2026-11-23T02:34Z。回滚到原主机不是"把定时器
+> 开回来"——必须先停 w3 的 scheduler 定时器，再把 w3 的 journal（或 NFS 上
+> `operator-archives/w3-scheduler-journal/` 的备份）拷回去；步骤见
+> [`w2-w3-compute-topology.md`](w2-w3-compute-topology.md) 第 9 节，且需要新的运维决定。
+
 display API 在 `display_readonly` 模式下对控制面动作返回 409；`POST /api/v1/runs/{run_id}/retry`
 自 #3157 起在**所有**服务角色上都返回 409 `CONTROL_PLANE_MANUAL_ACTION_REQUIRED`。两者 payload 的
 `recovery_runbook` 都指向本文（slug `node22-control-plane-manual-recovery`，
@@ -9,9 +22,9 @@ display API 在 `display_readonly` 模式下对控制面动作返回 409；`POST
 
 ## 执行纪律（node-22）
 
-- node-22 活动 checkout 按 #1831 决定长期保持 Python 3.12.7：**禁止** `uv sync` 与裸
-  `uv run`（会按 3.11 pin 重建共享 `.venv`），系统 Python 也不是替代。一律用活动
-  解释器 + `-m`：
+- 活动 checkout 的 `.venv`（Python 3.11.x）经 NFS 被 w3、w2 上的 Slurm 作业和 scheduler 定时器
+  共用：**禁止** `uv sync` 与裸 `uv run`，系统 Python 也不是替代；原 node-22 主机上按 #1831 保留的
+  3.12.7 环境已不是活动环境，那里**不要**运行任何 `uv` 命令。一律在 w3 上用活动解释器 + `-m`：
 
   ```bash
   cd /scratch/frd_muziyao/NWM

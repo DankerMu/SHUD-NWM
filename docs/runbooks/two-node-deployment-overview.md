@@ -5,6 +5,14 @@
 分配操作手册。当前值守入口见
 [`current-production-ops.md`](current-production-ops.md)。
 
+> **计算角色主机说明（2026-11-23 起）**：本文里的 "node-22" 指 NHMS **计算角色**，现由
+> LAN 主机 w3（控制）+ w2 承载；原主机 `210.77.77.22` 已退出 NWM 计算，仅作 rollback archive。
+> 路径、生产用户、unit 名、Slurm 分区与账户都没变，文中的计算侧命令在 w3 上以生产用户执行：
+> 凡是字面写着 `ssh -p 32099 frd_muziyao@210.77.77.22` 的命令，一律改为登录 w3 后执行，
+> **不得**在原主机上执行（那里的 journal 副本已经过期）。活动 checkout 的 `.venv` 经 NFS 被
+> w3 / w2 共用，"不得在活动 checkout 里重建环境"的禁令照旧适用。主机布局、存储、Slurm、部署与
+> 冷启动见 [`w2-w3-compute-topology.md`](w2-w3-compute-topology.md)。
+
 > **⚠️ 2026-06-22 当前部署事实 vs 本文档设计意图的差异**：
 >
 > 本文档描述的是 M22 **设计意图**（22 = writer / DB mutation，27 = readonly）。

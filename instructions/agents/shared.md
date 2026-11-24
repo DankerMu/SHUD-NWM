@@ -9,15 +9,18 @@
 
 ## 三端协作
 
-**本地开发 + 远端测试**：代码只在本地编辑与 commit，经 GitHub (`DankerMu/SHUD-NWM`) 中转到两个远端验证。
+**本地开发 + 远端测试**：代码只在本地编辑与 commit，经 GitHub (`DankerMu/SHUD-NWM`) 中转到远端验证：node-27，以及承载计算角色的 w3 / w2。
 
 | 端 | 地址 / 仓库路径 | 角色 | DB |
 |---|---|---|---|
 | 本地 Mac | `/Users/danker/Desktop/Hydro-SHUD/NWM` | 编辑、commit、push、ruff、openspec、前端 tsc/test | 不连远端 DB |
-| node-22 | `ssh -p 32099 frd_muziyao@210.77.77.22`，`/scratch/frd_muziyao/NWM` | 纯计算（Slurm/SHUD/forcing wrapper），产物写 NFS `/ghdc/data/nwm/` | **不连任何活 DB**；本机 :55433 已 archived/stopped，仅作 rollback archive，**不要连** |
-| node-27 | `ssh -p 32099 nwm@210.77.77.27`，`/home/nwm/NWM` | active primary PG + ingest + display API(:8080) + 前端；自己读 NFS 上 22 的产物 | **本机 PG :55432**（自写自读） |
+| 计算节点 w3（控制）+ w2 | LAN 主机 `10.0.1.13` / `10.0.1.12`（见下），`/scratch/frd_muziyao/NWM` | 纯计算（Slurm/SHUD/forcing wrapper），产物写 NFS `/ghdc/data/nwm/` | **不连任何活 DB** |
+| node-27 | `ssh -p 32099 nwm@210.77.77.27`，`/home/nwm/NWM` | active primary PG + ingest + display API(:8080) + 前端；自己读 NFS 上计算节点的产物 | **本机 PG :55432**（自写自读） |
 
-- 22 的 `/ghdc/data/nwm/` 与 27 的 `/home/ghdc/nwm/` 是同一份 NFS，零延迟无需 rsync；basin 源数据在 `/home/ghdc/nwm/Basins`。
+- 计算节点只能经 node-27 ProxyJump 到达（本机 ssh 别名 `nwm-w3` / `nwm-w2`），生产用户 `frd_muziyao`；w3 = Slurm 控制器 + scheduler 定时器 + slurm-gateway + journal，w2 = 计算 + `workspace/runs`。
+- 计算节点的 `/ghdc/data/nwm/` 与 27 的 `/home/ghdc/nwm/` 是同一份 NFS，零延迟无需 rsync；basin 源数据在 `/home/ghdc/nwm/Basins`。
+- `node-22` / `node22` 是计算角色的历史代号：脚本名、unit 名、env key、receipt schema id、规格名里的它指 w3 / w2，不改名。存储布局、Slurm、部署与冷启动细则见 `docs/runbooks/w2-w3-compute-topology.md`。
+- 原 node-22 主机（`210.77.77.22`）自 2026-11-23 起退出 NWM 计算，仅作 rollback archive：不要在其上跑 NWM 作业；本机 :55433 已 archived/stopped，**不要连**。
 - node-27 的 readonly 是 **role-level**（`nhms_display_ro` 无 INSERT/UPDATE/DELETE），不是 standby 副本。
 - 生产 display API + 前端公网入口：`https://test.nwm.ac.cn`（27 反代对外，无需 SSH 隧穿）。
 - node-27 DB 热数据在 `pg_default`（2026-11-05 换盘后 fresh initdb 重建：宿主 `/home/nwm/nhms-primary/pgdata`，容器 bind `/home/postgres/pgdata/data`；原 14T `/dev/md0` 已退役，`/data/GHDC` 现只是根卷上的目录）。
@@ -31,7 +34,7 @@
 | 验证类型 | oracle 节点 |
 |---|---|
 | 后端单测/集成、真实 DB pytest、`e2e`/`grib` marker、SHUD 产物校验、display 部署 receipt、display 边界 deny-write、cross-plane identity live、`/`(单图展示，旧 `/hydro-met` 为 redirect alias)+`/ops` 浏览器 e2e | **node-27** |
-| Slurm 调度行为本身的验证（罕见；改 sbatch / 计算资源时） | **node-22** |
+| Slurm 调度行为本身的验证（罕见；改 sbatch / 计算资源时） | **w3**（计算角色的控制节点；作业也会落到 w2） |
 | ruff、openspec validate、前端 tsc / pnpm test / check:api-types | 本地 |
 
 涉及 display/前端生产化与只读边界的改动，**必须在 node-27 实机产出 live receipt**（见 `docs/runbooks/node-27-bringup-checklist.md` C1-C4），不得用本地 ruff 冒充 PASS。
@@ -41,7 +44,7 @@
 ```
 本地改代码 -> commit -> git push
 -> node-27 ssh: cd /home/nwm/NWM && git pull --ff-only -> 跑后端验证 + 真实 DB pytest + display live receipt
--> (仅当改了 Slurm/SHUD 调度) node-22 ssh: cd /scratch/frd_muziyao/NWM && git pull --ff-only -> 触发计算
+-> (仅当改了 Slurm/SHUD 调度) w3: 在 scheduler pass 边界把 /scratch/frd_muziyao/NWM ff-only 更新到目标提交（github 不通时用 git bundle，步骤见 w2-w3-compute-topology.md）-> 触发计算
 -> 失败则本地修复 -> 重复
 ```
 
@@ -63,13 +66,11 @@
 - **Python 一律用 `uv`**（`uv run`、`uv pip`），禁止裸 `python` / `python3` / `pip`；装依赖 `uv sync --all-extras --dev`。node-27 上需 `export PATH=$HOME/.local/bin:$PATH`。
 - 仓库默认解释器是 Python 3.11，由根 `.python-version` 钉住（与 CI 的 `python-version: "3.11"` 同源）；`pyproject.toml` 的支持范围仍是 `requires-python >=3.11`。
   - 日常安装/运行照旧 `uv sync --all-extras --dev` / `uv run`。显式跨版本行为核查用 `uv run --python <version> ...`（例：`uv run --python 3.14 python -V`）。
-- **node-22 例外（长期保持 3.12.7）**：#1831；**禁止** `uv sync`、裸 `uv run` 及其隐式重建变体；**系统 Python 也不是替代**；只读观察只用 `uv run --no-sync ...`，`--active` 并非安全替代。细则：
-  - 按 #1831 的运维决定（2026-10-05），`/scratch/frd_muziyao/NWM` 的活动 checkout 长期保持 Python 3.12.7，原计划向 3.11 pin 的切换已取消：
-    - 共享 `.venv` 被在线服务占用，而仓库 pin 是 3.11——**禁止** `uv sync`，也禁止裸 `uv run` / 任何会隐式重建环境的 `uv run` 变体，
-    - 否则 uv 会在 3.11 pin 下自动删除并重建 3.12 的 `.venv`，已实测会打断成半拆状态；**系统 Python 也不是替代**。
+- **计算节点（w3 / w2）例外**：日常**禁止** `uv sync`、裸 `uv run` 及其隐式重建变体；**系统 Python 也不是替代**；只读观察只用 `uv run --no-sync ...`，`--active` 并非安全替代。细则：
+  - 原因：`/scratch/frd_muziyao/NWM` 的 `.venv`（Python 3.11.x，与仓库 pin 一致）经 NFS 被两台主机上的 Slurm 作业和 scheduler 定时器共用。
   - 必须执行的活动操作使用 checked-in wrapper 或精确活动解释器 `/scratch/frd_muziyao/NWM/.venv/bin/python`（控制台入口用 `-m`）；解释器缺失即 fail-closed，绝不触发环境创建。
-  - 若需只读 Python 观察，只用已验证的 `uv run --no-sync ...`——它执行的是活动的 3.12.7 环境、**不代表 3.11 pin 生效**；`--active` 并非安全替代（同样会重建）。
-  - 更换 node-22 的解释器或重建该 `.venv`，须有新的、明确的运维决定并单独立 issue。该 pin 不含任何 Slurm 运行时验证。
+  - 只有部署改了 `uv.lock` 时才允许同步环境，且三条同时成立：`nhms-compute-scheduler.timer` 已停、没有在跑的 pass、Slurm 队列里没有 NWM 作业；除此之外不得在该 checkout 里运行 `uv sync`。
+  - 原 node-22 主机上的 `.venv` 是 #1831 留下的 Python 3.12.7，已不是活动环境：**不要**在那台主机上运行任何 `uv` 命令；回滚到它须有新的、明确的运维决定并单独立 issue。
 - 前端：`cd apps/frontend && pnpm install && pnpm test && pnpm build`；Linux 端用 `corepack pnpm`（版本以 `package.json` 的 `packageManager` 为准）。
 
 ## Issue 驱动开发
