@@ -1,49 +1,20 @@
-# ruff: noqa: E402,E501,F401,F821,I001
 from __future__ import annotations
 
-from services.orchestrator import scheduler as _scheduler
+import importlib
+from collections.abc import Callable, Mapping, Sequence
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
-globals().update(_scheduler.__dict__)
+from services.orchestrator import scheduler_candidates as _scheduler_candidates
+from services.orchestrator import scheduler_discovery as _scheduler_discovery
+from services.orchestrator import scheduler_evidence as _scheduler_evidence
+from services.orchestrator import scheduler_preflight as _scheduler_preflight
+from services.orchestrator.chain import ForecastOrchestrator
+from services.orchestrator.scheduler_state_common import _ensure_utc, _evidence_safe
 
-_SCHEDULER_CANDIDATE_EXECUTION_EVIDENCE_FORWARDER_NAMES = (
-    "_candidate_execution_attempted",
-    "_pipeline_result_slurm_submit_called",
-    "_pipeline_result_pipeline_status_write",
-    "_pipeline_result_pipeline_event_write",
-    "_pipeline_result_pipeline_write_value",
-    "_pipeline_result_has_pipeline_job_evidence",
-    "_pipeline_result_write_absence_proven",
-    "_candidate_slurm_submit_called",
-    "_candidate_pipeline_write_value",
-    "_execution_mutation_value",
-    "_nonempty_evidence_value",
-    "_candidate_identity_evidence",
-    "_candidate_preflight_blocked_evidence",
-    "_candidate_slurm_preflight_blocked_evidence",
-    "_candidate_evidence_write_blocked_evidence",
-    "_cancel_candidate_evidence_write_blocked_evidence",
-    "_sync_candidate_evidence_write_blocked_evidence",
-    "_candidate_secret_manifest_blocked_evidence",
-    "_slurm_resource_profile_blockers",
-    "_resource_profile_evidence",
-    "_redact_digest_keys_for_evidence",
-    "_is_digest_evidence_key",
-    "_candidate_execution_evidence",
-    "_candidate_forcing_ready_evidence",
-    "_candidate_forcing_blocked_evidence",
-    "_candidate_execution_evidence_item",
-    "_candidate_status_from_outcome",
-    "_candidate_model_run_review_evidence",
-    "_candidate_stage_evidence",
-    "_candidate_stage_evidence_item",
-    "_stage_run_evidence",
-    "_stage_task_results",
-    "_task_result_matches_candidate",
-    "_task_candidate_matching_available",
-    "_normalized_identity",
-    "_task_result_evidence",
-    "_resource_metrics_from_mapping",
-)
+if TYPE_CHECKING:
+    from services.orchestrator.scheduler_config.config import ProductionSchedulerConfig
+    from services.orchestrator.scheduler_types import SchedulerCandidate
 
 
 def _scheduler_candidate_execution_evidence_forwarder(name: str) -> Callable[..., Any]:
@@ -160,27 +131,6 @@ _task_result_evidence = _scheduler_candidate_execution_evidence_forwarder("_task
 _resource_metrics_from_mapping = _scheduler_candidate_execution_evidence_forwarder("_resource_metrics_from_mapping")
 
 
-_SCHEDULER_CANDIDATE_QUALITY_FORWARDER_NAMES = (
-    "_candidate_artifact_refs",
-    "_candidate_resource_summary",
-    "_candidate_forcing_evidence",
-    "_candidate_output_evidence",
-    "_candidate_display_evidence",
-    "_candidate_quality_states",
-    "_candidate_residual_blockers",
-    "_candidate_product_counts",
-    "_candidate_output_river_manifest",
-    "_first_present_value",
-    "_first_present_int",
-    "_model_package_manifest_uri",
-    "_candidate_output_key",
-    "_candidate_output_uri",
-    "_has_uri_scheme",
-    "_candidate_station_count",
-    "_candidate_station_ids",
-)
-
-
 def _scheduler_candidate_quality_forwarder(name: str) -> Callable[..., Any]:
     def forwarder(*args: Any, **kwargs: Any) -> Any:
         from services.orchestrator import scheduler_candidate_quality
@@ -191,11 +141,6 @@ def _scheduler_candidate_quality_forwarder(name: str) -> Callable[..., Any]:
     return forwarder
 
 
-for _scheduler_candidate_quality_name in _SCHEDULER_CANDIDATE_QUALITY_FORWARDER_NAMES:
-    globals()[_scheduler_candidate_quality_name] = _scheduler_candidate_quality_forwarder(
-        _scheduler_candidate_quality_name
-    )
-del _scheduler_candidate_quality_name
 _candidate_artifact_refs = _scheduler_candidate_quality_forwarder("_candidate_artifact_refs")
 _candidate_resource_summary = _scheduler_candidate_quality_forwarder("_candidate_resource_summary")
 _candidate_forcing_evidence = _scheduler_candidate_quality_forwarder("_candidate_forcing_evidence")
@@ -239,16 +184,6 @@ _production_slurm_env = _scheduler_preflight._production_slurm_env
 
 
 _scheduler_gateway_module = importlib.import_module("services.orchestrator.scheduler_gateway")
-_SCHEDULER_GATEWAY_FORWARDER_NAMES = (
-    "_slurm_preflight",
-    "_slurm_gateway_backend",
-    "_default_gateway_probe",
-    "_slurm_gateway_check",
-)
-_GATEWAY_SELF_HOSTS = _scheduler_gateway_module._GATEWAY_SELF_HOSTS
-_GATEWAY_HEALTH_PATH = _scheduler_gateway_module._GATEWAY_HEALTH_PATH
-_GATEWAY_REQUIRED_BINARIES = _scheduler_gateway_module._GATEWAY_REQUIRED_BINARIES
-_GATEWAY_PROBE_TIMEOUT_SECONDS = _scheduler_gateway_module._GATEWAY_PROBE_TIMEOUT_SECONDS
 
 
 def _scheduler_gateway_forwarder(name: str) -> Callable[..., Any]:
@@ -359,34 +294,6 @@ def _no_mutation_proof() -> dict[str, bool]:
 
 
 _scheduler_runtime_roots_module = importlib.import_module("services.orchestrator.scheduler_runtime_roots")
-_SCHEDULER_RUNTIME_ROOTS_FORWARDER_NAMES = (
-    "_scheduler_runtime_root_preflight",
-    "_scheduler_root_preflight_payload",
-    "_scheduler_root_check",
-    "_scheduler_root_blocker",
-    "_scheduler_root_os_error_reason",
-    "_directory_is_writable",
-    "_scheduler_service_role_check",
-    "_scheduler_allowed_roots_policy_check",
-    "_scheduler_allowed_roots",
-    "_scheduler_allowed_roots_and_blockers",
-    "_normalize_sources",
-    "_confined_path",
-    "_reject_blank_config_path",
-    "_config_path_preserve_final_component",
-    "_config_path_relative_to_preserve_final",
-    "_optional_config_path_relative_to_preserve_final",
-    "_resolve_optional_config_path",
-    "_optional_config_path_relative_to",
-    "_env_flag",
-    "_env_int",
-    "_env_allowed_cycle_hours_utc",
-    "_parse_allowed_cycle_hours_utc",
-    "_normalize_allowed_cycle_hours_utc",
-    "_env_path_list",
-    "_require_under_workspace",
-    "_require_safe_directory_final_component",
-)
 
 
 def _scheduler_runtime_roots_forwarder(name: str) -> Callable[..., Any]:
