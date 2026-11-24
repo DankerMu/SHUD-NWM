@@ -51,7 +51,16 @@ Collected reads, keyed on the first attribute after the facade
   calls ``getattr(A, <its own parameter>)`` is a dispatch wrapper (today
   ``_scheduler_call`` in ``scheduler_candidate_manifest.py`` and
   ``scheduler_candidate_execution_evidence.py``).  Each call to it with a
-  literal argument in that parameter's position is a read of that name.
+  literal argument in that parameter's position is a read of that name;
+* ``seam-literal``: in an owner source, a call to ``facade_seam`` (bare name or
+  an attribute access ending in ``facade_seam``) with a literal first argument
+  is a read of that name on the scheduler facade.  The lookup reaches the
+  facade through ``sys.modules``, so without this form removing a seam's
+  explicit facade import would silently turn the seam into a no-op.  A
+  non-literal first argument, a second argument that is not a bare name equal
+  to the literal (the fallback must be the seam's own name), or any other
+  argument shape is an owner violation.  Calls in test sources are neither
+  collected nor violations.
 
 ``raising=False`` patches are collected like any other: they are exactly the
 ones that go silent after F2.
@@ -77,7 +86,9 @@ has zero sites at a306fd5e4.
 
 Not bindings, so not scanned (out of the 10.2 contract): relative imports
 (``from .scheduler import X``, ``from . import chain``),
-``importlib.import_module(...)`` and ``sys.modules[...]`` lookups.
+``importlib.import_module(...)`` and ``sys.modules[...]`` lookups.  The one
+``sys.modules`` lookup of the scheduler facade in owner code is
+``facade_seam``, and its literal names are collected as ``seam-literal``.
 
 Three silent forms are not collected either, and each has zero facade sites at
 f45e332b2: a dispatch wrapper that rebinds its name parameter before the
@@ -134,7 +145,9 @@ ALL_FORMS = (
     "patch-string",
     "from-import",
     "owner-dispatch",
+    "seam-literal",
 )
+_SEAM_LOOKUP = "facade_seam"
 # Forms that each facade must yield at least once at HEAD (coverage meta-test).
 REQUIRED_FORMS_PER_FACADE = ("attr-load", "from-import", "getattr", "setattr-object", "setattr-string")
 
@@ -411,6 +424,8 @@ class _Collector(ast.NodeVisitor):
             literal_target = _str_constant(args[0])
             if literal_target is not None:
                 self._string_target(args[0], literal_target, "patch-string")
+        if self.owner and name == _SEAM_LOOKUP:
+            self._seam_call(node)
         if isinstance(node.func, ast.Name) and node.func.id in self.wrappers:
             facade, index, _ = self.wrappers[node.func.id]
             if len(args) > index and not any(isinstance(a, ast.Starred) for a in args[: index + 1]):
@@ -426,6 +441,24 @@ class _Collector(ast.NodeVisitor):
                     (self.path, node.lineno, f"dispatch wrapper {node.func.id}() called without a literal name")
                 )
         self.generic_visit(node)
+
+    def _seam_call(self, node: ast.Call) -> None:
+        args = node.args
+        if len(args) != 2 or node.keywords or any(isinstance(a, ast.Starred) for a in args):
+            self.result.violations.append(
+                (self.path, node.lineno, f"{_SEAM_LOOKUP}() must be called as {_SEAM_LOOKUP}(\"<name>\", <name>)")
+            )
+            return
+        literal = _str_constant(args[0])
+        if literal is None:
+            self.result.violations.append((self.path, node.lineno, f"{_SEAM_LOOKUP}() called with a non-literal name"))
+            return
+        self._read("scheduler", literal, "seam-literal", node.lineno)
+        fallback = args[1]
+        if not (isinstance(fallback, ast.Name) and fallback.id == literal):
+            self.result.violations.append(
+                (self.path, node.lineno, f"{_SEAM_LOOKUP}({literal!r}, ...) fallback is not the bare name {literal}")
+            )
 
     def _string_target(self, node: ast.AST, value: str, form: str) -> None:
         match = _STRING_TARGET_RE.match(value)
@@ -577,6 +610,7 @@ OWNER_PATH = "services/orchestrator/bite_row_owner.py"
 TEST_PATH = "tests/test_bite_row.py"
 S = "from services.orchestrator import scheduler as _scheduler\n"
 C = "from services.orchestrator import chain as _chain\n"
+SEAM = f"from services.orchestrator.scheduler_facade_seam import {_SEAM_LOOKUP}\n"
 
 # (id, path, source, expected flags) where a flag is (facade, name, form) for an
 # unresolved read, or ("violation", "", "") for an owner violation.
@@ -701,6 +735,24 @@ _FLAG_ROWS = [
         {("violation", "", "")},
     ),
     (
+        "seam-literal",
+        OWNER_PATH,
+        SEAM + f"def helper():\n    return {_SEAM_LOOKUP}({MISSING!r}, {MISSING})\n",
+        {("scheduler", MISSING, "seam-literal")},
+    ),
+    (
+        "seam-non-literal-name",
+        OWNER_PATH,
+        SEAM + f"def helper(name):\n    return {_SEAM_LOOKUP}(name, _unlink_lock_file)\n",
+        {("violation", "", "")},
+    ),
+    (
+        "seam-fallback-not-own-name",
+        OWNER_PATH,
+        SEAM + f"def helper():\n    return {_SEAM_LOOKUP}('_unlink_lock_file', _open_regular_guard_file)\n",
+        {("violation", "", "")},
+    ),
+    (
         "owner-getattr-outside-wrapper-module-level",
         OWNER_PATH,
         S + "for name in ('ProductionScheduler',):\n    getattr(_scheduler, name)\n",
@@ -773,6 +825,13 @@ _NO_FLAG_ROWS = [
         "from services.orchestrator import chain_stages as _chain_stages\n",
     ),
     ("relative-import-out-of-contract", OWNER_PATH, f"from .scheduler import {MISSING}\n"),
+    (
+        "seam-own-name-fallback",
+        OWNER_PATH,
+        "from services.orchestrator import scheduler_facade_seam as seam\n"
+        "def helper():\n    return seam.facade_seam('_unlink_lock_file', _unlink_lock_file)\n",
+    ),
+    ("seam-call-in-test-source", TEST_PATH, SEAM + "def test_x(name, fallback):\n    facade_seam(name, fallback)\n"),
 ]
 
 
@@ -824,3 +883,14 @@ def test_collector_coverage_at_head() -> None:
     assert not missing, f"collector found no site for: {missing}"
     assert forms.get(("scheduler", "owner-dispatch"), 0) >= 1
     assert {wrapper for _, _, wrapper in result.wrapper_sites} == {"_scheduler_call"}
+    seam_sites = collections.Counter((r.path, r.name) for r in result.reads if r.form == "seam-literal")
+    assert seam_sites == collections.Counter(
+        {
+            ("services/orchestrator/scheduler_state_decision.py", "_state_active_jobs"): 1,
+            ("services/orchestrator/scheduler_state_failure.py", "_object_manifest_is_missing"): 1,
+            ("services/orchestrator/scheduler_lease.py", "_default_owner_liveness_probe"): 1,
+            ("services/orchestrator/scheduler_lease.py", "_unlink_lock_file"): 2,
+            ("services/orchestrator/scheduler_lease.py", "_open_lock_parent_directory"): 1,
+            ("services/orchestrator/scheduler_lease.py", "_open_regular_guard_file"): 1,
+        }
+    )

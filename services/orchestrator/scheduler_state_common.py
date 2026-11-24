@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import os
-import sys
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlparse
@@ -11,37 +10,8 @@ from packages.common.contracts.time_normalization import format_cycle_time
 from packages.common.object_store import LocalObjectStore
 from packages.common.redaction import redact_payload
 from packages.common.slurm_env import secret_manifest_key_reason, secret_manifest_value_reason
+from services.orchestrator.scheduler_facade_seam import facade_seam_original
 from services.orchestrator.scheduler_state_types import SchedulerCandidateLike
-
-_FACADE_MODULE = "services.orchestrator.scheduler"
-_FACADE_OWNER_MODULE = "services.orchestrator.scheduler_state"
-
-
-def _facade_seam(name: str, fallback: Callable[..., Any]) -> Callable[..., Any]:
-    """Return a monkeypatch on the scheduler facade's ``name`` at call time, else ``fallback``.
-
-    The scheduler facade is a monkeypatch surface: owner modules keep reading facade
-    names at call time (spec ``scheduler-facade-deepening``), so a test that patches
-    ``services.orchestrator.scheduler.<name>`` is observed inside the owner.  This is
-    late binding, not bookkeeping: nothing is written to any module.
-
-    A facade binding counts as a patch only when it is not the facade's own
-    re-export of ``scheduler_state.<name>`` (identity).
-    Without that check the always-callable unpatched facade binding would shadow a
-    patch on the owner module, so a patch on the owner module still wins while the
-    facade is unpatched.  When both are patched the facade patch wins.  The facade is
-    looked up in ``sys.modules`` (never imported here), so an owner used without the
-    facade loaded gets ``fallback``.
-    """
-    facade = sys.modules.get(_FACADE_MODULE)
-    value = getattr(facade, name, None) if facade is not None else None
-    if not callable(value):
-        return fallback
-    owner = sys.modules.get(_FACADE_OWNER_MODULE)
-    unpatched = getattr(owner, name, None) if owner is not None else None
-    if value is unpatched:
-        return fallback
-    return value
 
 
 def _coerce_int(value: Any, *, default: int) -> int:
@@ -226,6 +196,7 @@ def _local_object_store_for(candidate: SchedulerCandidateLike) -> LocalObjectSto
     return LocalObjectStore(str(object_root), object_store_prefix=_object_store_prefix_for(candidate))
 
 
+@facade_seam_original
 def _object_manifest_is_missing(candidate: SchedulerCandidateLike, manifest_uri: str) -> bool:
     store = _local_object_store_for(candidate)
     if store is None:

@@ -1,9 +1,10 @@
-"""The owner-side facade seam: ``scheduler_state_common._facade_seam``.
+"""The owner-side facade seam: ``scheduler_facade_seam.facade_seam``.
 
-The subject is the owner.  The owner-path cases call the owner
-``scheduler_state_decision._candidate_state_decision`` directly: a patch on
-``services.orchestrator.scheduler`` is only observed because the owner reads the
-facade name at call time.
+The subject is the owner.  The owner-path cases call the owner functions
+(``scheduler_state_decision._candidate_state_decision``,
+``scheduler_state_failure._artifact_uri_missing_status``, the lease) directly: a
+patch on ``services.orchestrator.scheduler`` or on the call-site module is only
+observed because the owner resolves the seam name at call time.
 """
 
 from __future__ import annotations
@@ -15,14 +16,27 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from services.orchestrator import scheduler as scheduler_module
+from services.orchestrator import scheduler_facade_seam as scheduler_facade_seam_module
+from services.orchestrator import scheduler_lease as scheduler_lease_module
 from services.orchestrator import scheduler_state as scheduler_state_module
 from services.orchestrator import scheduler_state_decision as scheduler_state_decision_module
 from services.orchestrator import scheduler_state_failure as scheduler_state_failure_module
-from services.orchestrator.scheduler_state_common import _facade_seam
+from services.orchestrator import scheduler_state_rows as scheduler_state_rows_module
+from services.orchestrator.scheduler_facade_seam import facade_seam
 from workers.data_adapters.base import CycleDiscovery
 
 _FACADE_MODULE = "services.orchestrator.scheduler"
+_REGISTERED_SEAMS = (
+    "_state_active_jobs",
+    "_object_manifest_is_missing",
+    "_default_owner_liveness_probe",
+    "_unlink_lock_file",
+    "_open_lock_parent_directory",
+    "_open_regular_guard_file",
+)
 
 
 def _dt(value: str) -> datetime:
@@ -165,7 +179,7 @@ def test_facade_seam_returns_fallback_when_facade_not_loaded(monkeypatch: Any) -
     monkeypatch.delitem(sys.modules, _FACADE_MODULE, raising=False)
 
     assert _FACADE_MODULE not in sys.modules
-    assert _facade_seam("_state_active_jobs", fallback) is fallback
+    assert facade_seam("_state_active_jobs", fallback) is fallback
 
 
 def test_facade_seam_returns_fallback_for_non_callable_facade_attribute(monkeypatch: Any) -> None:
@@ -174,15 +188,44 @@ def test_facade_seam_returns_fallback_for_non_callable_facade_attribute(monkeypa
 
     monkeypatch.setattr(scheduler_module, "_state_active_jobs", "not callable")
 
-    assert _facade_seam("_state_active_jobs", fallback) is fallback
+    assert facade_seam("_state_active_jobs", fallback) is fallback
 
 
-def test_facade_seam_returns_fallback_for_name_absent_from_facade() -> None:
+def test_facade_seam_returns_fallback_for_registered_name_removed_from_facade(monkeypatch: Any) -> None:
+    def fallback(_lock_name: str, *, parent_fd: int) -> None:
+        return None
+
+    monkeypatch.delattr(scheduler_module, "_unlink_lock_file")
+
+    assert not hasattr(scheduler_module, "_unlink_lock_file")
+    assert facade_seam("_unlink_lock_file", fallback) is fallback
+
+
+def test_facade_seam_raises_for_unregistered_name() -> None:
     def fallback() -> None:
         return None
 
-    assert not hasattr(scheduler_module, "_facade_seam_no_such_name")
-    assert _facade_seam("_facade_seam_no_such_name", fallback) is fallback
+    # Through a variable: the guard rejects a non-literal name only in owner sources.
+    name = "_facade_seam_no_such_name"
+    assert name not in scheduler_facade_seam_module._ORIGINALS
+    with pytest.raises(LookupError, match=name):
+        facade_seam(name, fallback)
+    # Also when the facade is not loaded: registration is checked first.
+    with pytest.MonkeyPatch.context() as patch_context:
+        patch_context.delitem(sys.modules, _FACADE_MODULE, raising=False)
+        with pytest.raises(LookupError, match=name):
+            facade_seam(name, fallback)
+
+
+def test_every_registered_seam_resolves_on_facade_to_its_registered_original() -> None:
+    sentinel = object()
+
+    assert set(scheduler_facade_seam_module._ORIGINALS) == set(_REGISTERED_SEAMS)
+    for name in _REGISTERED_SEAMS:
+        facade_binding = getattr(scheduler_module, name)
+        assert callable(facade_binding)
+        assert facade_binding is scheduler_facade_seam_module._ORIGINALS[name]
+        assert facade_seam(name, sentinel) is sentinel  # type: ignore[arg-type]
 
 
 def test_facade_seam_returns_callable_facade_patch_as_is(monkeypatch: Any) -> None:
@@ -191,7 +234,7 @@ def test_facade_seam_returns_callable_facade_patch_as_is(monkeypatch: Any) -> No
 
     monkeypatch.setattr(scheduler_module, "_state_active_jobs", patched)
 
-    assert _facade_seam("_state_active_jobs", scheduler_state_decision_module._state_active_jobs) is patched
+    assert facade_seam("_state_active_jobs", scheduler_state_decision_module._state_active_jobs) is patched
 
 
 def test_facade_seam_treats_wraps_spy_as_patch(monkeypatch: Any) -> None:
@@ -213,7 +256,7 @@ def test_facade_seam_treats_wraps_spy_as_patch(monkeypatch: Any) -> None:
     # A ``functools.wraps`` spy carries ``__wrapped__ is owner_binding`` but is not
     # the facade's own re-export, so the seam returns it and the owner calls it.
     assert spy.__wrapped__ is owner_binding
-    assert _facade_seam("_state_active_jobs", fallback) is spy
+    assert facade_seam("_state_active_jobs", fallback) is spy
     candidate = _candidate()
     state = {
         "candidate_id": candidate.candidate_id,
@@ -233,7 +276,7 @@ def test_facade_seam_treats_direct_reexport_as_unpatched(monkeypatch: Any) -> No
 
     monkeypatch.setattr(scheduler_module, "_state_active_jobs", owner_binding)
 
-    assert _facade_seam("_state_active_jobs", fallback) is fallback
+    assert facade_seam("_state_active_jobs", fallback) is fallback
 
 
 def test_facade_seam_owner_module_patch_wins_while_facade_unpatched(monkeypatch: Any) -> None:
@@ -245,7 +288,7 @@ def test_facade_seam_owner_module_patch_wins_while_facade_unpatched(monkeypatch:
     facade_binding = scheduler_module._object_manifest_is_missing
     assert facade_binding is scheduler_state_module._object_manifest_is_missing
     assert (
-        _facade_seam("_object_manifest_is_missing", scheduler_state_failure_module._object_manifest_is_missing)
+        facade_seam("_object_manifest_is_missing", scheduler_state_failure_module._object_manifest_is_missing)
         is owner_patch
     )
 
@@ -261,6 +304,132 @@ def test_facade_seam_facade_patch_wins_when_both_patched(monkeypatch: Any) -> No
     monkeypatch.setattr(scheduler_module, "_object_manifest_is_missing", facade_patch)
 
     assert (
-        _facade_seam("_object_manifest_is_missing", scheduler_state_failure_module._object_manifest_is_missing)
+        facade_seam("_object_manifest_is_missing", scheduler_state_failure_module._object_manifest_is_missing)
         is facade_patch
     )
+
+
+def test_owner_artifact_probe_observes_call_site_patch_when_aggregate_also_patched(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    # The facade stays untouched.  A patch on the aggregate ``scheduler_state`` must
+    # not move the "unpatched" reference: the call-site module's patch is the one
+    # the probe calls.
+    candidate = _candidate()
+    artifact_uri = "s3://nhms/raw/gfs/2026052106/manifest.json"
+    call_site_calls: list[str] = []
+    aggregate_calls: list[str] = []
+
+    def call_site_patch(_candidate: Any, uri: str) -> bool:
+        call_site_calls.append(uri)
+        return True
+
+    def aggregate_patch(_candidate: Any, uri: str) -> bool:
+        aggregate_calls.append(uri)
+        return True
+
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    monkeypatch.setattr(scheduler_state_failure_module, "_object_manifest_is_missing", call_site_patch)
+    monkeypatch.setattr(scheduler_state_module, "_object_manifest_is_missing", aggregate_patch)
+
+    status = scheduler_state_failure_module._artifact_uri_missing_status(candidate, artifact_uri)
+
+    assert status == (True, None)
+    assert call_site_calls == [artifact_uri]
+    assert aggregate_calls == []
+
+
+def test_owner_lease_liveness_probe_observes_lease_module_patch(monkeypatch: Any) -> None:
+    sentinel = object()
+
+    def lease_patch(_payload: Mapping[str, Any]) -> Any:
+        return sentinel
+
+    assert _FACADE_MODULE in sys.modules
+    monkeypatch.setattr(scheduler_lease_module, "_default_owner_liveness_probe", lease_patch)
+
+    assert scheduler_lease_module._compat_owner_liveness_probe({"host": "elsewhere", "pid": 1}) is sentinel
+
+
+def test_owner_lease_release_observes_lease_module_unlink_patch(monkeypatch: Any, tmp_path: Path) -> None:
+    monkeypatch.delenv(scheduler_lease_module.FILE_LEASE_GUARD_MODE_ENV, raising=False)
+    monkeypatch.delenv(scheduler_lease_module.LEGACY_FILE_LOCK_GUARD_MODE_ENV, raising=False)
+    real_unlink = scheduler_lease_module._unlink_lock_file
+    calls: list[str] = []
+
+    def recorder(lock_name: str, *, parent_fd: int) -> None:
+        calls.append(lock_name)
+        real_unlink(lock_name, parent_fd=parent_fd)
+
+    monkeypatch.setattr(scheduler_lease_module, "_unlink_lock_file", recorder)
+    lock_path = tmp_path / "locks" / "scheduler.lock"
+    lease = scheduler_lease_module.FileSchedulerLease(lock_path, ttl_seconds=60)
+
+    acquired = lease.acquire(pass_id="pass_3335", started_at=_dt("2026-05-21T06:00:00Z"))
+    assert acquired["acquired"] is True
+    assert lock_path.exists()
+    assert calls == []
+
+    lease.release(pass_id="pass_3335")
+
+    assert calls == ["scheduler.lock"]
+    assert not lock_path.exists()
+
+
+def test_facade_seam_aggregate_only_patch_is_not_observed(monkeypatch: Any, tmp_path: Path) -> None:
+    calls: list[str] = []
+
+    def aggregate_patch(_candidate: Any, uri: str) -> bool:
+        calls.append(uri)
+        return True
+
+    def fallback(_candidate: Any, _uri: str) -> bool:
+        return False
+
+    monkeypatch.setattr(scheduler_state_module, "_object_manifest_is_missing", aggregate_patch)
+
+    # A distinct fallback: the facade's unpatched binding must not be returned either.
+    assert facade_seam("_object_manifest_is_missing", fallback) is fallback
+
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir()
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    artifact_uri = "s3://nhms/raw/gfs/2026052106/manifest.json"
+
+    status = scheduler_state_failure_module._artifact_uri_missing_status(_candidate(), artifact_uri)
+
+    # The real probe ran against the empty store; the aggregate patch never did.
+    assert status == (True, None)
+    assert calls == []
+
+
+def test_facade_seam_defining_module_patch_is_not_observed_at_another_call_site(monkeypatch: Any) -> None:
+    patched_job = {"job_id": "job_patched_rows", "slurm_job_id": "patched-rows", "status": "running"}
+
+    def rows_patch(_state: Mapping[str, Any]) -> list[dict[str, Any]]:
+        return [patched_job]
+
+    def fallback(_state: Mapping[str, Any]) -> list[dict[str, Any]]:
+        return []
+
+    monkeypatch.setattr(scheduler_state_rows_module, "_state_active_jobs", rows_patch)
+
+    assert scheduler_state_decision_module._state_active_jobs is not rows_patch
+    assert facade_seam("_state_active_jobs", fallback) is fallback
+
+    candidate = _candidate()
+    decision = scheduler_state_decision_module._candidate_state_decision(
+        candidate,
+        {
+            "candidate_id": candidate.candidate_id,
+            "run_id": candidate.run_id,
+            "forcing_version_id": candidate.forcing_version_id,
+            "pipeline_jobs": [],
+        },
+    )
+
+    # Unpatched, this state yields no decision; an observed rows patch would skip it.
+    assert decision is None
