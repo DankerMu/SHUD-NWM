@@ -3720,6 +3720,16 @@ class FileOrchestrationJournalRepository(
         )
         rows.model_context = _latest_mapping(rows.model_context, model_context)
         for job in _record_list(payload, "pipeline_jobs", "jobs", single_key="pipeline_job"):
+            if _is_foreign_model_cycle_scope_job(
+                job, source_id=source_id, cycle_time=cycle_time, model_id=expected_model_id
+            ):
+                # The shape the pre-#3308 writer emitted: another model's named
+                # exact cycle-run row.  Its authority is its direct record, so
+                # this copy is validated (all but model equality) and never used.
+                _validate_pipeline_job_identity(job, source_id=source_id, cycle_time=cycle_time, model_id=None)
+                _optional_safe_identity(job, "model_id")
+                _validate_accepted_submit_evidence(job)
+                continue
             _validate_pipeline_job_identity(
                 job,
                 source_id=source_id,
@@ -5923,6 +5933,27 @@ class FileOrchestrationJournalRepository(
         )
         if next_sequence is None:
             next_sequence = self._next_sequence_unlocked(source_id=source_id, cycle_time=cycle_time)
+        # `_apply_latest_view` validates every job row against the view's model,
+        # so a row naming another model (and its pipeline_job events) stays out
+        # of this view (#3308); the gates still reach it via its direct record.
+        foreign_job_ids = {
+            job_id
+            for job_id, job in rows.pipeline_jobs.items()
+            if job.get("model_id") not in (None, "") and str(job.get("model_id")) != model_id
+        }
+        pipeline_jobs = [
+            _strip_internal_fields(job)
+            for job_id, job in rows.pipeline_jobs.items()
+            if job_id not in foreign_job_ids and accepted_submit_row_kind(job) != "master"
+        ]
+        pipeline_events = [
+            _strip_internal_fields(event)
+            for event in rows.pipeline_events
+            if not (
+                str(event.get("entity_type") or "pipeline_job") == "pipeline_job"
+                and str(event.get("entity_id") or "") in foreign_job_ids
+            )
+        ]
         latest = {
             "schema_version": FILE_ORCHESTRATION_LATEST_SCHEMA_VERSION,
             "generated_at": _format_utc(_utcnow()),
@@ -5933,18 +5964,12 @@ class FileOrchestrationJournalRepository(
             "forecast_cycle": _strip_internal_fields(rows.forecast_cycle),
             "forcing_version": _strip_internal_fields(rows.forcing_version),
             "model_context": _strip_internal_fields(rows.model_context),
-            "pipeline_jobs": [
-                _strip_internal_fields(job)
-                for job in rows.pipeline_jobs.values()
-                if accepted_submit_row_kind(job) != "master"
-            ],
-            "pipeline_events": [_strip_internal_fields(event) for event in rows.pipeline_events],
+            "pipeline_jobs": pipeline_jobs,
+            "pipeline_events": pipeline_events,
             "replay": {
                 "latest_sequence": next_sequence - 1,
-                "job_count": sum(
-                    accepted_submit_row_kind(job) != "master" for job in rows.pipeline_jobs.values()
-                ),
-                "event_count": len(rows.pipeline_events),
+                "job_count": len(pipeline_jobs),
+                "event_count": len(pipeline_events),
             },
         }
         self._atomic_write_json_unlocked(
