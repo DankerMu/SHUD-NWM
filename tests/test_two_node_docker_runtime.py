@@ -1497,9 +1497,11 @@ def test_start_display_api_sources_display_api_port_and_ignores_legacy_alias(tmp
     assert launch_args[:4] == ["nohup", str(temp_repo / ".venv/bin/python"), "-m", "uvicorn"]
     assert "--port" in launch_args
     assert launch_args[launch_args.index("--port") + 1] == "18080"
-    assert "19090" not in launch_text
+    # Element-level and ``host:port``-anchored: argv holds the tmp repository path
+    # and stdout also echoes the relaunched pid, either of which may contain 19090.
+    assert "19090" not in launch_args
     assert "target=127.0.0.1:18080" in completed.stdout
-    assert "19090" not in completed.stdout + completed.stderr
+    assert ":19090" not in completed.stdout + completed.stderr
 
 
 def test_start_display_api_defaults_display_api_port_when_unset(tmp_path: Path) -> None:
