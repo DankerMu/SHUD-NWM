@@ -29,6 +29,6 @@ This file and `tasks.md` are inside the guard's scan set. They therefore write t
 ## Impact
 
 - Code: `scripts/governance/entropy_audit/topology_predicates.py`, `topology_context_rules.py`, `check_topology.py`.
-- Tests: `tests/test_entropy_audit_topology_db_boundary.py`, `tests/test_entropy_audit_topology_authority.py`.
+- Tests: `tests/test_entropy_audit_topology_db_boundary.py`.
 - Spec: `production-topology-contract`, requirement "Static guardrails block topology drift".
 - No production runtime code. The guard runs in CI and locally.

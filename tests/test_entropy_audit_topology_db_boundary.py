@@ -858,6 +858,55 @@ def _with_host(template: str, names: tuple[str, ...]) -> list[str]:
     return [template.format(h=name) for name in names]
 
 
+# One flag row per word that keeps a Slurm-accounting clause a database-writer
+# claim, so each word is pinned on its own.
+SLURM_ACCOUNTING_NON_EXEMPT_ROWS = [
+    *(
+        row
+        for word in ("PostgreSQL", "Postgres", "pg", "primary", "NHMS", "active", "current", "production")
+        for row in _with_host(f"slurmdbd on {{h}} writes the {word} database.", COMPUTE_HOSTS)
+    ),
+    *_with_host("slurmdbd on {h} writes the database on port 55432.", COMPUTE_HOSTS),
+    *_with_host("slurmdbd on {h} writes the database on port 55433.", COMPUTE_HOSTS),
+    *(
+        row
+        for word in ("主库", "当前数据库", "生产数据库", "活动数据库", "活跃数据库")
+        for row in _with_host(f"{{h}} 上的 slurmdbd 写入{word}。", COMPUTE_HOSTS)
+    ),
+]
+
+# One no-flag row per D4 prohibition and absence form not used by another row.
+COMPUTE_HOST_LOCAL_POSTGRES_DENIAL_ROWS = [
+    *_with_host("Do not use {h} local PostgreSQL.", COMPUTE_HOSTS),
+    *_with_host("{h} does not connect to a local PostgreSQL.", COMPUTE_HOSTS),
+    *_with_host("{h} does not use a local PostgreSQL.", COMPUTE_HOSTS),
+    *_with_host("Jobs on {h} must not read a local PostgreSQL.", COMPUTE_HOSTS),
+    *_with_host("{h} 上的作业不连本地 PostgreSQL。", COMPUTE_HOSTS),
+    *_with_host("{h} 上不要连本地 PostgreSQL。", COMPUTE_HOSTS),
+    *_with_host("{h} 不应连接本地 PostgreSQL。", COMPUTE_HOSTS),
+    *_with_host("{h} 不使用本地 PostgreSQL。", COMPUTE_HOSTS),
+    *_with_host("{h} 禁止使用本地 PostgreSQL。", COMPUTE_HOSTS),
+    *_with_host("{h} runs no local Postgres.", COMPUTE_HOSTS),
+    *_with_host("{h} runs no local PG.", COMPUTE_HOSTS),
+    *_with_host("{h} runs without local PostgreSQL.", COMPUTE_HOSTS),
+    *_with_host("{h} runs without a local Postgres.", COMPUTE_HOSTS),
+    *_with_host("{h} runs without a local PG.", COMPUTE_HOSTS),
+    *(
+        row
+        for verb in (
+            "connect to", "connects to", "use", "uses", "read", "reads", "query", "queries",
+            "had", "has", "have", "run", "runs", "host", "hosts",
+        )
+        for row in _with_host(f"{{h}} never {verb} a local PostgreSQL.", COMPUTE_HOSTS)
+    ),
+    *_with_host("{h} 从不需要本地 PostgreSQL。", COMPUTE_HOSTS),
+    *_with_host("{h} 没有本机 PostgreSQL。", COMPUTE_HOSTS),
+    *_with_host("{h} 无本地 PostgreSQL。", COMPUTE_HOSTS),
+    *_with_host("{h} 无本机 PostgreSQL。", COMPUTE_HOSTS),
+    *_with_host("{h} 本地 PostgreSQL 不存在。", COMPUTE_HOSTS),
+]
+
+
 @pytest.mark.parametrize(
     "statement",
     [
@@ -869,6 +918,8 @@ def _with_host(template: str, names: tuple[str, ...]) -> list[str]:
         *_with_host("{h} own the active primary database.", COMPUTE_HOST_PAIRS),
         *_with_host("slurmdbd on {h} is the active primary PostgreSQL writer.", COMPUTE_HOSTS),
         *_with_host("{h} runs slurmdbd and is the active database writer.", COMPUTE_HOSTS),
+        *_with_host("{h} 跑 slurmdbd 并写入生产数据库。", COMPUTE_HOSTS),
+        *SLURM_ACCOUNTING_NON_EXEMPT_ROWS,
     ],
 )
 def test_entropy_audit_topology_guardrails_flag_compute_host_db_writer_claims(
@@ -910,6 +961,12 @@ def test_entropy_audit_topology_guardrails_keep_codename_and_host_claims_apart(
         ),
         *_with_host("使用 {h} 本地 PostgreSQL 做检查。", COMPUTE_HOSTS),
         *_with_host("Connect to {h} local PostgreSQL for current checks; do not use node-27.", COMPUTE_HOSTS),
+        *_with_host("{h} local PostgreSQL is out of current NHMS production topology.", COMPUTE_HOSTS),
+        *_with_host("There is no active {h} local PostgreSQL writer.", COMPUTE_HOSTS),
+        *_with_host(
+            "Use node-22 local PostgreSQL on :55433 for current checks; connect to {h} local PostgreSQL.",
+            COMPUTE_HOSTS,
+        ),
         *_with_host("{h} local PostgreSQL never goes down.", COMPUTE_HOSTS),
         *_with_host("{h} 本地 PostgreSQL 没有密码。", COMPUTE_HOSTS),
         *_with_host(
@@ -963,13 +1020,15 @@ def _host_versions_of_allowed_negative_sentences() -> list[str]:
         *_with_host("The {h}c validator is the active database writer of that report.", COMPUTE_HOSTS),
         "show30s is the active database writer flag.",
         *_with_host("slurmdbd on {h} writes Slurm accounting to its local database.", COMPUTE_HOSTS),
-        *_with_host("{h} hosts slurmdbd with a local MariaDB database for Slurm accounting.", COMPUTE_HOSTS),
+        *_with_host("{h} writes Slurm job records to its local MariaDB database.", COMPUTE_HOSTS),
         *_with_host("{h} run no local PostgreSQL.", COMPUTE_HOST_PAIRS),
         *_with_host("Do not connect to a {h} local PostgreSQL; there is none.", COMPUTE_HOSTS),
         *_with_host("{h} 没有本地 PostgreSQL。", COMPUTE_HOSTS),
         *_with_host("{h} never connect to node-27 local PostgreSQL.", COMPUTE_HOST_PAIRS),
         *_with_host("The {h}-scheduler-journal mirror is not the active database writer.", COMPUTE_HOSTS),
         "docs/runbooks/w2-w3-compute-topology.md describes the active DB writer boundary.",
+        "The change record-compute-role-on-w3-w2 kept the active DB writer on node-27.",
+        *COMPUTE_HOST_LOCAL_POSTGRES_DENIAL_ROWS,
     ],
 )
 def test_entropy_audit_topology_guardrails_allow_compute_host_negatives_and_lookalikes(
@@ -1010,7 +1069,6 @@ def test_topology_rewrite_compute_hosts_rewrites_host_tokens(host: str, template
         "w3/w2 run Slurm",
         "w3 / w2 run Slurm",
         "w2/w3 run Slurm",
-        "w3, w2 run Slurm",
         "w3、w2 run Slurm",
         "w3 and w2 run Slurm",
         "w3 or w2 run Slurm",
@@ -1019,6 +1077,10 @@ def test_topology_rewrite_compute_hosts_rewrites_host_tokens(host: str, template
 )
 def test_topology_rewrite_compute_hosts_rewrites_a_host_pair_to_one_codename(line: str) -> None:
     assert _rewrite_compute_hosts(line) == " node-22  run Slurm"
+
+
+def test_topology_rewrite_compute_hosts_keeps_comma_separated_hosts_apart() -> None:
+    assert _rewrite_compute_hosts("w3, w2 run Slurm") == " node-22 ,  node-22  run Slurm"
 
 
 @pytest.mark.parametrize("host", COMPUTE_HOSTS)
@@ -1033,6 +1095,10 @@ def test_topology_rewrite_compute_hosts_rewrites_a_host_pair_to_one_codename(lin
         "the {h}_dir path",
         "{h}-scheduler-journal",
         "nhms-{h}-journal-backup",
+        "the on-{h} path",
+        "alias-nwm-{h} reaches it",
+        "mynwm-{h} reaches it",
+        "x.nwm-{h} reaches it",
     ],
 )
 def test_topology_rewrite_compute_hosts_leaves_lookalikes_unchanged(host: str, template: str) -> None:
@@ -1042,7 +1108,12 @@ def test_topology_rewrite_compute_hosts_leaves_lookalikes_unchanged(host: str, t
 
 @pytest.mark.parametrize(
     "line",
-    ["show30s flag", "no compute host is named here", "see docs/runbooks/w2-w3-compute-topology.md"],
+    [
+        "show30s flag",
+        "no compute host is named here",
+        "see docs/runbooks/w2-w3-compute-topology.md",
+        "the change record-compute-role-on-w3-w2 is archived",
+    ],
 )
 def test_topology_rewrite_compute_hosts_leaves_lines_without_a_host_unchanged(line: str) -> None:
     assert _rewrite_compute_hosts(line) == line

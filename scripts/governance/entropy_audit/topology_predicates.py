@@ -16,13 +16,16 @@ from __future__ import annotations
 import re
 
 # A host name: lower case, on the raw text, not next to an ASCII letter, digit or
-# underscore, not after a dot, not before a dot or hyphen plus a letter or digit
-# (the first part of a dotted or hyphenated longer name). A run of host names
-# joined only by separators and spaces is one name.
-_TOPOLOGY_COMPUTE_HOST = r"(?<![A-Za-z0-9_.])w[23](?![A-Za-z0-9_])(?![.-][A-Za-z0-9])"
+# underscore, not after a dot or hyphen, not before a dot or hyphen plus a letter or
+# digit (part of a dotted or hyphenated longer name). The one hyphenated host name
+# is the ssh alias nwm-<host>. A run of host names joined only by the listed
+# separators and spaces is one name; a comma separates clauses, so it joins none.
+_TOPOLOGY_COMPUTE_HOST = (
+    r"(?:(?<![A-Za-z0-9_.-])|(?<=(?<![A-Za-z0-9_.-])nwm-))w[23](?![A-Za-z0-9_])(?![.-][A-Za-z0-9])"
+)
 _TOPOLOGY_COMPUTE_HOST_RUN = re.compile(
     rf"{_TOPOLOGY_COMPUTE_HOST}"
-    rf"(?:(?:[\s/,、和]|(?<![A-Za-z])(?:and|or)(?![A-Za-z]))+{_TOPOLOGY_COMPUTE_HOST})*"
+    rf"(?:(?:[\s/、和]|(?<![A-Za-z])(?:and|or)(?![A-Za-z]))+{_TOPOLOGY_COMPUTE_HOST})*"
 )
 _TOPOLOGY_COMPUTE_HOST_MARKER = "compute_host_token"
 _TOPOLOGY_LOCAL_POSTGRES_TOKENS = (
@@ -33,6 +36,21 @@ _TOPOLOGY_LOCAL_POSTGRES_TOKENS = (
     "本机 pg",
     "本地 postgresql",
     "本机 postgresql",
+)
+# The compute-host leg accepts only these prohibitions and the absence forms below,
+# not the wider negative-boundary list of the database-writer family: "not current"
+# or "no active" neither denies the database nor forbids its use.
+_TOPOLOGY_LOCAL_POSTGRES_PROHIBITIONS = (
+    "do not connect",
+    "do not use",
+    "does not connect",
+    "does not use",
+    "must not read",
+    "不连",
+    "不要连",
+    "不应连接",
+    "不使用",
+    "禁止",
 )
 _TOPOLOGY_LOCAL_POSTGRES_ABSENCE = re.compile(
     r"\bno\s+local\s+(?:postgres|postgresql|pg)\b"
@@ -66,10 +84,9 @@ def _topology_line_has_compute_host_local_postgres_drift(line: str) -> bool:
             continue
         if not any(token in clause for token in _TOPOLOGY_LOCAL_POSTGRES_TOKENS):
             continue
-        named = _topology_normalized(clause.replace(_TOPOLOGY_COMPUTE_HOST_MARKER, "node-22"))
-        if _topology_context_has_negative_node22_writer_boundary(named):
+        if any(token in clause for token in _TOPOLOGY_LOCAL_POSTGRES_PROHIBITIONS):
             continue
-        if _TOPOLOGY_LOCAL_POSTGRES_ABSENCE.search(named):
+        if _TOPOLOGY_LOCAL_POSTGRES_ABSENCE.search(clause):
             continue
         return True
     return False
@@ -149,6 +166,9 @@ def _topology_clause_is_slurm_accounting(clause: str) -> bool:
             "current",
             "当前",
             "production",
+            "生产",
+            "活动",
+            "活跃",
         )
     )
 

@@ -6,14 +6,16 @@ The project SHALL provide automated or scripted checks that flag active
 compute-role database-writer and display-env-writer drift in current operational
 surfaces.
 
-The database-writer check and the compute-host leg of the local-PostgreSQL check
-SHALL recognise the compute role by each of its names: the codename and the two
-host names (`w3`, `w2`).
+The database-writer check SHALL recognise the compute role by each of its names:
+the codename and the two host names (`w3`, `w2`).
+The local-PostgreSQL check SHALL have a compute-host leg that recognises the two
+host names. Its other legs describe the retired host and its rollback mirror and
+SHALL keep recognising the codename only.
 A host name SHALL be matched on the original text as a lower-case whole token
 that is not adjacent to an ASCII letter, digit or underscore, is not part of a
-dotted name and does not start a hyphenated longer name. An upper-case spelling,
-a domain name, a longer word that contains the letters and an identifier that
-starts with them are not host names.
+dotted name and is not part of a hyphenated longer name. An upper-case spelling,
+a domain name, a longer word that contains the letters and a hyphenated
+identifier that contains them are not host names.
 
 #### Scenario: Active node-22 DB writer assumptions are flagged
 
@@ -37,7 +39,8 @@ starts with them are not host names.
 - **WHEN** a clause of an active surface names a compute host, by host name,
   together with a local PostgreSQL
 - **THEN** the guard reports a finding unless that same clause denies that such
-  a database exists or forbids its use
+  a database exists or forbids its use; wording that only calls it non-current
+  or inactive is not a denial
 - **AND** the archived, stopped or rollback wording that excuses a reference to
   the retired host's own PostgreSQL does not excuse it
 
@@ -52,7 +55,8 @@ starts with them are not host names.
 - **WHEN** a clause says that slurmdbd or Slurm accounting on a compute host
   writes to its own accounting store, and names no PostgreSQL, primary, NHMS or
   current, active or production state
-- **THEN** the guard reports no database-writer finding for it
+- **THEN** the guard reports no database-writer finding for it, whichever name
+  of the role the clause uses
 - **AND** a clause that names slurmdbd and also claims the PostgreSQL or NHMS
   primary for the host is still reported
 

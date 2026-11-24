@@ -6,11 +6,11 @@ Notation. This file is inside the guard's scan set, so example sentences use `<h
 
 ## Design decisions (orchestrator)
 
-- D1. One source for the host names: one function that rewrites host-name tokens in a raw line to the codename (`node-22`), before any lower-casing. A run of host names joined only by `/`, `,`, `、`, `and`, `or`, `和` and spaces is rewritten to one codename, so `<pair>` behaves like a single name. The codename is emitted with a space on each side: the existing codename regex uses `\b`, which does not see a boundary between a CJK character and a letter, and the existing normalisation collapses the extra spaces. The database-writer family runs on the rewritten lines: the claim start, the standalone anchor, the drift clauses, the claim context window and every allowance rule. No host literal inside the existing predicates and phrase tables is edited.
-- D2. Token rule, on the raw text, case-sensitive: a host name in lower case, not preceded or followed by an ASCII letter, digit or underscore, not preceded by a dot, and not followed by a dot or a hyphen plus an ASCII letter or digit. A host name at the end of a sentence, in parentheses, in backticks, after `nwm-`, or next to a CJK character is a host name. The upper-case spelling, `www.<h>.org`, `<h>.internal`, `host.<h>`, `<h>c`, `<h>_dir` and `show30s` are not, and neither is the first part of a hyphenated longer name (`<h>-scheduler-journal`, the runbook file name that starts with both host names): such names are identifiers, and rewriting them would also cut the line into clauses at the hyphens.
+- D1. One source for the host names: one function that rewrites host-name tokens in a raw line to the codename (`node-22`), before any lower-casing. A run of host names joined only by `/`, `、`, `and`, `or`, `和` and spaces (not a comma: a comma separates clauses) is rewritten to one codename, so `<pair>` behaves like a single name. The codename is emitted with a space on each side: the existing codename regex uses `\b`, which does not see a boundary between a CJK character and a letter, and the existing normalisation collapses the extra spaces. The database-writer family runs on the rewritten lines: the claim start, the standalone anchor, the drift clauses, the claim context window and every allowance rule. No host literal inside the existing predicates and phrase tables is edited.
+- D2. Token rule, on the raw text, case-sensitive: a host name in lower case, not preceded or followed by an ASCII letter, digit or underscore, not preceded by a dot or a hyphen, and not followed by a dot or a hyphen plus an ASCII letter or digit. One hyphenated form is a host name: the ssh alias `nwm-<h>`. A host name at the end of a sentence, in parentheses, in backticks, or next to a CJK character is a host name. The upper-case spelling, `www.<h>.org`, `<h>.internal`, `host.<h>`, `<h>c`, `<h>_dir` and `show30s` are not, and neither is any part of a hyphenated longer name (`<h>-scheduler-journal`, `nhms-<h>-journal-backup`, the runbook file name that starts with both host names, a change id that ends with them): such names are identifiers, and rewriting them would also cut the line into clauses at the hyphens.
 - D3. A finding keeps the path and line number of the original line. The claim de-duplication key is built from the original lines, so a codename line and a host-name line with otherwise equal text stay two findings.
-- D4. Compute-host local PostgreSQL: a new leg of `production-topology-node22-local-postgres`, evaluated for every line independently of the retired-host leg (the retired-host leg's early `continue` must not skip it), with at most one finding per check id per line. The existing relation-clause split lower-cases its input, so host tokens are marked on the raw line first (the D1 function with a distinct lower-case marker in place of the codename), and the marked line is split. A clause that has the marker and one of the existing local-PostgreSQL tokens is a finding, unless that clause (marker replaced by the codename) carries the existing negative writer boundary, or one of the absence forms `no local postgres|postgresql|pg`, `without (a) local postgres|postgresql|pg`, `never` followed by one of `connect|connects|use|uses|read|reads|query|queries|had|has|have|run|runs|host|hosts`, `从不`, `没有本地`, `没有本机`, `无本地`, `无本机`, `不存在`. Negation in another clause of the line does not count. The context-window allowances of the retired-host leg (historical / archived / stopped / rollback / structured boundary) are not consulted.
-- D5. Slurm accounting: a database-writer drift clause that contains `slurmdbd`, `slurm accounting`, `mariadb` or `mysql`, and none of `postgres`, `postgresql`, `pg` (as a word), `primary`, `主库`, `nhms`, `55432`, `55433`, `active`, `current`, `当前`, `production`, is not a drift clause. The test sits where drift clauses are selected, so detection and allowance agree. It applies to every name of the role; this is the one deliberate change for text that names only the codename (such a clause was a finding and is not one now).
+- D4. Compute-host local PostgreSQL: a new leg of `production-topology-node22-local-postgres`, evaluated for every line independently of the retired-host leg (the retired-host leg's early `continue` must not skip it), with at most one finding per check id per line. The existing relation-clause split lower-cases its input, so host tokens are marked on the raw line first (the D1 function with a distinct lower-case marker in place of the codename), and the marked line is split. A clause that has the marker and one of the existing local-PostgreSQL tokens is a finding, unless that clause carries a prohibition (`do not connect`, `do not use`, `does not connect`, `does not use`, `must not read`, `不连`, `不要连`, `不应连接`, `不使用`, `禁止`) or one of the absence forms `no local postgres|postgresql|pg`, `without (a) local postgres|postgresql|pg`, `never` followed by one of `connect|connects|use|uses|read|reads|query|queries|had|has|have|run|runs|host|hosts`, `从不`, `没有本地`, `没有本机`, `无本地`, `无本机`, `不存在`. Negation in another clause of the line does not count. The wider negative-boundary list of the database-writer family is not used here: wording such as "not current" or "no active" neither denies the database nor forbids its use. The context-window allowances of the retired-host leg (historical / archived / stopped / rollback / structured boundary) are not consulted.
+- D5. Slurm accounting: a database-writer drift clause that contains `slurmdbd`, `slurm accounting`, `mariadb` or `mysql`, and none of `postgres`, `postgresql`, `pg` (as a word), `primary`, `主库`, `nhms`, `55432`, `55433`, `active`, `current`, `当前`, `production`, `生产`, `活动`, `活跃`, is not a drift clause. The test sits where drift clauses are selected, so detection and allowance agree. It applies to every name of the role; this is the one deliberate change for text that names only the codename (such a clause was a finding and is not one now).
 - D6. Not extended: the mirror legs, the port leg and the `DATABASE_URL` scan leg keep reading the original lines.
 - D7. Finding title, description and recommendation of the two checks name the role as "compute role (node-22 / w3 / w2)". Check ids, function names and module names keep `node22`.
 
@@ -34,12 +34,16 @@ In `tests/test_entropy_audit_topology_db_boundary.py`, using its helpers that wr
   - `<pair> own the active primary database.`
   - `slurmdbd on <h> is the active primary PostgreSQL writer.` (D5 does not launder)
   - `<h> runs slurmdbd and is the active database writer.` (D5 does not launder)
+  - `<h> 跑 slurmdbd 并写入生产数据库。` (D5 does not launder)
+  - One row per non-exempt word of D5, from a template of the shape `slurmdbd on <h> writes the <word> database.`; a word that the template cannot carry naturally gets its own sentence.
   - Two lines in one file, equal except that one uses the codename and the other `<h>`: two findings, on their own line numbers (D3).
 - [x] 2.2 Flagged as `production-topology-node22-local-postgres`:
   - `Operators should connect to <h> local PostgreSQL for active DB checks.`
   - `<h> local PostgreSQL is historical, do-not-connect for current NHMS production state, archived, and stopped rollback-only.` (the retired-host boundary wording does not apply)
   - `使用 <h> 本地 PostgreSQL 做检查。`
   - `Connect to <h> local PostgreSQL for current checks; do not use node-27.` (negation in another clause)
+  - `<h> local PostgreSQL is out of current NHMS production topology.` and `There is no active <h> local PostgreSQL writer.` (non-current wording is not a denial)
+  - One line on which both legs fire (the codename's local PostgreSQL with its port, stated as in use, and after a semicolon `connect to <h> local PostgreSQL`): exactly one finding of this check id.
   - `<h> local PostgreSQL never goes down.` and `<h> 本地 PostgreSQL 没有密码。` (a bare negative word is not an absence form)
   - One line that carries the complete retired-host boundary wording for the codename's own PostgreSQL and, after a semicolon, `connect to <h> local PostgreSQL`: exactly one finding of this check id.
 - [x] 2.3 Not flagged:
@@ -52,11 +56,13 @@ In `tests/test_entropy_audit_topology_db_boundary.py`, using its helpers that wr
   - `show30s is the active database writer flag.` (once)
   - `The <h>-scheduler-journal mirror is not the active database writer.` and a sentence that names the runbook file `w2-w3-compute-topology.md` next to `describes the active DB writer` (hyphenated longer names)
   - `slurmdbd on <h> writes Slurm accounting to its local database.`
-  - `<h> hosts slurmdbd with a local MariaDB database for Slurm accounting.`
+  - `<h> writes Slurm job records to its local MariaDB database.` (exempt through the MariaDB word alone)
   - `<pair> run no local PostgreSQL.`
   - `Do not connect to a <h> local PostgreSQL; there is none.`
   - `<h> 没有本地 PostgreSQL。`
+  - One row per absence form and per prohibition of D4 that the rows above do not use.
   - `<pair> never connect to node-27 local PostgreSQL.`
+  - A sentence that names the change id `record-compute-role-on-w3-w2` next to `the active DB writer` (the end of a hyphenated name is not a host).
 - [x] 2.4 Unit rows for the host-name function: every example of D2 in both directions, `<pair>` in its three spellings (one codename out), a line with none (returned equal), start and end of line, backticks, `<h>:`.
 - [x] 2.5 The existing tests of the five files in the issue's Verification stay green with no assertion edited. If one must change, stop and report.
 
@@ -70,9 +76,11 @@ In `tests/test_entropy_audit_topology_db_boundary.py`, using its helpers that wr
   - M3: recognise the host names inside `_topology_mentions_node22` instead of rewriting -> host-name versions of the allowed sentences red.
   - M4: remove the Slurm-accounting exclusion -> the slurmdbd no-flag row red; make it ignore the PostgreSQL/primary/active tokens -> the two slurmdbd flag rows of 2.1 red.
   - M5: let the compute-host local-PostgreSQL leg consult the retired-host allowance, fed with the rewritten line -> the boundary-wording row of 2.2 red.
+  - M5b: let the compute-host leg accept the whole negative-boundary list of the writer family -> the non-current rows of 2.2 red.
   - M6: look for negation in the whole line instead of the clause -> the `do not use node-27` row of 2.2 red.
   - M7: put the new leg after the retired-host leg's `continue` -> the one-finding row of 2.2 red.
-  - M8: rewrite each host of a pair separately -> the `<pair> access` row of 2.3 red.
+  - M8: rewrite each host of a pair separately -> the `<pair> access` row of 2.3 red. M8b: let a comma join a pair -> the unit row `<h>, <h>` (two codenames out, comma kept) red.
+  - M10: allow a hyphen before a host token -> the change-id row of 2.3 red; drop the `nwm-` alias form -> the `nwm-<h>` row of 2.1 red.
 - [x] 3.4 Local: the five test files of the issue's Verification, `uv run --no-sync ruff check --no-cache .`, `openspec validate topology-guard-compute-role-hosts --strict --no-interactive`.
 - [ ] 3.5 node-27: the same five test files, zero unexpected skips.
 
@@ -85,7 +93,11 @@ In `tests/test_entropy_audit_topology_db_boundary.py`, using its helpers that wr
 
 ## Known limits (stated in the PR)
 
-- A host named only by address, or in upper case, or as the first part of a hyphenated word (`<h>-only`), is not recognised.
+- A host named only by address, in upper case (also at the start of a sentence), or inside a hyphenated word (`<h>-only`), is not recognised.
+- The local-PostgreSQL tokens are exact phrases: a wording such as "PostgreSQL on `<h>`" without the word local, or the Chinese form without a space, is not seen by the new leg.
+- The new leg has no allowance for text that describes the guard itself: a document that explains the rule writes the host name and the database words in different clauses, as this change does.
+- Pair joiners are the ones listed in D1; `与` and `+` are not.
+- A heading or table cell that is just a host name opens a claim window over the next two lines, as a codename heading does today.
 - The mirror, port and `DATABASE_URL` legs do not know the host names.
 - Clause splitting is unchanged: a sentence that names node-27 as the DB writer and, after `and`, says what a compute host runs is a finding, as its codename form is today. Write such sentences with a semicolon.
 - The D4 absence forms are a short list. A true negative statement in other words is reported; reword it with one of the forms.
