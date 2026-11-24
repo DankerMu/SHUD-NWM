@@ -99,6 +99,7 @@ from services.orchestrator.scheduler import (
 from services.orchestrator.scheduler import (
     ProductionScheduler as _RealProductionScheduler,
 )
+from services.orchestrator.scheduler_facade_seam import facade_seam
 from services.orchestrator.scheduler_init_state_match import EVIDENCE_REDACTION_PLACEHOLDERS
 from services.orchestrator.scheduler_preflight import _production_slurm_env
 from services.orchestrator.scheduler_state_types import CandidateStateDecision
@@ -1301,7 +1302,7 @@ def test_scheduler_lease_compat_lookup_names_resolve_scheduler_monkeypatches(
 
         with monkeypatch.context() as patch_context:
             patch_context.setattr(scheduler_module, name, patched)
-            assert scheduler_lease_module._scheduler_facade_function(name, fallback) is patched
+            assert facade_seam(name, fallback) is patched
 
 
 # #3311 deleted DATABASE_HOST_ALLOWED_RE and LOCALHOST_NAMES with the database
@@ -13514,7 +13515,7 @@ def test_file_kind_check_never_converts_a_present_verdict(
     # absent-or-unresolvable would ripple far beyond this test.
     #
     # The patch goes on ``scheduler_state_failure_module`` itself.  The probe reads
-    # ``_object_manifest_is_missing`` through ``_facade_seam``, which returns this
+    # ``_object_manifest_is_missing`` through ``facade_seam``, which returns this
     # module's binding while the facade is unpatched, so the owner patch is the
     # one the probe calls.
     object_store_root = tmp_path / "object-store"

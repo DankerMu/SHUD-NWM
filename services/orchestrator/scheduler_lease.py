@@ -4,7 +4,6 @@ import json
 import os
 import socket
 import stat
-import sys
 import threading
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
@@ -15,6 +14,7 @@ from typing import Any
 from uuid import uuid4
 
 from packages.common.safe_fs_lock import open_lock_file_no_follow
+from services.orchestrator.scheduler_facade_seam import facade_seam, facade_seam_original
 
 LOCK_OWNER = "production_scheduler"
 LOCK_SCHEMA_VERSION = 1
@@ -39,17 +39,7 @@ def _format_utc(value: datetime) -> str:
     return _ensure_utc(value).isoformat().replace("+00:00", "Z")
 
 
-def _scheduler_facade_function(
-    name: str,
-    fallback: Callable[..., Any],
-) -> Callable[..., Any]:
-    """Resolve monkeypatch-compatible helpers from scheduler.py when present."""
-
-    scheduler_module = sys.modules.get("services.orchestrator.scheduler")
-    value = getattr(scheduler_module, name, None) if scheduler_module is not None else None
-    return value if callable(value) else fallback
-
-
+@facade_seam_original
 def _default_owner_liveness_probe(payload: Mapping[str, Any]) -> bool | None:
     """Probe whether the lock owner process is alive.
 
@@ -74,7 +64,7 @@ def _default_owner_liveness_probe(payload: Mapping[str, Any]) -> bool | None:
 
 
 def _compat_owner_liveness_probe(payload: Mapping[str, Any]) -> bool | None:
-    probe = _scheduler_facade_function(
+    probe = facade_seam(
         "_default_owner_liveness_probe",
         _default_owner_liveness_probe,
     )
@@ -341,7 +331,7 @@ class FileSchedulerLease:
                             "lock_type": "file",
                             "existing_lock": reread,
                         }
-                unlink_lock_file = _scheduler_facade_function("_unlink_lock_file", _unlink_lock_file)
+                unlink_lock_file = facade_seam("_unlink_lock_file", _unlink_lock_file)
                 unlink_lock_file(self.lock_path.name, parent_fd=parent_fd)
                 return self._acquire_locked(
                     pass_id=pass_id,
@@ -379,7 +369,7 @@ class FileSchedulerLease:
             with self._guarded() as parent_fd:
                 existing = self._read_existing_lock(parent_fd=parent_fd)
                 if existing.get("pass_id") == pass_id and existing.get("lease_token") == self.lease_token:
-                    unlink_lock_file = _scheduler_facade_function("_unlink_lock_file", _unlink_lock_file)
+                    unlink_lock_file = facade_seam("_unlink_lock_file", _unlink_lock_file)
                     unlink_lock_file(self.lock_path.name, parent_fd=parent_fd)
         except UnsafeSchedulerLockError:
             pass
@@ -391,11 +381,11 @@ class FileSchedulerLease:
         import fcntl
 
         with self._operation_lock:
-            open_lock_parent_directory = _scheduler_facade_function(
+            open_lock_parent_directory = facade_seam(
                 "_open_lock_parent_directory",
                 _open_lock_parent_directory,
             )
-            open_regular_guard_file = _scheduler_facade_function(
+            open_regular_guard_file = facade_seam(
                 "_open_regular_guard_file",
                 _open_regular_guard_file,
             )
@@ -524,6 +514,7 @@ def _file_lock_guard_mode() -> str:
     raise UnsafeSchedulerLockError("unsafe_lock_guard_mode")
 
 
+@facade_seam_original
 def _open_lock_parent_directory(lock_parent: Path, workspace_root: Path | None) -> int:
     nofollow = getattr(os, "O_NOFOLLOW", 0)
     directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | nofollow
@@ -607,6 +598,7 @@ def _ensure_workspace_directory(workspace_root: Path) -> None:
         raise UnsafeSchedulerLockError("unsafe_lock_parent_directory")
 
 
+@facade_seam_original
 def _open_regular_guard_file(guard_name: str, *, dir_fd: int) -> int:
     try:
         fd = open_lock_file_no_follow(guard_name, dir_fd=dir_fd, mode=0o644)
@@ -624,6 +616,7 @@ def _open_regular_guard_file(guard_name: str, *, dir_fd: int) -> int:
     return fd
 
 
+@facade_seam_original
 def _unlink_lock_file(lock_name: str, *, parent_fd: int) -> None:
     try:
         os.unlink(lock_name, dir_fd=parent_fd)

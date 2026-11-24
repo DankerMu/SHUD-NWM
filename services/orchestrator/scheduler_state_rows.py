@@ -13,6 +13,7 @@ from services.orchestrator.production_contract import (
     PRODUCTION_IDENTITY_FIELDS,
 )
 from services.orchestrator.retry_identity import effective_retry_attempt, stage_attempt
+from services.orchestrator.scheduler_facade_seam import facade_seam_original
 from services.orchestrator.scheduler_state_common import (
     _coerce_int,
     _coerce_optional_nonnegative_int,
@@ -831,6 +832,7 @@ def _state_output_uri(state: Mapping[str, Any]) -> str | None:
     value = state.get("output_uri") or state.get("durable_output_uri")
     return str(value) if value not in (None, "") else None
 
+@facade_seam_original
 def _state_active_jobs(state: Mapping[str, Any]) -> list[dict[str, Any]]:
     explicit = state.get("active_slurm_jobs")
     if isinstance(explicit, Sequence) and not isinstance(explicit, str | bytes | bytearray):
