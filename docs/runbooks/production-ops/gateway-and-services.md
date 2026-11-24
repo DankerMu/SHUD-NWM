@@ -1,5 +1,9 @@
 **分册：流域投递、Slurm Gateway、API / 展示与监控**
 
+> **计算角色主机说明**：本页的 "node-22" 指计算角色，现由 w3 / w2 承载；字面的
+> `ssh … 210.77.77.22` 命令一律登录 w3 后执行，**不得**在原主机上执行。详见
+> [`current-production-ops.md`](../current-production-ops.md) 顶部横幅。
+
 本页是当前生产值守手册的 §3.1.4、§3.2、§3.3、§3.4 分册（#1103 拆分，正文逐字保留）。
 索引与全部分册入口见 [`../current-production-ops.md`](../current-production-ops.md)。
 

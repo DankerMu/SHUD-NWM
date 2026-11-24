@@ -1,0 +1,7 @@
+[Unit]
+Description=w3: hourly scheduler journal mirror to NFS
+[Timer]
+OnCalendar=*:40
+Persistent=true
+[Install]
+WantedBy=timers.target

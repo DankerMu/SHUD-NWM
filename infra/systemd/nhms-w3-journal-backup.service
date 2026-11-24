@@ -1,0 +1,10 @@
+[Unit]
+Description=w3: mirror the scheduler journal to NFS operator-archives (disaster-recovery copy)
+[Service]
+Type=oneshot
+Nice=10
+IOSchedulingClass=idle
+# skip when the local journal is not there (e.g. /scratch not mounted) so --delete cannot empty the copy
+ExecCondition=/usr/bin/test -d /scratch/frd_muziyao/nhms-prod/workspace/scheduler/journal/pipeline-jobs
+ExecStart=/usr/bin/rsync -a --delete --max-delete=5000 /scratch/frd_muziyao/nhms-prod/workspace/scheduler/journal/ /ghdc/data/nwm/operator-archives/w3-scheduler-journal/journal/
+ExecStartPost=/bin/sh -c 'date -u +%%FT%%TZ > /ghdc/data/nwm/operator-archives/w3-scheduler-journal/LAST_OK'

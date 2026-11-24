@@ -266,6 +266,23 @@ historical node-22 writer topology.
 - **AND** any retained historical node-22 writer material SHALL be explicitly
   labeled historical or do-not-connect, not an action path.
 
+#### Scenario: the runbook says which hosts carry the compute role
+
+- **WHEN** the runbook is inspected after the compute role moved to `w3` and
+  `w2`
+- **THEN** a banner at its top SHALL state that "node-22" in the runbook and
+  its `production-ops/` pages denotes the compute role, hosted on `w3`
+  (control) and `w2` since 2026-11-23
+- **AND** the banner SHALL state that the host `210.77.77.22` is retired from
+  NHMS compute and is a rollback archive only
+- **AND** the banner SHALL state that a literal ssh command to `210.77.77.22`
+  in the runbook or its pages is run on `w3` instead and not on the retired
+  host
+- **AND** the banner SHALL link `docs/runbooks/w2-w3-compute-topology.md`
+- **AND** every `production-ops/` page that contains a literal ssh command to
+  `210.77.77.22` SHALL carry a one-line pointer at its top to that banner,
+  because alerts link those pages directly
+
 #### Scenario: current runbook frames cross-reference docs safely
 
 - **WHEN** the runbook links adjacent deployment and role-boundary documents

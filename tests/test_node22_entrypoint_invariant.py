@@ -1,4 +1,4 @@
-"""Static contract: active node-22 entrypoints preserve the deferred .venv.
+"""Static contract: active node-22 entrypoints preserve the shared compute-role .venv.
 
 #1103 partition: the governed-surface guards (systemd units, the production-ops
 runbook tree, failed-basin retry, the ci-test-routing node-27 lane, the QHH
@@ -113,11 +113,11 @@ def test_slurm_gateway_unit_uses_exact_interpreter() -> None:
     unit = _read("infra/systemd/nhms-slurm-gateway.service")
     execstart = [line.strip() for line in unit.splitlines() if line.strip().startswith("ExecStart=")]
     assert execstart, "gateway unit must declare ExecStart"
-    # node-22 compute key entry: exact deferred-venv interpreter, never a
+    # node-22 compute key entry: exact shared-venv interpreter, never a
     # template path or bare uv.
     assert (
         execstart[0] == "ExecStart=/opt/SHUD-NWM/.venv/bin/python -m services.slurm_gateway"
-    ), f"gateway ExecStart must be the exact deferred-venv interpreter: {execstart[0]}"
+    ), f"gateway ExecStart must be the exact shared-venv interpreter: {execstart[0]}"
     for line in execstart:
         assert "uv run" not in line
         assert "uv sync" not in line
@@ -249,7 +249,7 @@ def _node27_bash_fence(text: str) -> list[str]:
 def test_ci_test_routing_uses_node27_oracle() -> None:
     text = _read("docs/runbooks/ci-test-routing.md")
     # node-27 oracle runs `uv run --no-sync` (active venv is already 3.11);
-    # the deferred node-22 checkout must not be the execution site. The 3.11
+    # the shared node-22 (compute-role) checkout must not be the execution site. The 3.11
     # guard must be executable, not a comment-only `python -V`.
     assert "node-27" in text
     assert "uv run --no-sync" in text
@@ -509,27 +509,47 @@ def test_generated_roots_byte_exact() -> None:
     assert _read("AGENTS.md") == _composition(hdr_a, tail="\n")
 
 
+def _single_contract_line(text: str, relative: str, anchor: str, label: str) -> str:
+    hits = [ln for ln in text.splitlines() if anchor in ln]
+    assert len(hits) == 1, f"{relative}: expected one {label} line (anchor {anchor!r}), found {len(hits)}"
+    return hits[0]
+
+
 def test_instruction_roots_contain_command_contract() -> None:
+    # #3345: the compute role moved to w3 / w2 on 2026-11-23. Their shared
+    # `.venv` (the repository's 3.11 pin) is reached over NFS by Slurm jobs on
+    # both hosts and by the scheduler timers, so routine syncing stays
+    # forbidden; the one sync window is a deploy that changes `uv.lock`. The
+    # 3.12.7 environment of #1831 survives only on the retired node-22 host.
     for relative in ("instructions/agents/shared.md", "CLAUDE.md", "AGENTS.md"):
         text = _read(relative)
-        node22 = [ln for ln in text.splitlines() if "node-22" in ln and "3.12.7" in ln]
-        assert node22, f"{relative}: node-22 contract line missing"
-        line = node22[0]
+        compute = _single_contract_line(text, relative, "**计算节点（w3 / w2）例外**", "compute-role")
+        for term in ("w3", "w2", "uv sync", "uv run --no-sync", "--active", "系统 Python", "禁止"):
+            assert term in compute, f"{relative}: compute-role line missing '{term}'"
+        # The compute role is not on 3.12.7; the #1831 "stays for good" rule
+        # must not be re-attached to it.
+        for stale in ("长期保持", "3.12.7"):
+            assert stale not in compute, f"{relative}: compute-role line carries retired-host wording '{stale}'"
+
+        deploy = _single_contract_line(text, relative, "`uv.lock`", "uv.lock deploy-window")
         for term in (
             "uv sync",
-            "uv run --no-sync",
-            "--active",
-            "系统 Python",
-            "3.12.7",
-            "长期保持",
-            "#1831",
+            "`nhms-compute-scheduler.timer` 已停",
+            "没有在跑的 pass",
+            "Slurm 队列里没有 NWM 作业",
         ):
-            assert term in line, f"{relative}: missing '{term}'"
-        # #1831 decision (2026-10-05): node-22 stays on 3.12.7 for good. The
-        # line must not describe a pending maintenance-window switch any more.
-        for stale in ("维护窗口", "切换仅在", "窗口前", "断言 `uv run python -V` 为 3.11.x"):
-            assert stale not in line, f"{relative}: stale pending-switch wording '{stale}'"
-        assert "openspec/changes/" not in line, f"{relative}: active-change link"
+            assert term in deploy, f"{relative}: deploy-window line missing '{term}'"
+
+        retired = _single_contract_line(text, relative, "3.12.7", "retired-host")
+        for term in ("node-22", "3.12.7", "#1831", "不要", "`uv`"):
+            assert term in retired, f"{relative}: retired-host line missing '{term}'"
+
+        for line in (compute, deploy, retired):
+            # A pending maintenance-window switch must not come back either.
+            for stale in ("维护窗口", "切换仅在", "窗口前", "断言 `uv run python -V` 为 3.11.x"):
+                assert stale not in line, f"{relative}: stale pending-switch wording '{stale}'"
+            assert "openspec/changes/" not in line, f"{relative}: active-change link"
+        assert "node-22 例外" not in text, f"{relative}: the retired node-22 3.12.7 exception block is back"
 
 
 # --- 7. sibling-surface scan: any newly introduced bare uv on governed files -
