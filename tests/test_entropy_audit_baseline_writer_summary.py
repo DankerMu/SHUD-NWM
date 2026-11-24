@@ -223,6 +223,7 @@ def test_entropy_baseline_cleanup_priorities_flip_impact_and_order_at_ten_broad_
     ]
 
 
+@pytest.mark.usefixtures("isolated_git_environ")
 def test_entropy_baseline_writer_v1_summary_sibling_counts_are_current_derived(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -285,6 +286,7 @@ def test_entropy_baseline_writer_v1_summary_sibling_counts_are_current_derived(
     assert baseline["summary"]["total_instruction_files"] == 1
 
 
+@pytest.mark.usefixtures("isolated_git_environ")
 def test_entropy_baseline_writer_v1_summary_sibling_counts_match_first_write_and_replacement(
     tmp_path: Path,
 ) -> None:
@@ -336,6 +338,7 @@ def test_entropy_baseline_writer_v1_summary_sibling_counts_match_first_write_and
     assert not (tmp_path / ".entropy-baseline" / ".latest.json.tmp").exists()
 
 
+@pytest.mark.usefixtures("isolated_git_environ")
 def test_entropy_baseline_writer_v1_summary_source_count_excludes_context_families(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -482,6 +485,7 @@ def test_services_orchestrator_file_count_matches_tracked_module_surface() -> No
     assert orchestrator["file_count"] == _expected_module_file_count("services/orchestrator")
 
 
+@pytest.mark.usefixtures("isolated_git_environ")
 @pytest.mark.parametrize(
     ("remote_url", "expected_repo", "blocked_fragments"),
     (

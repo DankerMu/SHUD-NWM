@@ -21,6 +21,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.git_fixture_env import run_fixture_git
 from tests.test_two_node_docker_runtime import (
     REPO_ROOT,
     _prepare_start_display_api_harness,
@@ -256,7 +257,7 @@ def test_the_repo_root_escape_covers_every_ere_metacharacter(tmp_path: Path, pat
 
 def _git_init(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "init", "-q", str(path)], check=True, capture_output=True)
+    run_fixture_git(path, "init", "-q", capture_output=True)
 
 
 def _foreign_checkout(tmp_path: Path) -> Path:

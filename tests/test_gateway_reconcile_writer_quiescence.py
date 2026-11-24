@@ -23,6 +23,10 @@ from tests.gateway_reconcile_writer_helpers import (
     _round20_write_execution_binding,
 )
 
+# #3349: git runs here (in-process or in children inheriting os.environ) only
+# against tmp fixture repositories, never REPO_ROOT, so the whole module opts in.
+pytestmark = pytest.mark.usefixtures("isolated_git_environ")
+
 
 def test_round21_launcher_rejects_missing_prepared_binding_without_start(
     tmp_path: Any,

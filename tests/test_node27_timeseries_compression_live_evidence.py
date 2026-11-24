@@ -33,6 +33,11 @@ from scripts import node27_timeseries_compression_live_evidence as evidence
 from scripts import node27_timeseries_compression_plan_author as plan_author
 from scripts import node27_timeseries_compression_supervisor as supervisor
 from services.tiles.mvt import postgis_tile_sql
+from tests.git_fixture_env import run_fixture_git
+
+# #3349: git runs here (in-process or in children inheriting os.environ) only
+# against tmp fixture repositories, never REPO_ROOT, so the whole module opts in.
+pytestmark = pytest.mark.usefixtures("isolated_git_environ")
 
 
 def test_curve_store_token_contract() -> None:
@@ -83,24 +88,13 @@ EVIDENCE_SCHEMA = json.loads(
 
 def _git(root: Path, *args: str) -> str:
     """Run git against a repository this suite owns, isolated from ambient git state."""
-    env = {
-        key: value
-        for key, value in os.environ.items()
-        if not key.startswith("GIT_")
+    identity = {
+        "GIT_AUTHOR_NAME": "issue-1069 provenance fixture",
+        "GIT_AUTHOR_EMAIL": "provenance@example.invalid",
+        "GIT_COMMITTER_NAME": "issue-1069 provenance fixture",
+        "GIT_COMMITTER_EMAIL": "provenance@example.invalid",
     }
-    env.update(
-        {
-            "GIT_CONFIG_GLOBAL": os.devnull,
-            "GIT_CONFIG_SYSTEM": os.devnull,
-            "GIT_AUTHOR_NAME": "issue-1069 provenance fixture",
-            "GIT_AUTHOR_EMAIL": "provenance@example.invalid",
-            "GIT_COMMITTER_NAME": "issue-1069 provenance fixture",
-            "GIT_COMMITTER_EMAIL": "provenance@example.invalid",
-        }
-    )
-    return subprocess.run(
-        ["git", *args], cwd=root, env=env, capture_output=True, text=True, check=True
-    ).stdout.strip()
+    return run_fixture_git(root, *args, env_overlay=identity, capture_output=True, text=True).stdout.strip()
 
 
 def _build_provenance_repo() -> tuple[Path, str]:
