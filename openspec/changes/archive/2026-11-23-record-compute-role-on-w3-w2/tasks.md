@@ -122,7 +122,7 @@ exist; the guards below replace it (deviation recorded in the PR body).
 ## Evidence recorded
 
 - 4.1: local, 40 files, 4142 passed (first commit `319aebb46`); after fix pass
-  1, 39 files, 1416 passed. node-27 at `319aebb46`: 40 files, 4142 passed; the
+  1, 27 files, 1416 passed. node-27 at `319aebb46`: 40 files, 4142 passed; the
   guard subset is rerun on node-27 at the final commit and posted on the PR.
 - 4.2: ten red runs, each restored and checksum-verified (old oracle on new
   instructions; compute-role line without `禁止` / without `w2`; retired-host
@@ -148,3 +148,9 @@ exist; the guards below replace it (deviation recorded in the PR body).
 - Review round 1 added scope: the `w2` login rule, the `uv.lock` deploy step,
   pointers on seven `production-ops/` pages, and the `node22-unit-tracking`
   delta.
+- Review round 2: the `uv.lock` branch of the deploy steps now drains the
+  `nhms_*` jobs before the merge instead of after it, and the runs-mount gap
+  is described as detectable only after the fact.
+- Markdown lint: adjacent blockquotes were joined, and blank lines were added
+  around the headings and tables of the w2/w3 lock receipt (whitespace only;
+  its rows are unchanged).

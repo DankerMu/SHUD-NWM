@@ -80,8 +80,9 @@ w2 上的进程走 NFS，两边会同时拿到同一把锁。实测见
   `/volume/nwm`。所列挂载不在，slurmd 不起，节点不接作业。
 - **已知缺口（#3359）：w3 的 drop-in 不含 runs。** w2 不在时，w3 的 runs 挂载因 `nofail` 被跳过，slurmd
   照常起来；这时落在 w3 上的作业会把结果写进挂载点下面的本地空目录，等 runs 后来挂上就被盖住。
-  w3 重启后、接作业前，先确认 `findmnt /scratch/frd_muziyao/nhms-prod/workspace/runs` 的来源是
-  w2 的导出。
+  这只能事后发现：w3 开机约 2 分钟后 scheduler 定时器就会自己跑 pass，来不及在接作业之前人工
+  确认。w3 重启后尽快看 `findmnt /scratch/frd_muziyao/nhms-prod/workspace/runs`；来源不是 w2 的
+  导出时，先停 scheduler 定时器、把 w3 设为 drain，再处理写进本地目录的产物，挂好 runs 后恢复。
 - **w3 ⇄ w2 互相依赖**：w3 上的作业要用 w2 导出的 runs，w2 要用 w3 导出的 scratch。任一台
   停机，另一台上的作业会挂在 `hard` 挂载上等待，而不是失败。
 
@@ -143,16 +144,19 @@ w3 访问 github.com 不稳定，部署走本地打 `git bundle`、经 ssh 送�
    失败时 `git bundle verify` 后从 bundle 取 `refs/remotes/origin/master`；确认目标提交是
    HEAD 的后代且在 `origin/master` 上。
 3. 等一个 pass 在跑（`nhms-compute-scheduler.service` 为 `activating`），停
-   `nhms-compute-scheduler.timer`，等该 pass 结束，`git merge --ff-only <目标>`，立刻重启定时器（这次部署改了 `uv.lock` 时先做 3a）。
-   - 3a（仅当 `git diff --name-only <旧 HEAD> <目标> -- uv.lock` 非空）：合入后**先不要**重启定时器。
-     等 `squeue` 里没有 `nhms_*` 作业（yd 的作业不带这个前缀，不用等），以生产用户在 checkout 里
+   `nhms-compute-scheduler.timer`，等该 pass 结束。然后按这次部署是否改了 `uv.lock`
+   （`git diff --name-only HEAD <目标> -- uv.lock`）分两种做法：
+   - 没改：`git merge --ff-only <目标>`，立刻重启定时器。
+   - 改了：**先不要合入**。定时器保持停着，等 `squeue` 里没有 `nhms_*` 作业（yd 的作业不带这个
+     前缀，不用等）——作业是在启动时才进入 checkout、调用 `.venv` 的，合入早了，还在排队的作业
+     会拿新代码配旧环境。队列清空后再 `git merge --ff-only <目标>`，接着以生产用户在 checkout 里
      执行 `uv sync --frozen --all-extras --dev`（w3 的环境在迁移时就是这样建的），确认
-     `.venv/bin/python -V` 仍是 3.11.x，再重启定时器。w3 上还没有演练过带 `uv.lock` 变更的部署。
+     `.venv/bin/python -V` 仍是 3.11.x，最后重启定时器。w3 上还没有演练过带 `uv.lock` 变更的部署。
 4. 等新代码上的第一个 pass 结束，看 evidence、`scripts/node22_scheduler_stall_health.py` 和
    `systemctl --user --failed`。
 
 **绝不**切换生产 checkout 的分支、手改工作树、`git stash pop`。`.venv` 经 NFS 被两台主机上的
-Slurm 作业和定时器共用：日常禁止在这里同步或重建环境；只有部署改了 `uv.lock` 时才同步（步骤 3a），且须定时器已停、
+Slurm 作业和定时器共用：日常禁止在这里同步或重建环境；只有部署改了 `uv.lock` 时才同步（步骤 3 的第二种做法），且须定时器已停、
 没有在跑的 pass、Slurm 队列里没有 NWM 作业。
 
 ## 7. 冷启动

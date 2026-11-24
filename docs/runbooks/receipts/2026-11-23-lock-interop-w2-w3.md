@@ -10,7 +10,9 @@ both nodes mount it at /scratch/frd_muziyao (w3 through a loopback NFS mount). w
 mounted on both at /scratch/frd_muziyao/nhms-prod/workspace/runs. node-27 serves /home/ghdc at /ghdc/data on both. All vers=4.2, local_lock=none.
 
 ## Before (w3 on local ext4, clients over NFS) - the hazard
+
 kernel w3: 6.8.0-71-generic
+
 | holder | attempt | outcome |
 |---|---|---|
 | w3-local flock | w3-loopback flock | ACQUIRED (no exclusion) |
@@ -23,6 +25,8 @@ Job-side state-index lock is a blocking flock (packages/common/state_manager.py:
 /scratch/frd_muziyao/nhms-prod/object-store/scheduler/state-index/, so local-vs-client access to that tree must not be mixed.
 
 ## After (every access is a client lock) - method: hold 9 s, one non-blocking attempt 3 s in
+
+
 | tree | holder | attempt | outcome |
 |---|---|---|---|
 | w3 export (state index tree) | w3 flock | w2 flock | BLOCKED |

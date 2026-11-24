@@ -7,7 +7,7 @@
 > **不得**在原主机上执行（那里的 journal 副本已经过期）。活动 checkout 的 `.venv` 经 NFS 被
 > w3 / w2 共用，"不得在活动 checkout 里重建环境"的禁令照旧适用。主机布局、存储、Slurm、部署与
 > 冷启动见 [`w2-w3-compute-topology.md`](w2-w3-compute-topology.md)。
-
+>
 > **回滚提示**：原主机上的 scheduler journal 副本停在 2026-11-23T02:34Z。回滚到原主机不是"把定时器
 > 开回来"——必须先停 w3 的 scheduler 定时器，再把 w3 的 journal（或 NFS 上
 > `operator-archives/w3-scheduler-journal/` 的备份）拷回去；步骤见

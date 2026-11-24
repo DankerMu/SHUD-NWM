@@ -12,7 +12,7 @@
 > **不得**在原主机上执行（那里的 journal 副本已经过期）。活动 checkout 的 `.venv` 经 NFS 被
 > w3 / w2 共用，"不得在活动 checkout 里重建环境"的禁令照旧适用。主机布局、存储、Slurm、部署与
 > 冷启动见 [`w2-w3-compute-topology.md`](w2-w3-compute-topology.md)。
-
+>
 > **计算角色执行说明**：活动 checkout `/scratch/frd_muziyao/NWM` 的 `.venv`（Python 3.11.x，与仓库
 > pin 一致）经 NFS 被 w3、w2 上的 Slurm 作业和 scheduler 定时器共用，**禁止**在其中运行裸
 > `uv run` / `uv sync`。本文中所有计算侧活动操作一律使用精确活动解释器
