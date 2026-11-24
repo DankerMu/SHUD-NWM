@@ -950,7 +950,7 @@ def test_M3_STAGES_PipelineResult_StageRunResult_legacy_exports_preserve_identit
     assert result.candidate_outcomes == ()
 
 
-def test_scheduler_state_compat_reexport_names_match_owner_module_and_inventory() -> None:
+def test_scheduler_state_compat_reexport_names_match_owner_module() -> None:
     reexport_names = (
         "ACTIVE_HYDRO_STATUSES",
         "ACTIVE_PIPELINE_STATUSES",
@@ -1256,7 +1256,7 @@ def test_scheduler_state_compat_reexport_names_match_owner_module_and_inventory(
         assert getattr(scheduler_module, name) is getattr(scheduler_state_module, name)
 
 
-def test_scheduler_lease_compat_reexport_names_match_owner_module_and_inventory() -> None:
+def test_scheduler_lease_compat_reexport_names_match_owner_module() -> None:
     reexport_names = (
         "FileSchedulerLease",
         "LOCK_OWNER",
@@ -1332,7 +1332,7 @@ def test_slurm_preflight_constants_have_a_single_owner_module() -> None:
             getattr(scheduler_module, name)
 
 
-def test_scheduler_discovery_compat_aliases_match_owner_module_and_inventory() -> None:
+def test_scheduler_discovery_compat_aliases_match_owner_module() -> None:
     alias_owner_names = {
         "MAX_DISCOVERED_CYCLES": "MAX_DISCOVERED_CYCLES",
         "SchedulerResourceLimitError": "SchedulerResourceLimitError",
@@ -1521,7 +1521,7 @@ def test_production_scheduler_discovery_consumers_preserve_owner_identity() -> N
     ), "scheduler_models.py facade SchedulerResourceLimitError is not owner"
 
 
-def test_scheduler_candidate_compat_aliases_match_owner_module_and_inventory() -> None:
+def test_scheduler_candidate_compat_aliases_match_owner_module() -> None:
     alias_owner_names = {
         "MAX_CANDIDATES": "MAX_CANDIDATES",
         "_source_blocked_evidence": "_source_blocked_evidence",
@@ -1622,7 +1622,7 @@ def test_scheduler_candidate_compat_forwarders_delegate_to_owner_module(
     assert context.candidate_state_decider is patched_decision
 
 
-def test_scheduler_execution_compat_wrappers_match_owner_module_and_inventory() -> None:
+def test_scheduler_execution_compat_wrappers_match_owner_module() -> None:
     wrapper_owner_names = {
         "_restart_compatible_candidate_cohorts": "restart_compatible_candidate_cohorts",
         "_candidate_restart_stage": "candidate_restart_stage",
@@ -1937,7 +1937,7 @@ def test_scheduler_execution_compat_wrappers_delegate_to_owner_module(monkeypatc
         )
 
 
-def test_scheduler_evidence_compat_names_match_owner_module_and_inventory() -> None:
+def test_scheduler_evidence_compat_names_match_owner_module() -> None:
     direct_owner_names = {
         "MAX_EVIDENCE_BYTES": "MAX_EVIDENCE_BYTES",
         "SCHEDULER_EVIDENCE_SCHEMA_VERSION": "SCHEDULER_EVIDENCE_SCHEMA_VERSION",
@@ -2421,7 +2421,7 @@ def test_scheduler_evidence_compat_wrappers_delegate_to_owner_module(
     assert scheduler_module._no_mutation_proof() == {"no_mutation": True}
 
 
-def test_scheduler_cancellation_status_compat_names_match_owner_module_and_inventory() -> None:
+def test_scheduler_cancellation_status_compat_names_match_owner_module() -> None:
     wrapper_owner_names = {
         "_scheduler_pass_status_from_cancellation": "scheduler_pass_status_from_cancellation",
         "_scheduler_execution_boundary_from_cancellation": "scheduler_execution_boundary_from_cancellation",

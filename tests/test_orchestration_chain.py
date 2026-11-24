@@ -1214,7 +1214,7 @@ def test_chain_type_exports_preserve_legacy_identity_and_dataclass_contracts() -
     assert assembly.residual_blockers == ({"code": "none"},)
 
 
-def test_chain_stage_catalog_type_compat_reexports_match_owner_modules_and_inventory() -> None:
+def test_chain_stage_catalog_type_compat_reexports_match_owner_modules() -> None:
     import services.orchestrator.chain as legacy_chain
     from services.orchestrator import chain_stages, chain_types
 
@@ -1246,7 +1246,7 @@ def test_chain_stage_catalog_type_compat_reexports_match_owner_modules_and_inven
         assert getattr(legacy_chain, name) is getattr(chain_types, name)
 
 
-def test_chain_array_accounting_compat_forwarders_match_owner_module_and_inventory() -> None:
+def test_chain_array_accounting_compat_forwarders_match_owner_module() -> None:
     import services.orchestrator.chain as legacy_chain
     from services.orchestrator import chain_array_accounting
 
@@ -10375,7 +10375,7 @@ def test_chain_stage_execution_module_imports_without_loading_chain_runtime() ->
     )
 
 
-def test_chain_stage_execution_compat_forwarders_match_owner_module_and_inventory() -> None:
+def test_chain_stage_execution_compat_forwarders_match_owner_module() -> None:
     import services.orchestrator.chain as legacy_chain
     from services.orchestrator import chain_stage_execution
 
@@ -10433,7 +10433,7 @@ def test_chain_stage_execution_compat_forwarders_match_owner_module_and_inventor
         assert callable(getattr(legacy_chain.ForecastOrchestrator, facade_name))
 
 
-def test_chain_workspace_log_compat_forwarders_match_owner_module_and_inventory() -> None:
+def test_chain_workspace_log_compat_forwarders_match_owner_module() -> None:
     import services.orchestrator.chain as legacy_chain
     from services.orchestrator import chain_workspace
 
@@ -10532,7 +10532,7 @@ def test_round10_http_submit_response_accepts_all_gateway_statuses(status: str) 
     ) == response
 
 
-def test_chain_tile_publisher_compat_facade_matches_owner_module_and_inventory(
+def test_chain_tile_publisher_compat_facade_matches_owner_module(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -10681,7 +10681,7 @@ def test_chain_tile_publisher_compat_local_publish_failure_paths(
     assert "[redacted]" in generic_payload["error_message"]
 
 
-def test_chain_worker_adapter_compat_facade_matches_owner_modules_and_inventory(tmp_path: Path) -> None:
+def test_chain_worker_adapter_compat_facade_matches_owner_modules(tmp_path: Path) -> None:
     import services.orchestrator.chain as legacy_chain
     from packages.common.contracts import time_normalization
     from workers.canonical_converter import converter as canonical_converter
@@ -10747,7 +10747,7 @@ assert chain.scenario_for_source('IFS') == 'forecast_ifs_deterministic'
     )
 
 
-def test_chain_reservation_compat_facade_matches_owner_module_and_inventory(monkeypatch) -> None:
+def test_chain_reservation_compat_facade_matches_owner_module(monkeypatch) -> None:
     import services.orchestrator.chain as legacy_chain
     from services.orchestrator import chain_stage_execution, reservation
 
@@ -10853,7 +10853,7 @@ def test_chain_reservation_compat_facade_matches_owner_module_and_inventory(monk
     assert not orchestrator._reservation_already_inflight(None)
 
 
-def test_chain_persistence_repository_compat_owner_aliases_match_owner_module_and_inventory() -> None:
+def test_chain_persistence_repository_compat_owner_aliases_match_owner_module() -> None:
     import services.orchestrator.chain as legacy_chain
 
     assert legacy_chain.PipelineJob is PipelineJob
@@ -10861,7 +10861,7 @@ def test_chain_persistence_repository_compat_owner_aliases_match_owner_module_an
     assert legacy_chain.PipelineStore is PipelineStore
 
 
-def test_chain_persistence_repository_compat_repository_retention_classification_and_inventory() -> None:
+def test_chain_persistence_repository_compat_repository_retention_classification() -> None:
     import services.orchestrator.chain as legacy_chain
 
     # R3 (#3260): the protocol is the only chain-local repository class left; the SQL
@@ -10895,7 +10895,7 @@ def test_chain_persistence_repository_compat_repository_retention_classification
         assert callable(getattr(legacy_chain.OrchestratorRepository, method_name))
 
 
-def test_chain_retry_compat_facade_matches_owner_module_and_inventory(
+def test_chain_retry_compat_facade_matches_owner_module(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -11173,7 +11173,7 @@ def test_chain_manifest_module_imports_without_loading_chain_runtime() -> None:
     )
 
 
-def test_chain_manifest_compat_forwarders_match_owner_modules_and_inventory(monkeypatch) -> None:
+def test_chain_manifest_compat_forwarders_match_owner_modules(monkeypatch) -> None:
     from services.orchestrator import chain as legacy_chain
     from services.orchestrator import chain_manifests, production_contract
 

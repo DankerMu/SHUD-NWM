@@ -110,14 +110,6 @@ DELEGATED_CONNECT_CLOSURE: tuple[tuple[str, str, str, str], ...] = (
     ),
     (
         "scripts/node27_autopipeline.py",
-        "packages/common/best_available.py",
-        UNREACHABLE,
-        "static import of services.orchestrator.pipeline_job_provenance also executes "
-        "services/orchestrator/__init__.py, whose AST names chain.py; BestAvailableManager is constructed "
-        "by the orchestrator/display best-available surfaces, never from autopipeline",
-    ),
-    (
-        "scripts/node27_autopipeline.py",
         "packages/common/met_store.py",
         UNREACHABLE,
         "static-only through chain.py -> forcing_producer/producer.py; PsycopgMetStore.from_env() is "
@@ -172,20 +164,12 @@ DELEGATED_CONNECT_CLOSURE: tuple[tuple[str, str, str, str], ...] = (
         "hydro_display imports only the _ok response helper; pipeline._engine belongs to the "
         "control-plane routes and is never reached from a display route",
     ),
-    # The eight below entered this closure with #1728's ancestor-package fix to
+    # The four below entered this closure with #1728's ancestor-package fix to
     # the shared walk (a package __init__ executes before its submodules, so it
     # is part of the import graph). Every one of them hangs off the SAME single
     # edge as the pipeline.py row above: hydro_display imports `_ok` from
     # apps/api/routes/pipeline.py, which imports services.orchestrator, whose
     # package __init__ is now walked. No display route reaches any of them.
-    (
-        "apps/api/routes/hydro_display.py",
-        "packages/common/best_available.py",
-        UNREACHABLE,
-        "via apps/api/routes/pipeline.py -> services/orchestrator/__init__.py -> chain.py; the "
-        "best-available repository is built by apps/api/routes/best_available.py (its own attributed "
-        "surface nhms-api-best-available), never from a display route",
-    ),
     (
         "apps/api/routes/hydro_display.py",
         "packages/common/state_manager.py",
