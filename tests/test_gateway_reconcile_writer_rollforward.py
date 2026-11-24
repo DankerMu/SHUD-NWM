@@ -27,6 +27,11 @@ from tests.gateway_reconcile_writer_helpers import (
     _round14_clean_writer_checkout,
     _round20_write_execution_binding,
 )
+from tests.git_fixture_env import run_fixture_git
+
+# #3349: git runs here (in-process or in children inheriting os.environ) only
+# against tmp fixture repositories, never REPO_ROOT, so the whole module opts in.
+pytestmark = pytest.mark.usefixtures("isolated_git_environ")
 
 
 def test_round20_prepare_retries_same_receipt_after_authority_publication_crash(
@@ -286,7 +291,6 @@ def test_round20_persisted_source_tree_is_recursively_sealed_and_tamper_fails_cl
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import stat
-    import subprocess
     from pathlib import Path
 
     from packages.common.rollback_execution_binding import RollbackExecutionBindingError
@@ -316,29 +320,19 @@ def test_round20_persisted_source_tree_is_recursively_sealed_and_tamper_fails_cl
     executable.parent.mkdir()
     executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     executable.chmod(0o755)
-    subprocess.run(("git", "add", "source_package/module.py", "bin/worker-tool"), cwd=checkout, check=True)
-    subprocess.run(
-        (
-            "git",
-            "-c",
-            "user.name=Round20 Test",
-            "-c",
-            "user.email=round20@example.invalid",
-            "commit",
-            "-q",
-            "-m",
-            "nested source fixture",
-        ),
-        cwd=checkout,
-        check=True,
+    run_fixture_git(checkout, "add", "source_package/module.py", "bin/worker-tool")
+    run_fixture_git(
+        checkout,
+        "-c",
+        "user.name=Round20 Test",
+        "-c",
+        "user.email=round20@example.invalid",
+        "commit",
+        "-q",
+        "-m",
+        "nested source fixture",
     )
-    generation = subprocess.run(
-        ("git", "rev-parse", "HEAD"),
-        cwd=checkout,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
+    generation = run_fixture_git(checkout, "rev-parse", "HEAD", capture_output=True, text=True).stdout.strip()
     receipt = prepare_file_journal_rollback(
         journal_root=root,
         workspace_root=workspace,
@@ -431,7 +425,6 @@ def test_round20_two_sequential_rollback_lifecycles_archive_completed_binding(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import json
-    import subprocess
     from pathlib import Path
 
     from packages.common.rollback_execution_binding import (
@@ -503,29 +496,19 @@ def test_round20_two_sequential_rollback_lifecycles_archive_completed_binding(
     ) == completed_a
 
     (checkout / "writer.txt").write_text("writer B\n", encoding="utf-8")
-    subprocess.run(("git", "add", "writer.txt"), cwd=checkout, check=True)
-    subprocess.run(
-        (
-            "git",
-            "-c",
-            "user.name=Round20 Test",
-            "-c",
-            "user.email=round20@example.invalid",
-            "commit",
-            "-q",
-            "-m",
-            "writer B",
-        ),
-        cwd=checkout,
-        check=True,
+    run_fixture_git(checkout, "add", "writer.txt")
+    run_fixture_git(
+        checkout,
+        "-c",
+        "user.name=Round20 Test",
+        "-c",
+        "user.email=round20@example.invalid",
+        "commit",
+        "-q",
+        "-m",
+        "writer B",
     )
-    generation_b = subprocess.run(
-        ("git", "rev-parse", "HEAD"),
-        cwd=checkout,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
+    generation_b = run_fixture_git(checkout, "rev-parse", "HEAD", capture_output=True, text=True).stdout.strip()
     assert generation_b != generation_a
     real_archive = migration_module.archive_completed_rollback_execution_binding
     archive_cut_injected = False

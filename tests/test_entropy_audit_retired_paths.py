@@ -30,6 +30,11 @@ from tests.entropy_audit_helpers import (
     _track_generated_artifact,
     _write,
 )
+from tests.git_fixture_env import run_fixture_git
+
+# #3349: git runs here (in-process or in children inheriting os.environ) only
+# against tmp fixture repositories, never REPO_ROOT, so the whole module opts in.
+pytestmark = pytest.mark.usefixtures("isolated_git_environ")
 
 
 def test_complete_archive_marker_allowlists_archived_retired_path_tokens_without_budget_count(
@@ -151,7 +156,7 @@ def test_tracked_apps_web_file_emits_retired_path_return_finding(
 ) -> None:
     _init_git(tmp_path)
     _write(tmp_path / "apps" / "web" / "README.md", "retired placeholder returned\n")
-    subprocess.run(["git", "add", "apps/web/README.md"], cwd=tmp_path, check=True)
+    run_fixture_git(tmp_path, "add", "apps/web/README.md")
 
     report = audit_repo_entropy.build_report(tmp_path)
     findings = [
@@ -184,7 +189,7 @@ def test_tracked_file_under_each_retired_prefix_emits_retired_path_return_findin
     _init_git(tmp_path)
     tracked_file = f"{retired_prefix}/README.md"
     _write(tmp_path / tracked_file, "tracked retired path returned\n")
-    subprocess.run(["git", "add", tracked_file], cwd=tmp_path, check=True)
+    run_fixture_git(tmp_path, "add", tracked_file)
 
     report = audit_repo_entropy.build_report(tmp_path)
     findings = [
@@ -213,8 +218,8 @@ def test_force_added_ignored_retired_worker_path_emits_retired_path_return_findi
     _init_git(tmp_path)
     _write(tmp_path / ".gitignore", "workers/\n")
     _write(tmp_path / "workers" / "shud-runtime" / "README.md", "ignored but tracked\n")
-    subprocess.run(["git", "add", ".gitignore"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "add", "-f", "workers/shud-runtime/README.md"], cwd=tmp_path, check=True)
+    run_fixture_git(tmp_path, "add", ".gitignore")
+    run_fixture_git(tmp_path, "add", "-f", "workers/shud-runtime/README.md")
 
     findings = _findings_by_check(tmp_path, "placeholder-path-exists")
 
@@ -241,16 +246,12 @@ def test_active_underscore_paths_do_not_emit_retired_path_return_finding(
     _write(tmp_path / "workers" / "shud_runtime" / "__init__.py", "\n")
     _write(tmp_path / "workers" / "output_parser" / "__init__.py", "\n")
     _write(tmp_path / "services" / "tile_publisher" / "__init__.py", "\n")
-    subprocess.run(
-        [
-            "git",
-            "add",
-            "workers/shud_runtime/__init__.py",
-            "workers/output_parser/__init__.py",
-            "services/tile_publisher/__init__.py",
-        ],
-        cwd=tmp_path,
-        check=True,
+    run_fixture_git(
+        tmp_path,
+        "add",
+        "workers/shud_runtime/__init__.py",
+        "workers/output_parser/__init__.py",
+        "services/tile_publisher/__init__.py",
     )
 
     assert _findings_by_check(tmp_path, "placeholder-path-exists") == []
@@ -275,7 +276,7 @@ def test_unavailable_git_metadata_does_not_crash_or_emit_retired_path_return_fal
 ) -> None:
     _init_git(tmp_path)
     _write(tmp_path / "apps" / "web" / "README.md", "tracked but git unavailable\n")
-    subprocess.run(["git", "add", "apps/web/README.md"], cwd=tmp_path, check=True)
+    run_fixture_git(tmp_path, "add", "apps/web/README.md")
     real_run = subprocess.run
 
     def unavailable_git_ls_files(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:

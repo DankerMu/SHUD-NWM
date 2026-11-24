@@ -26,6 +26,10 @@ from tests.entropy_audit_helpers import (
     _write,
 )
 
+# #3349: git runs here (in-process or in children inheriting os.environ) only
+# against tmp fixture repositories, never REPO_ROOT, so the whole module opts in.
+pytestmark = pytest.mark.usefixtures("isolated_git_environ")
+
 
 def test_route_authority_current_runbook_active_legacy_alias_is_report_only_drift(
     tmp_path: Path,

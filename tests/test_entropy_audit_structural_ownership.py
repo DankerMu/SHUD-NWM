@@ -32,6 +32,11 @@ from tests.entropy_audit_helpers import (
     _structural_ts_private_fixture,
     _write,
 )
+from tests.git_fixture_env import run_fixture_git
+
+# #3349: git runs here (in-process or in children inheriting os.environ) only
+# against tmp fixture repositories, never REPO_ROOT, so the whole module opts in.
+pytestmark = pytest.mark.usefixtures("isolated_git_environ")
 
 
 def test_structural_ownership_growth_ignores_oversized_bugfix_only_edit(
@@ -829,12 +834,7 @@ def test_structural_ownership_growth_reports_committed_pr_diff_against_base_ref(
         + "\n",
     )
     _commit_all(tmp_path, "add ownership surface")
-    status = subprocess.run(
-        ["git", "status", "--porcelain"],
-        cwd=tmp_path,
-        check=True,
-        stdout=subprocess.PIPE,
-    )
+    status = run_fixture_git(tmp_path, "status", "--porcelain", stdout=subprocess.PIPE)
     assert status.stdout == b""
 
     budget = _structural_budget(tmp_path, structural_base_ref=base_ref)

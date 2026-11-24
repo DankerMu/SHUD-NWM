@@ -16,6 +16,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from scripts.governance import audit_repo_entropy
 from tests.entropy_audit_helpers import (
     REPO_ROOT,
@@ -26,6 +28,7 @@ from tests.entropy_audit_helpers import (
     _setup_clean_hard_gate_fixture,
     _write,
 )
+from tests.git_fixture_env import run_fixture_git
 
 
 def test_entropy_audit_json_schema_is_stable() -> None:
@@ -265,6 +268,7 @@ def test_entropy_audit_hard_gate_json_preserves_repository_baseline_and_parseabl
     assert metadata["hard_gate_failing_count"] == metadata["gate_eligible_count"]
     assert _entropy_baseline_snapshot() == before
 
+@pytest.mark.usefixtures("isolated_git_environ")
 def test_entropy_audit_hard_gate_json_failure_is_parseable_and_counts_only_gated_findings(
     tmp_path: Path,
 ) -> None:
@@ -307,6 +311,7 @@ def test_entropy_audit_hard_gate_json_failure_is_parseable_and_counts_only_gated
     assert stale_finding["gate_eligible"] is False
 
 
+@pytest.mark.usefixtures("isolated_git_environ")
 def test_entropy_audit_hard_gate_json_passes_with_no_gated_findings(tmp_path: Path) -> None:
     _setup_clean_hard_gate_fixture(tmp_path)
     _write(tmp_path / "docs" / "active.md", "Historical token /hydro-met remains in docs.\n")
@@ -346,12 +351,13 @@ def test_entropy_audit_hard_gate_json_passes_with_no_gated_findings(tmp_path: Pa
     assert stale_finding["gate_eligible"] is False
 
 
+@pytest.mark.usefixtures("isolated_git_environ")
 def test_entropy_audit_hard_gate_json_reports_tracked_retired_path_as_report_only(
     tmp_path: Path,
 ) -> None:
     _setup_clean_hard_gate_fixture(tmp_path)
     _write(tmp_path / "apps" / "web" / "README.md", "retired placeholder returned\n")
-    subprocess.run(["git", "add", "apps/web/README.md"], cwd=tmp_path, check=True)
+    run_fixture_git(tmp_path, "add", "apps/web/README.md")
 
     result = subprocess.run(
         [
@@ -388,6 +394,7 @@ def test_entropy_audit_hard_gate_json_reports_tracked_retired_path_as_report_onl
     assert findings[0]["axis"] == "structure"
 
 
+@pytest.mark.usefixtures("isolated_git_environ")
 def test_entropy_audit_hard_gate_markdown_includes_status_and_report_sections(tmp_path: Path) -> None:
     _setup_clean_hard_gate_fixture(tmp_path)
 

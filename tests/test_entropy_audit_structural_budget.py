@@ -35,6 +35,11 @@ from tests.entropy_audit_helpers import (
     _structural_yaml_fixture,
     _write,
 )
+from tests.git_fixture_env import run_fixture_git
+
+# #3349: git runs here (in-process or in children inheriting os.environ) only
+# against tmp fixture repositories, never REPO_ROOT, so the whole module opts in.
+pytestmark = pytest.mark.usefixtures("isolated_git_environ")
 
 
 def test_structural_file_budget_classifies_tracked_source_thresholds_and_exemptions(
@@ -61,17 +66,13 @@ def test_structural_file_budget_classifies_tracked_source_thresholds_and_exempti
         tmp_path / "apps" / "frontend" / "pnpm-lock.yaml",
         _structural_yaml_fixture(1001, "lockfileVersion: '9.0'"),
     )
-    subprocess.run(
-        [
-            "git",
-            "add",
-            "services/api/large.py",
-            "apps/api/yellow.py",
-            "schemas/generated/openapi_types.ts",
-            "apps/frontend/pnpm-lock.yaml",
-        ],
-        cwd=tmp_path,
-        check=True,
+    run_fixture_git(
+        tmp_path,
+        "add",
+        "services/api/large.py",
+        "apps/api/yellow.py",
+        "schemas/generated/openapi_types.ts",
+        "apps/frontend/pnpm-lock.yaml",
     )
 
     budget = _structural_budget(tmp_path)
@@ -134,11 +135,7 @@ def test_structural_file_budget_does_not_exempt_implementation_roots_with_data_o
         tmp_path / "services" / "api" / "schema_validator.py",
         _structural_python_fixture(1001),
     )
-    subprocess.run(
-        ["git", "add", "workers/data_adapters/gfs_adapter.py", "services/api/schema_validator.py"],
-        cwd=tmp_path,
-        check=True,
-    )
+    run_fixture_git(tmp_path, "add", "workers/data_adapters/gfs_adapter.py", "services/api/schema_validator.py")
 
     budget = _structural_budget(tmp_path)
 
@@ -156,11 +153,7 @@ def test_structural_file_budget_reports_root_lockfiles_as_dependency_exemptions(
     _init_git(tmp_path)
     for lockfile_name in audit_repo_entropy.STRUCTURAL_DEPENDENCY_LOCKFILE_NAMES:
         _write(tmp_path / lockfile_name, _structural_yaml_fixture(1001, "lockfileVersion: 'test'"))
-    subprocess.run(
-        ["git", "add", *sorted(audit_repo_entropy.STRUCTURAL_DEPENDENCY_LOCKFILE_NAMES)],
-        cwd=tmp_path,
-        check=True,
-    )
+    run_fixture_git(tmp_path, "add", *sorted(audit_repo_entropy.STRUCTURAL_DEPENDENCY_LOCKFILE_NAMES))
 
     budget = _structural_budget(tmp_path)
 
@@ -191,7 +184,7 @@ def test_structural_file_budget_exempts_data_fixture_and_protocol_sources(
         _write(source_path, _structural_python_fixture(1001))
     else:
         _write(source_path, _structural_yaml_fixture(1001))
-    subprocess.run(["git", "add", relative_path], cwd=tmp_path, check=True)
+    run_fixture_git(tmp_path, "add", relative_path)
 
     budget = _structural_budget(tmp_path)
 
@@ -361,7 +354,7 @@ def test_structural_file_budget_bounds_huge_source_reads(
     huge_line = "VALUE = '0123456789abcdef'\n"
     repeat_count = audit_repo_entropy.MAX_SCANNED_TEXT_FILE_BYTES // len(huge_line) + 100
     _write(source_path, huge_line * repeat_count)
-    subprocess.run(["git", "add", "services/api/huge.py"], cwd=tmp_path, check=True)
+    run_fixture_git(tmp_path, "add", "services/api/huge.py")
 
     line_count_result = audit_repo_entropy._structural_physical_line_count(source_path)
 
@@ -397,7 +390,7 @@ def test_structural_file_budget_records_truncated_unknown_line_count_without_man
         source_path,
         "VALUE = '" + ("x" * audit_repo_entropy.MAX_SCANNED_TEXT_FILE_BYTES) + "'\n",
     )
-    subprocess.run(["git", "add", "services/api/huge_single_line.py"], cwd=tmp_path, check=True)
+    run_fixture_git(tmp_path, "add", "services/api/huge_single_line.py")
 
     budget = audit_repo_entropy._structural_file_budget_summary(tmp_path)
 
@@ -700,7 +693,7 @@ def test_structural_file_budget_report_and_hard_gate_commands_do_not_write_basel
         tmp_path / "services" / "api" / "large.py",
         _structural_python_fixture(1001),
     )
-    subprocess.run(["git", "add", "services/api/large.py"], cwd=tmp_path, check=True)
+    run_fixture_git(tmp_path, "add", "services/api/large.py")
     baseline = tmp_path / ".entropy-baseline" / "latest.json"
 
     for mode in ("report", "hard-gate"):

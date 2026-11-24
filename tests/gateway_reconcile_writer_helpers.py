@@ -64,9 +64,10 @@ def _start_attempt_threads(
 
 def _round14_clean_writer_checkout(root: Any, *, content: str) -> tuple[Any, str]:
     import shutil
-    import subprocess
     import sys
     from pathlib import Path
+
+    from tests.git_fixture_env import run_fixture_git
 
     checkout = Path(root)
     checkout.mkdir(parents=True)
@@ -88,29 +89,21 @@ def _round14_clean_writer_checkout(root: Any, *, content: str) -> tuple[Any, str
         f"executable = {private_runtime}\n",
         encoding="utf-8",
     )
-    subprocess.run(("git", "init", "-q"), cwd=checkout, check=True)
-    subprocess.run(("git", "add", ".gitignore", "writer.txt"), cwd=checkout, check=True)
-    subprocess.run(
-        (
-            "git",
-            "-c",
-            "user.name=Round14 Test",
-            "-c",
-            "user.email=round14@example.invalid",
-            "commit",
-            "-q",
-            "-m",
-            "writer fixture",
-        ),
-        cwd=checkout,
-        check=True,
+    run_fixture_git(checkout, "init", "-q")
+    run_fixture_git(checkout, "add", ".gitignore", "writer.txt")
+    run_fixture_git(
+        checkout,
+        "-c",
+        "user.name=Round14 Test",
+        "-c",
+        "user.email=round14@example.invalid",
+        "commit",
+        "-q",
+        "-m",
+        "writer fixture",
     )
-    generation = subprocess.run(
-        ("git", "rev-parse", "HEAD"),
-        cwd=checkout,
-        check=True,
-        capture_output=True,
-        text=True,
+    generation = run_fixture_git(
+        checkout, "rev-parse", "HEAD", capture_output=True, text=True
     ).stdout.strip()
     return checkout, generation
 

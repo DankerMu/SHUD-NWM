@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -29,6 +28,11 @@ from tests.entropy_audit_helpers import (
     _run_entropy_baseline_writer_cli,
     _write,
 )
+from tests.git_fixture_env import run_fixture_git
+
+# #3349: git runs here (in-process or in children inheriting os.environ) only
+# against tmp fixture repositories, never REPO_ROOT, so the whole module opts in.
+pytestmark = pytest.mark.usefixtures("isolated_git_environ")
 
 
 def test_entropy_baseline_writer_fails_before_writing_when_snapshot_changes(
@@ -265,8 +269,8 @@ def test_git_tracked_paths_preserves_non_ascii_path_identity(tmp_path: Path) -> 
     quoted_literal = '"docs/\\350\\257\\264\\346\\230\\216.md"'
     _write(tmp_path / unicode_path, "Unicode path identity.\n")
     _write(tmp_path / "README.md", "Repository readme.\n")
-    subprocess.run(["git", "config", "core.quotePath", "true"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "add", "docs/说明.md", "README.md"], cwd=tmp_path, check=True)
+    run_fixture_git(tmp_path, "config", "core.quotePath", "true")
+    run_fixture_git(tmp_path, "add", "docs/说明.md", "README.md")
 
     tracked_paths = audit_repo_entropy._git_tracked_paths(tmp_path)
     scoped_paths = audit_repo_entropy._git_tracked_paths(tmp_path, ["docs"])
@@ -284,8 +288,8 @@ def test_entropy_baseline_writer_snapshot_uses_unicode_paths_before_mutation(
     unicode_path = "docs/说明.md"
     quoted_literal = '"docs/\\350\\257\\264\\346\\230\\216.md"'
     _write(tmp_path / unicode_path, "Current docs still mention /hydro-met.\n")
-    subprocess.run(["git", "config", "core.quotePath", "true"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "add", unicode_path], cwd=tmp_path, check=True)
+    run_fixture_git(tmp_path, "config", "core.quotePath", "true")
+    run_fixture_git(tmp_path, "add", unicode_path)
     _commit_all(tmp_path, "initial unicode docs")
     previous_bytes = b'{"previous": true}\n'
     baseline_dir = tmp_path / ".entropy-baseline"

@@ -22,6 +22,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from scripts.governance import audit_repo_entropy
 from tests.entropy_audit_helpers import (
     REPO_ROOT,
@@ -79,6 +81,7 @@ def test_scoped_agent_context_current_repo_matches_scoped_instruction_state() ->
         assert scope["status"] == "pass"
 
 
+@pytest.mark.usefixtures("isolated_git_environ")
 def test_scoped_agent_context_reports_missing_high_entropy_directory_instructions(
     tmp_path: Path,
 ) -> None:
@@ -98,6 +101,7 @@ def test_scoped_agent_context_reports_missing_high_entropy_directory_instruction
         _assert_unallowlisted_budget_counted_report_only_finding(finding)
 
 
+@pytest.mark.usefixtures("isolated_git_environ")
 def test_scoped_agent_context_reports_stale_scoped_context(tmp_path: Path) -> None:
     _init_git(tmp_path)
     _write(
@@ -134,6 +138,7 @@ def test_scoped_agent_context_reports_stale_scoped_context(tmp_path: Path) -> No
     ]
 
 
+@pytest.mark.usefixtures("isolated_git_environ")
 def test_scoped_agent_context_reports_missing_glossary_linkage(tmp_path: Path) -> None:
     _init_git(tmp_path)
     _write(
@@ -170,6 +175,7 @@ def test_scoped_agent_context_reports_missing_glossary_linkage(tmp_path: Path) -
     ]
 
 
+@pytest.mark.usefixtures("isolated_git_environ")
 def test_scoped_agent_context_accepts_glossary_link_without_repeated_terms(
     tmp_path: Path,
 ) -> None:
@@ -202,6 +208,7 @@ def test_scoped_agent_context_accepts_glossary_link_without_repeated_terms(
     assert api_scope["missing_glossary_terms"] == []
 
 
+@pytest.mark.usefixtures("isolated_git_environ")
 def test_scoped_agent_context_accepts_required_terms_without_glossary_link(
     tmp_path: Path,
 ) -> None:
@@ -235,6 +242,7 @@ def test_scoped_agent_context_accepts_required_terms_without_glossary_link(
     assert api_scope["missing_glossary_terms"] == []
 
 
+@pytest.mark.usefixtures("isolated_git_environ")
 def test_scoped_agent_context_matches_wrapped_verification_command(tmp_path: Path) -> None:
     _init_git(tmp_path)
     _write(

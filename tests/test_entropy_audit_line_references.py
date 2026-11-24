@@ -13,6 +13,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from scripts.governance import audit_repo_entropy
 from scripts.governance.entropy_audit import check_line_references
 from tests.entropy_audit_helpers import (
@@ -52,6 +54,7 @@ def test_line_reference_family_is_registered_and_gated() -> None:
     assert CHECK_ID in audit_repo_entropy.HARD_GATE_CHECK_IDS
 
 
+@pytest.mark.usefixtures("isolated_git_environ")
 def test_new_line_reference_comment_fails_the_hard_gate_with_the_symbol_message(tmp_path: Path) -> None:
     _setup_clean_hard_gate_fixture(tmp_path)
     _write(tmp_path / "apps/api/new_module.py", f"VALUE = 1\n# see {REF} for the reason\n")
@@ -70,6 +73,7 @@ def test_new_line_reference_comment_fails_the_hard_gate_with_the_symbol_message(
     assert audit_repo_entropy._exit_code_for_report(report) == 1
 
 
+@pytest.mark.usefixtures("isolated_git_environ")
 def test_each_scan_root_is_covered_and_unscanned_trees_are_not(tmp_path: Path) -> None:
     _setup_clean_hard_gate_fixture(tmp_path)
     for scan_root in check_line_references.LINE_REFERENCE_SCAN_ROOTS:
@@ -84,6 +88,7 @@ def test_each_scan_root_is_covered_and_unscanned_trees_are_not(tmp_path: Path) -
     )
 
 
+@pytest.mark.usefixtures("isolated_git_environ")
 def test_reference_within_the_baseline_count_passes_and_one_above_it_fails(tmp_path: Path) -> None:
     _setup_clean_hard_gate_fixture(tmp_path)
     _write_baseline(tmp_path, {"services/mod.py": {REF: 2}})
@@ -102,6 +107,7 @@ def test_reference_within_the_baseline_count_passes_and_one_above_it_fails(tmp_p
     assert "3 occurrences on lines 1, 3, 4" in findings[0]["description"]
 
 
+@pytest.mark.usefixtures("isolated_git_environ")
 def test_reference_new_to_the_file_does_not_list_occurrences(tmp_path: Path) -> None:
     _setup_clean_hard_gate_fixture(tmp_path)
     _write_baseline(tmp_path, {})
@@ -112,6 +118,7 @@ def test_reference_new_to_the_file_does_not_list_occurrences(tmp_path: Path) -> 
     assert "occurrences" not in findings[0]["description"]
 
 
+@pytest.mark.usefixtures("isolated_git_environ")
 def test_deleting_or_moving_a_baseline_reference_passes(tmp_path: Path) -> None:
     _setup_clean_hard_gate_fixture(tmp_path)
     _write_baseline(tmp_path, {"services/mod.py": {REF: 2}, "services/gone.py": {REF: 1}})
@@ -125,6 +132,7 @@ def test_deleting_or_moving_a_baseline_reference_passes(tmp_path: Path) -> None:
     assert report["metadata"]["hard_gate_status"] == "pass"
 
 
+@pytest.mark.usefixtures("isolated_git_environ")
 def test_baseline_key_is_per_path_not_global(tmp_path: Path) -> None:
     _setup_clean_hard_gate_fixture(tmp_path)
     _write_baseline(tmp_path, {"services/mod.py": {REF: 1}})
@@ -135,6 +143,7 @@ def test_baseline_key_is_per_path_not_global(tmp_path: Path) -> None:
     assert [finding["evidence_path"] for finding in findings] == ["services/other.py"]
 
 
+@pytest.mark.usefixtures("isolated_git_environ")
 def test_colon_digit_text_that_is_not_a_line_reference_reports_nothing(tmp_path: Path) -> None:
     _setup_clean_hard_gate_fixture(tmp_path)
     _write(
@@ -151,6 +160,7 @@ def test_colon_digit_text_that_is_not_a_line_reference_reports_nothing(tmp_path:
     assert findings == []
 
 
+@pytest.mark.usefixtures("isolated_git_environ")
 def test_reference_inside_a_string_literal_or_code_reports_nothing(tmp_path: Path) -> None:
     _setup_clean_hard_gate_fixture(tmp_path)
     _write(
@@ -166,6 +176,7 @@ def test_reference_inside_a_string_literal_or_code_reports_nothing(tmp_path: Pat
     assert findings == []
 
 
+@pytest.mark.usefixtures("isolated_git_environ")
 def test_module_class_and_function_docstring_references_are_caught_on_their_own_lines(tmp_path: Path) -> None:
     _setup_clean_hard_gate_fixture(tmp_path)
     _write(
@@ -184,6 +195,7 @@ def test_module_class_and_function_docstring_references_are_caught_on_their_own_
     assert sorted(finding["line"] for finding in findings) == [3, 5, 9, 12]
 
 
+@pytest.mark.usefixtures("isolated_git_environ")
 def test_backtick_colon_digit_form_is_a_reference(tmp_path: Path) -> None:
     _setup_clean_hard_gate_fixture(tmp_path)
     _write(tmp_path / "apps/api/mod.py", "# ``_helper``" + ":42 decides this\n")
@@ -193,6 +205,7 @@ def test_backtick_colon_digit_form_is_a_reference(tmp_path: Path) -> None:
     assert [finding["description"].split(" in ")[0] for finding in findings] == ["new hard line reference `:42"]
 
 
+@pytest.mark.usefixtures("isolated_git_environ")
 def test_range_reference_is_one_reference(tmp_path: Path) -> None:
     _setup_clean_hard_gate_fixture(tmp_path)
     _write(tmp_path / "apps/api/mod.py", "# see services/x.py" + ":10-20 and y.py" + ":3\u20135\n")
@@ -205,6 +218,7 @@ def test_range_reference_is_one_reference(tmp_path: Path) -> None:
     ]
 
 
+@pytest.mark.usefixtures("isolated_git_environ")
 def test_unparseable_file_is_skipped_not_crashed(tmp_path: Path) -> None:
     _setup_clean_hard_gate_fixture(tmp_path)
     _write(tmp_path / "apps/api/broken.py", f"def f(:\n    # {REF}\n")

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
@@ -46,6 +45,7 @@ from packages.common.node27_pgdata_workload_query import (
 from packages.common.node27_pgdata_workload_types import PgdataWorkloadError
 from scripts import node27_pgdata_workload as workload_cli
 from scripts.node27_pgdata_workload import main as cli_main
+from tests.git_fixture_env import run_fixture_git
 
 BV = "bv-1"
 SEGMENT = "qhh_reach_000042"
@@ -1111,20 +1111,13 @@ def _poison_head_resolver() -> str:
 def _git_in(root: Path, *arguments: str) -> str:
     """Run git against a repository this suite owns, isolated from ambient git state."""
 
-    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
-    env.update(
-        {
-            "GIT_CONFIG_GLOBAL": os.devnull,
-            "GIT_CONFIG_SYSTEM": os.devnull,
-            "GIT_AUTHOR_NAME": "issue-2410 workload fixture",
-            "GIT_AUTHOR_EMAIL": "workload@example.invalid",
-            "GIT_COMMITTER_NAME": "issue-2410 workload fixture",
-            "GIT_COMMITTER_EMAIL": "workload@example.invalid",
-        }
-    )
-    return subprocess.run(
-        ["git", *arguments], cwd=root, env=env, capture_output=True, text=True, check=True
-    ).stdout.strip()
+    identity = {
+        "GIT_AUTHOR_NAME": "issue-2410 workload fixture",
+        "GIT_AUTHOR_EMAIL": "workload@example.invalid",
+        "GIT_COMMITTER_NAME": "issue-2410 workload fixture",
+        "GIT_COMMITTER_EMAIL": "workload@example.invalid",
+    }
+    return run_fixture_git(root, *arguments, env_overlay=identity, capture_output=True, text=True).stdout.strip()
 
 
 def _tracked_checkout(tmp_path: Path) -> tuple[Path, str]:
