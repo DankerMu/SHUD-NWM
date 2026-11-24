@@ -39559,6 +39559,120 @@ def _unexpected_lock_acquire(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
     raise AssertionError("missing DATABASE_URL must fail before scheduler lock acquisition")
 
 
+def _endpoint_port_leaks(node: Any, key: str | None) -> list[tuple[str | None, Any]]:
+    if isinstance(node, dict):
+        return [leak for child_key, child in node.items() for leak in _endpoint_port_leaks(child, str(child_key))]
+    if isinstance(node, list):
+        return [leak for child in node for leak in _endpoint_port_leaks(child, key)]
+    if node == "55433":
+        return [(key, node)]
+    if type(node) is int and node == 55433 and key is not None and "port" in key.lower():
+        return [(key, node)]
+    return []
+
+
+def _assert_no_endpoint_port_leak(rendered: str) -> None:
+    """Assert the fixture DB endpoint port ``55433`` did not leak into rendered evidence (#3326).
+
+    The bare-digit scan ``"55433" not in rendered`` flaked on the non-deterministic
+    ``run_once()`` leaves (``timing`` floats, microsecond timestamps, hex
+    ``pass_id``). Three rules replace it, none of which those leaves can trigger:
+
+    1. ``":55433"`` in the rendered text -- a leaked URI renders ``host:55433``.
+       Floats and hex ids carry no colon, ``isoformat`` timestamps have exactly two
+       digits after each colon, and the default ``json.dumps`` separator ``": "``
+       puts a space after a key's colon.
+    2. A string leaf equal to ``"55433"`` -- a port split out of the URI as text.
+       Timestamps and ids are longer strings that only contain the digits.
+    3. An int leaf equal to ``55433`` under a key whose lower-cased name contains
+       ``port`` (for a list element, the nearest enclosing dict key) -- a structured
+       ``{"port": 55433}`` endpoint. Integer timing counters (``total_cpu_ms``) are
+       not under a ``port`` key, floats are not ints, and ``bool`` is excluded so
+       ``"supported": true`` cannot match.
+    """
+    assert ":55433" not in rendered, "redacted DB endpoint port leaked into rendered evidence"
+    try:
+        parsed = json.loads(rendered)
+    except ValueError as exc:
+        raise AssertionError(f"endpoint leak check expects rendered JSON evidence: {exc}") from exc
+    leaks = _endpoint_port_leaks(parsed, None)
+    assert not leaks, f"redacted DB endpoint port leaked into rendered evidence: {leaks}"
+
+
+def _endpoint_port_leak_noise_evidence() -> dict[str, Any]:
+    return {
+        "started_at": "2026-11-22T10:15:26.755433Z",
+        "pass_id": "scheduler_2026112210_1b84f8755433",
+        "timing": {
+            "pass": {
+                "pass_id": "scheduler_2026112210_1b84f8755433",
+                "pass_started_at": "2026-11-22T10:15:26.755433Z",
+                "pass_finished_at": "2026-11-22T10:55:43.355433Z",
+                "total_wall_ms": 1.755433,
+                "python_time_ms": 155433.755433,
+                "total_cpu_ms": 55433,
+            },
+            "stages": [{"stage": "discover", "samples_ms": [55433, 1.755433], "call_count": 55433}],
+        },
+        "capabilities": {"supported": True, "transport_retries": [0, 1]},
+    }
+
+
+@pytest.mark.parametrize("sort_keys", [False, True])
+def test_endpoint_leak_port_anchor_ignores_timing_and_id_noise(sort_keys: bool) -> None:
+    rendered = json.dumps(_endpoint_port_leak_noise_evidence(), sort_keys=sort_keys)
+
+    assert "1.755433" in rendered
+    assert "26.755433Z" in rendered
+    assert "10:55:43.355433Z" in rendered
+    assert "1b84f8755433" in rendered
+    assert '"total_cpu_ms": 55433' in rendered
+    assert "[55433, 1.755433]" in rendered
+    _assert_no_endpoint_port_leak(rendered)
+
+
+@pytest.mark.parametrize("sort_keys", [False, True])
+@pytest.mark.parametrize(
+    "leaked_check",
+    [
+        {"selected": "postgresql://u:p@db.prod.example:55433/nhms"},
+        {"selected": "postgresql://user:pass@db.internal.example:55433/nhms"},
+        {"selected": "10.0.0.9:55433"},
+        {"selected": ":55433"},
+        {"endpoint": {"host": "[redacted]", "port": 55433}},
+        {"db_port": 55433},
+        {"endpoints": [{"host": "[redacted]", "port": 55433}]},
+        {"Ports": [8000, 55433]},
+        {"endpoint": {"host": "[redacted]", "port": "55433"}},
+        {"selected": "55433"},
+    ],
+    ids=[
+        "uri-prod",
+        "uri-internal",
+        "host-port",
+        "bare-colon-port",
+        "nested-int-port",
+        "db-port-key",
+        "endpoint-list-port",
+        "port-list-nearest-key",
+        "string-port-under-port-key",
+        "string-port-leaf",
+    ],
+)
+def test_endpoint_leak_port_anchor_catches_endpoint_port(leaked_check: dict[str, Any], sort_keys: bool) -> None:
+    evidence = _endpoint_port_leak_noise_evidence()
+    evidence["db_free_runtime"] = {"checks": {"NHMS_SCHEDULER_STATE_BACKEND": leaked_check}}
+    rendered = json.dumps(evidence, sort_keys=sort_keys)
+
+    with pytest.raises(AssertionError, match="redacted DB endpoint port leaked"):
+        _assert_no_endpoint_port_leak(rendered)
+
+
+def test_endpoint_leak_port_anchor_rejects_non_json_render() -> None:
+    with pytest.raises(AssertionError, match="expects rendered JSON evidence"):
+        _assert_no_endpoint_port_leak("{'port': 8000}")
+
+
 def test_db_free_scheduler_config_parses_canonical_env_matrix(monkeypatch: Any, tmp_path: Path) -> None:
     _roots, paths = _set_db_free_scheduler_env(monkeypatch, tmp_path)
 
@@ -39689,7 +39803,7 @@ def test_db_free_database_url_blocks_before_lock_or_factories(monkeypatch: Any, 
         (blocker["code"], blocker["field"]) for blocker in blockers
     }
     assert "supersecret" not in rendered
-    assert "55433" not in rendered
+    _assert_no_endpoint_port_leak(rendered)
 
 
 @pytest.mark.parametrize("selector_env", _DB_FREE_SELECTOR_ENV_KEYS)
@@ -39737,7 +39851,7 @@ def test_db_free_selector_uri_blocks_without_endpoint_leak(
     assert selector_check["file_selected"] is False
     assert "supersecret" not in rendered
     assert "db.prod.example" not in rendered
-    assert "55433" not in rendered
+    _assert_no_endpoint_port_leak(rendered)
     assert "token" not in rendered
     assert "postgresql" not in rendered.lower()
 
@@ -39908,7 +40022,7 @@ def test_db_free_required_path_db_uri_blocks_without_endpoint_leak(
     assert path_check["scheme"] == "[db-like]"
     assert "supersecret" not in rendered
     assert "db.prod.example" not in rendered
-    assert "55433" not in rendered
+    _assert_no_endpoint_port_leak(rendered)
     assert "token" not in rendered
     assert "postgresql" not in rendered.lower()
 
@@ -46421,7 +46535,7 @@ def test_db_free_file_lock_contention_collapses_unknown_mapping_payload(
     assert "node22-secret-token" not in rendered
     assert "postgresql" not in rendered.lower()
     assert "db.internal.example" not in rendered
-    assert "55433" not in rendered
+    _assert_no_endpoint_port_leak(rendered)
     assert str(config.lock_path) not in rendered
 
 
