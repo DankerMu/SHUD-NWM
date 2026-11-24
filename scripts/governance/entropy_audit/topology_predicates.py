@@ -3,11 +3,76 @@
 Split out of ``scripts/governance/audit_repo_entropy.py`` by #1842. Pure text
 predicates over a single line or clause: normalization, node-22 / database /
 writer mention tests, the relation-clause split, and the local-postgres and
-mirror drift line tests."""
+mirror drift line tests.
+
+#3358: the family covers the compute role by its codename and by its two host
+names (w3, w2). ``_topology_rewrite_compute_hosts`` turns host-name tokens of a
+raw line into the codename, so the database-writer predicates, which match the
+codename, read host-name lines unchanged. The compute-host local-PostgreSQL leg
+is ``_topology_line_has_compute_host_local_postgres_drift``."""
 
 from __future__ import annotations
 
 import re
+
+# A host name: lower case, on the raw text, not next to an ASCII letter, digit or
+# underscore, not after a dot, not before a dot or hyphen plus a letter or digit
+# (the first part of a dotted or hyphenated longer name). A run of host names
+# joined only by separators and spaces is one name.
+_TOPOLOGY_COMPUTE_HOST = r"(?<![A-Za-z0-9_.])w[23](?![A-Za-z0-9_])(?![.-][A-Za-z0-9])"
+_TOPOLOGY_COMPUTE_HOST_RUN = re.compile(
+    rf"{_TOPOLOGY_COMPUTE_HOST}"
+    rf"(?:(?:[\s/,、和]|(?<![A-Za-z])(?:and|or)(?![A-Za-z]))+{_TOPOLOGY_COMPUTE_HOST})*"
+)
+_TOPOLOGY_COMPUTE_HOST_MARKER = "compute_host_token"
+_TOPOLOGY_LOCAL_POSTGRES_TOKENS = (
+    "local postgres",
+    "local postgresql",
+    "local pg",
+    "本地 pg",
+    "本机 pg",
+    "本地 postgresql",
+    "本机 postgresql",
+)
+_TOPOLOGY_LOCAL_POSTGRES_ABSENCE = re.compile(
+    r"\bno\s+local\s+(?:postgres|postgresql|pg)\b"
+    r"|\bwithout\s+(?:a\s+)?local\s+(?:postgres|postgresql|pg)\b"
+    r"|\bnever\s+(?:connect|connects|use|uses|read|reads|query|queries|had|has|have|run|runs|host|hosts)\b"
+    r"|从不|没有本地|没有本机|无本地|无本机|不存在"
+)
+
+
+def _topology_rewrite_compute_hosts(line: str, name: str = "node-22") -> str:
+    """Replace each compute host name (or run of them) in a raw line with ``name``.
+
+    Must run before any lower-casing: an upper-case spelling is not a host name.
+    ``name`` gets a space on each side because ``\\b`` sees no boundary between a
+    CJK character and a letter; the topology normalisation collapses the spaces.
+    """
+    return _TOPOLOGY_COMPUTE_HOST_RUN.sub(f" {name} ", line)
+
+
+def _topology_line_has_compute_host_local_postgres_drift(line: str) -> bool:
+    """A clause naming a compute host together with a local PostgreSQL, not denied in that clause.
+
+    The hosts never had a local PostgreSQL, so the archived / stopped / rollback
+    wording that excuses the retired host's own PostgreSQL does not apply.
+    """
+    marked = _topology_rewrite_compute_hosts(line, _TOPOLOGY_COMPUTE_HOST_MARKER)
+    if marked == line:
+        return False
+    for clause in _topology_relation_clauses(marked):
+        if _TOPOLOGY_COMPUTE_HOST_MARKER not in clause:
+            continue
+        if not any(token in clause for token in _TOPOLOGY_LOCAL_POSTGRES_TOKENS):
+            continue
+        named = _topology_normalized(clause.replace(_TOPOLOGY_COMPUTE_HOST_MARKER, "node-22"))
+        if _topology_context_has_negative_node22_writer_boundary(named):
+            continue
+        if _TOPOLOGY_LOCAL_POSTGRES_ABSENCE.search(named):
+            continue
+        return True
+    return False
 
 
 def _topology_normalized(text: str) -> str:
@@ -57,6 +122,33 @@ def _topology_node22_db_writer_drift_clauses(text: str) -> tuple[str, ...]:
         and (
             _topology_mentions_writer(clause)
             or _topology_mentions_active_primary_database_authority(clause)
+        )
+        and not _topology_clause_is_slurm_accounting(clause)
+    )
+
+
+def _topology_clause_is_slurm_accounting(clause: str) -> bool:
+    # #3358 D5: Slurm's own accounting store on the control host is not an NHMS
+    # database, unless the clause also names PostgreSQL, a primary, NHMS or
+    # current/active/production state. Applies to every name of the role.
+    lowered = _topology_normalized(clause)
+    if not any(token in lowered for token in ("slurmdbd", "slurm accounting", "mariadb", "mysql")):
+        return False
+    if re.search(r"\bpg\b", lowered):
+        return False
+    return not any(
+        token in lowered
+        for token in (
+            "postgres",
+            "primary",
+            "主库",
+            "nhms",
+            "55432",
+            "55433",
+            "active",
+            "current",
+            "当前",
+            "production",
         )
     )
 
@@ -217,18 +309,7 @@ def _topology_line_has_node22_local_postgres_or_mirror_drift(line: str) -> bool:
     lowered = _topology_normalized(line)
     if ":55433" in lowered or " 55433" in lowered:
         return True
-    if _topology_mentions_node22(lowered) and any(
-        token in lowered
-        for token in (
-            "local postgres",
-            "local postgresql",
-            "local pg",
-            "本地 pg",
-            "本机 pg",
-            "本地 postgresql",
-            "本机 postgresql",
-        )
-    ):
+    if _topology_mentions_node22(lowered) and any(token in lowered for token in _TOPOLOGY_LOCAL_POSTGRES_TOKENS):
         return True
     if (
         "n22_dsn" in lowered

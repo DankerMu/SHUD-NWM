@@ -10,9 +10,10 @@ The database-writer check and the compute-host leg of the local-PostgreSQL check
 SHALL recognise the compute role by each of its names: the codename and the two
 host names (`w3`, `w2`).
 A host name SHALL be matched on the original text as a lower-case whole token
-that is not adjacent to an ASCII letter, digit or underscore and is not part of
-a dotted name. An upper-case spelling, a domain name and a
-longer word that contains the letters are not host names.
+that is not adjacent to an ASCII letter, digit or underscore, is not part of a
+dotted name and does not start a hyphenated longer name. An upper-case spelling,
+a domain name, a longer word that contains the letters and an identifier that
+starts with them are not host names.
 
 #### Scenario: Active node-22 DB writer assumptions are flagged
 
