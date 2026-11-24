@@ -130,7 +130,7 @@ Must preserve:
   tests/test_operator_action_status_closure.py tests/test_production_scheduler.py`;
   `uv run ruff check --no-cache .`;
   `openspec validate explicit-candidate-runtime-imports --strict --no-interactive`.
-- [ ] 3.5 node-27: the files of 3.4 plus `tests/test_orchestration_chain.py`,
+- [x] 3.5 node-27: the files of 3.4 plus `tests/test_orchestration_chain.py`,
   zero unexpected skips.
 
 ## Post-merge (not a task of this change)
