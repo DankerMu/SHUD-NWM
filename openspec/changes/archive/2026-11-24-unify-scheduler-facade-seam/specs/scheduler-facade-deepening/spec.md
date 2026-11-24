@@ -4,8 +4,8 @@
 
 Scheduler owner modules that call their own functions directly (`scheduler_state_decision`, `scheduler_state_failure`,
 `scheduler_lease`) SHALL observe a monkeypatch on `services.orchestrator.scheduler` only for names registered as facade
-seams, through one shared lookup. These three modules hold no facade binding, so this narrows, and does not
-contradict, the rule that owner modules read facade names at call time:
+seams, through one shared lookup. These three modules hold no facade binding, so no other facade name reaches them;
+owner modules that do hold a facade binding keep reading names off it at call time and are not covered here:
 - **Registered seams:** `_state_active_jobs`, `_object_manifest_is_missing`, `_default_owner_liveness_probe`,
   `_unlink_lock_file`, `_open_lock_parent_directory`, `_open_regular_guard_file`. A patch on any other facade name is
   not observed inside these owners.

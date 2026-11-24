@@ -149,7 +149,7 @@ Must preserve:
   tests/test_scheduler_lease_loop_root.py tests/test_production_scheduler.py`;
   `uv run ruff check --no-cache .`;
   `openspec validate unify-scheduler-facade-seam --strict --no-interactive`.
-- [ ] 3.4 node-27: the files of 3.3 plus `tests/test_orchestration_chain.py`,
+- [x] 3.4 node-27: the files of 3.3 plus `tests/test_orchestration_chain.py`,
   zero unexpected skips.
 
 ## Post-merge (not a task of this change)
