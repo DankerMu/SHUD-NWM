@@ -12,6 +12,11 @@ from psycopg2 import sql
 
 from apps.api.display_cache import clear_display_catalog_cache, stop_display_catalog_warmer
 
+# Opt-in only (#3349): re-exported here so tests can request it by name. It must
+# never become autouse -- the `git ls-files` scans over REPO_ROOT have to keep
+# honouring the caller's GIT_INDEX_FILE.
+from tests.git_fixture_env import isolated_git_environ  # noqa: F401
+
 
 @pytest.fixture(autouse=True)
 def isolate_timeseries_lifecycle_lock(

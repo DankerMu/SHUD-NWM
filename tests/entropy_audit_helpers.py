@@ -28,6 +28,7 @@ from collections.abc import Callable, Iterable
 from pathlib import Path
 
 from scripts.governance import audit_repo_entropy, write_entropy_baseline
+from tests.git_fixture_env import isolated_git_env, run_fixture_git
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BASELINE_DIR = REPO_ROOT / ".entropy-baseline"
@@ -203,7 +204,7 @@ def _run_entropy_baseline_writer_cli(
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+        env=isolated_git_env({"PYTHONDONTWRITEBYTECODE": "1"}),
     )
 
 
@@ -426,13 +427,7 @@ def _structural_growth_signal_details(
 
 
 def _git_rev_parse(root: Path, ref: str) -> str:
-    result = subprocess.run(
-        ["git", "rev-parse", ref],
-        cwd=root,
-        check=True,
-        text=True,
-        stdout=subprocess.PIPE,
-    )
+    result = run_fixture_git(root, "rev-parse", ref, text=True, stdout=subprocess.PIPE)
     return result.stdout.strip()
 
 
@@ -520,14 +515,14 @@ def _setup_agent_artifact_drift(root: Path) -> None:
     _write(root / ".dockerignore", "# intentionally incomplete\n")
     _write(root / "artifacts/leaked.txt", "generated\n")
     _init_git(root)
-    subprocess.run(["git", "add", "artifacts/leaked.txt"], cwd=root, check=True)
+    run_fixture_git(root, "add", "artifacts/leaked.txt")
 
 
 def _setup_placeholder_path_drift(root: Path) -> None:
     _init_git(root)
     _write(root / "docs" / "active.md", "Still mentions apps/web.\n")
     _write(root / "apps" / "web" / "README.md", "retired placeholder\n")
-    subprocess.run(["git", "add", "apps/web/README.md"], cwd=root, check=True)
+    run_fixture_git(root, "add", "apps/web/README.md")
 
 
 def _setup_clean_hard_gate_fixture(root: Path) -> None:
@@ -588,27 +583,23 @@ def _setup_clean_hard_gate_fixture(root: Path) -> None:
 
 def _track_generated_artifact(root: Path) -> None:
     _write(root / "artifacts" / "leaked.txt", "generated\n")
-    subprocess.run(["git", "add", "-f", "artifacts/leaked.txt"], cwd=root, check=True)
+    run_fixture_git(root, "add", "-f", "artifacts/leaked.txt")
 
 
 def _init_git(root: Path) -> None:
-    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    run_fixture_git(root, "init", "-q")
 
 
 def _commit_all(root: Path, message: str) -> None:
-    subprocess.run(["git", "add", "-A"], cwd=root, check=True)
-    subprocess.run(
-        [
-            "git",
-            "-c",
-            "user.name=Entropy Test",
-            "-c",
-            "user.email=entropy-test@example.invalid",
-            "commit",
-            "-q",
-            "-m",
-            message,
-        ],
-        cwd=root,
-        check=True,
+    run_fixture_git(root, "add", "-A")
+    run_fixture_git(
+        root,
+        "-c",
+        "user.name=Entropy Test",
+        "-c",
+        "user.email=entropy-test@example.invalid",
+        "commit",
+        "-q",
+        "-m",
+        message,
     )

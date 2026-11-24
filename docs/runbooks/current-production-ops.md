@@ -2,15 +2,24 @@
 
 最后更新：2026-09-23
 
-适用范围：node-27 active DB + ingest + display，node-22 Slurm/SHUD compute，
+适用范围：node-27 active DB + ingest + display，node-22（计算角色，现由 w3 / w2 承载）Slurm/SHUD compute，
 以及两者共享的 NFS object-store/published 数据面。
 
-> **node-22 执行说明**：node-22 活动 checkout 的共享 `.venv` 按 #1831 的运维决定
-> 长期保持 Python 3.12.7（原计划的 3.11 切换已取消），**禁止**在其中运行裸 `uv run` /
-> `uv sync`（会在 3.11 pin 下重建环境，已实测会打断成半拆状态）。本文中所有
-> node-22 活动操作一律使用精确活动解释器
+> **计算角色主机说明（2026-11-23 起）**：本文及其子页里的 "node-22" 指 NHMS **计算角色**，现由
+> LAN 主机 w3（控制）+ w2 承载；原主机 `210.77.77.22` 已退出 NWM 计算，仅作 rollback archive。
+> 路径、生产用户、unit 名、Slurm 分区与账户都没变，文中的计算侧命令在 w3 上以生产用户执行：
+> 凡是字面写着 `ssh -p 32099 frd_muziyao@210.77.77.22` 的命令，一律改为登录 w3 后执行，
+> **不得**在原主机上执行（那里的 journal 副本已经过期）。活动 checkout 的 `.venv` 经 NFS 被
+> w3 / w2 共用，"不得在活动 checkout 里重建环境"的禁令照旧适用。主机布局、存储、Slurm、部署与
+> 冷启动见 [`w2-w3-compute-topology.md`](w2-w3-compute-topology.md)。
+>
+> **计算角色执行说明**：活动 checkout `/scratch/frd_muziyao/NWM` 的 `.venv`（Python 3.11.x，与仓库
+> pin 一致）经 NFS 被 w3、w2 上的 Slurm 作业和 scheduler 定时器共用，**禁止**在其中运行裸
+> `uv run` / `uv sync`。本文中所有计算侧活动操作一律使用精确活动解释器
 > `/scratch/frd_muziyao/NWM/.venv/bin/python`（控制台入口用 `-m services.orchestrator.cli`）；
-> node-27 命令与孤立 rollback checkout 的 `uv sync` 不受此限。
+> 环境只在部署改了 `uv.lock` 时同步，且须 scheduler 定时器已停、没有在跑的 pass、Slurm 队列里
+> 没有 NWM 作业。原 node-22 主机上按 #1831 保留的 Python 3.12.7 环境已不是活动环境，那台主机上
+> **不要**运行任何 `uv` 命令。node-27 命令与孤立 rollback checkout 的 `uv sync` 不受此限。
 
 本文是当前生产值守手册。物理部署事实以
 [`ROLE_BOUNDARY.md`](../governance/ROLE_BOUNDARY.md) 的 "Current physical deployment"

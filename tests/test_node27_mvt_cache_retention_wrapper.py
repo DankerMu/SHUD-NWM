@@ -20,6 +20,7 @@ from typing import Any
 import pytest
 
 from scripts import node27_mvt_cache_retention as runner
+from tests.git_fixture_env import run_fixture_git
 from tests.node27_mvt_cache_retention_helpers import (
     _AGED,
     _ENV_EXAMPLE_PATH,
@@ -443,11 +444,8 @@ def test_an_explicit_summary_override_is_used_verbatim(tmp_path: Path) -> None:
 
 
 def _porcelain(repo: Path) -> str:
-    return subprocess.run(
-        ["git", "-C", str(repo), "status", "--porcelain", "--untracked-files=all"],
-        capture_output=True,
-        text=True,
-        check=True,
+    return run_fixture_git(
+        repo, "status", "--porcelain", "--untracked-files=all", capture_output=True, text=True
     ).stdout
 
 
@@ -468,7 +466,7 @@ def test_wrapper_refuses_a_relative_summary_log_or_lock_path(
     subprocess runs FROM the stand-in repo so both resolutions land there, and
     that repo's own `git status --porcelain` is the oracle."""
     repo = _wrapper_repo(tmp_path)
-    subprocess.run(["git", "init", "-q", str(repo)], capture_output=True, check=True)
+    run_fixture_git(repo, "init", "-q", capture_output=True)
     env_file = tmp_path / "runner.env"
     env_file.write_text("", encoding="utf-8")
     env_file.chmod(0o600)

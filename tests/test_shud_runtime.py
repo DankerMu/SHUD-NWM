@@ -1569,6 +1569,47 @@ def _forcing_shud_object_dir(object_root: Path) -> Path:
     return object_root / "forcing" / "gfs" / "2026050100" / "basin_v01" / "demo_model" / "shud"
 
 
+_TSD_FORC_STATION_HEADER = "ID\tLon\tLat\tX\tY\tZ\tFilename"
+# The declared station-index member carries longitude 100; the residual member
+# written by the tests below carries the sentinel longitude 777.
+_DECLARED_MEMBER_STATION_ROW = "1\t100\t30\t1\t1\t1\tforcing.csv"
+
+
+def _tsd_forc_station_rows(text: str) -> list[str]:
+    """Return the station rows of a staged ``.tsd.forc``: the non-empty lines after the header.
+
+    Assertions compare these rows instead of scanning the whole text, because
+    line 2 is the absolute ``model_input_dir`` and so carries pytest's numbered
+    tmp path. A missing header raises, so a format change cannot turn an
+    equality over the rows into a comparison of two empty lists.
+    """
+    lines = text.splitlines()
+    if _TSD_FORC_STATION_HEADER not in lines:
+        raise AssertionError(f".tsd.forc has no station header row {_TSD_FORC_STATION_HEADER!r}: {text!r}")
+    return [line for line in lines[lines.index(_TSD_FORC_STATION_HEADER) + 1 :] if line.strip()]
+
+
+def test_tsd_forc_station_rows_ignore_the_path_line_and_expose_the_residual_row() -> None:
+    path_line = "/tmp/pytest-of-x/pytest-3777/test_runtime_non_direct_grid_s0/workspace/input/alias-a"
+    residual_row = "1\t777\t30\t1\t1\t1\tforcing.csv"
+
+    def tsd_forc(*rows: str) -> str:
+        return "\n".join(["1 20260501", path_line, _TSD_FORC_STATION_HEADER, *rows]) + "\n"
+
+    assert _tsd_forc_station_rows(tsd_forc(_DECLARED_MEMBER_STATION_ROW)) == [_DECLARED_MEMBER_STATION_ROW]
+    assert _tsd_forc_station_rows(tsd_forc(residual_row)) == [residual_row]
+    assert _tsd_forc_station_rows(tsd_forc(_DECLARED_MEMBER_STATION_ROW, residual_row)) == [
+        _DECLARED_MEMBER_STATION_ROW,
+        residual_row,
+    ]
+    assert _tsd_forc_station_rows(tsd_forc(residual_row)) != [_DECLARED_MEMBER_STATION_ROW]
+    assert _tsd_forc_station_rows(tsd_forc(_DECLARED_MEMBER_STATION_ROW, residual_row)) != [
+        _DECLARED_MEMBER_STATION_ROW
+    ]
+    with pytest.raises(AssertionError, match="no station header row"):
+        _tsd_forc_station_rows(f"1 20260501\n{path_line}\n{_DECLARED_MEMBER_STATION_ROW}\n")
+
+
 def _write_residual_index_member(object_root: Path, member: str, *, longitude: int) -> dict[str, str]:
     """Drop a second station-index member into an already-written package tree.
 
@@ -2114,8 +2155,7 @@ def test_runtime_non_direct_grid_staging_leaves_residual_index_member_alive(
 
     assert residue.is_file()
     tsd_forc = (input_dir / "alias-a" / "alias-a.tsd.forc").read_text(encoding="utf-8")
-    assert "1\t100\t30\t1\t1\t1\tforcing.csv" in tsd_forc
-    assert "777" not in tsd_forc
+    assert _tsd_forc_station_rows(tsd_forc) == [_DECLARED_MEMBER_STATION_ROW]
 
 
 @pytest.mark.parametrize(
@@ -2229,8 +2269,7 @@ def _assert_staged_index_member_content(
     assert (staged_shud_dir / CANONICAL_SHUD_FORCING_INDEX_BASENAME).is_file()
     assert (staged_shud_dir / LEGACY_SHUD_FORCING_INDEX_BASENAME).is_file()
     tsd_forc = (model_input_dir / "alias-a.tsd.forc").read_text(encoding="utf-8")
-    assert "1\t100\t30\t1\t1\t1\tforcing.csv" in tsd_forc
-    assert "777" not in tsd_forc
+    assert _tsd_forc_station_rows(tsd_forc) == [_DECLARED_MEMBER_STATION_ROW]
     assert (model_input_dir / "forcing.csv").exists()
     assert repository.statuses == []
 

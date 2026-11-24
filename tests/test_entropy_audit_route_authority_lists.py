@@ -27,6 +27,10 @@ from tests.entropy_audit_helpers import (
     _write,
 )
 
+# #3349: git runs here (in-process or in children inheriting os.environ) only
+# against tmp fixture repositories, never REPO_ROOT, so the whole module opts in.
+pytestmark = pytest.mark.usefixtures("isolated_git_environ")
+
 
 def test_archive_route_token_without_complete_marker_remains_budget_counted(
     tmp_path: Path,

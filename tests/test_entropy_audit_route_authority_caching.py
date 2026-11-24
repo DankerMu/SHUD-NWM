@@ -27,6 +27,7 @@ from tests.entropy_audit_helpers import (
 )
 
 
+@pytest.mark.usefixtures("isolated_git_environ")
 def test_route_authority_current_runbook_same_list_item_redirect_context_is_per_mention(
     tmp_path: Path,
 ) -> None:
@@ -52,6 +53,7 @@ def test_route_authority_current_runbook_same_list_item_redirect_context_is_per_
     assert redirect["allowlist_key"] == "stale-display-route-token:m26-route-consolidation-or-redirect"
 
 
+@pytest.mark.usefixtures("isolated_git_environ")
 @pytest.mark.parametrize(
     "text",
     [
@@ -68,6 +70,7 @@ def test_route_authority_current_runbook_same_list_item_no_delimiter_redirect_co
     _assert_forecast_active_and_hydro_redirect(_route_authority_findings(tmp_path))
 
 
+@pytest.mark.usefixtures("isolated_git_environ")
 def test_route_authority_current_runbook_same_route_mixed_contexts_keep_active_finding(
     tmp_path: Path,
 ) -> None:
@@ -90,6 +93,7 @@ def test_route_authority_current_runbook_same_route_mixed_contexts_keep_active_f
     assert active["gate_eligible"] is False
 
 
+@pytest.mark.usefixtures("isolated_git_environ")
 @pytest.mark.parametrize(
     ("token", "line"),
     [
@@ -138,6 +142,7 @@ def test_route_authority_current_runbook_same_token_redirect_first_mixed_line_ke
     _assert_unallowlisted_budget_counted_report_only_finding(by_state["unallowlisted"])
 
 
+@pytest.mark.usefixtures("isolated_git_environ")
 @pytest.mark.parametrize(
     "line",
     [
@@ -162,6 +167,7 @@ def test_route_authority_current_runbook_active_line_with_unrelated_allowlist_wo
     assert finding["gate_eligible"] is False
 
 
+@pytest.mark.usefixtures("isolated_git_environ")
 @pytest.mark.parametrize(
     "context_line",
     [
@@ -187,6 +193,7 @@ def test_route_authority_current_runbook_adjacent_allowlist_context_does_not_all
     assert finding["allowlist_key"] is None
 
 
+@pytest.mark.usefixtures("isolated_git_environ")
 def test_route_authority_legacy_hydro_met_token_uses_route_boundaries(
     tmp_path: Path,
 ) -> None:
@@ -210,6 +217,7 @@ def test_route_authority_legacy_hydro_met_token_uses_route_boundaries(
     assert finding["allowlist_state"] == "unallowlisted"
 
 
+@pytest.mark.usefixtures("isolated_git_environ")
 def test_route_authority_m26_references_preserve_expected_allowlist_keys(
     tmp_path: Path,
 ) -> None:
@@ -242,6 +250,7 @@ def test_route_authority_current_repo_has_no_archived_openspec_change_findings()
     assert archived == []
 
 
+@pytest.mark.usefixtures("isolated_git_environ")
 def test_route_authority_large_line_matches_route_tokens_without_prefix_scan_shape(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -267,6 +276,7 @@ def test_route_authority_large_line_matches_route_tokens_without_prefix_scan_sha
     assert call_count == len(tokens)
 
 
+@pytest.mark.usefixtures("isolated_git_environ")
 def test_route_authority_duplicate_tokens_dedupe_before_expensive_context_work(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -294,6 +304,7 @@ def test_route_authority_duplicate_tokens_dedupe_before_expensive_context_work(
     assert redirect_span_call_count <= 1
 
 
+@pytest.mark.usefixtures("isolated_git_environ")
 def test_route_authority_duplicate_tokens_precompute_semantic_work_per_unique_context(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -343,6 +354,7 @@ def test_route_authority_duplicate_tokens_precompute_semantic_work_per_unique_co
     assert clause_analysis_call_count == 1
 
 
+@pytest.mark.usefixtures("isolated_git_environ")
 def test_route_authority_list_structural_context_is_cached_per_list_item(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -370,6 +382,7 @@ def test_route_authority_list_structural_context_is_cached_per_list_item(
     assert list_item_end_call_count <= 2
 
 
+@pytest.mark.usefixtures("isolated_git_environ")
 def test_route_authority_paragraph_structural_context_is_cached_per_range(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -403,6 +416,7 @@ def test_route_authority_paragraph_structural_context_is_cached_per_range(
     assert paragraph_call_count == 1
 
 
+@pytest.mark.usefixtures("isolated_git_environ")
 def test_route_authority_blockquote_paragraph_structural_context_is_cached_per_range(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -436,6 +450,7 @@ def test_route_authority_blockquote_paragraph_structural_context_is_cached_per_r
     assert paragraph_call_count == 1
 
 
+@pytest.mark.usefixtures("isolated_git_environ")
 def test_route_authority_route_free_large_markdown_does_not_build_governing_context(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -477,6 +492,7 @@ def test_route_authority_current_repo_has_no_unallowlisted_findings_in_current_d
     assert findings == []
 
 
+@pytest.mark.usefixtures("isolated_git_environ")
 def test_route_authority_legacy_alias_coverage_includes_all_current_redirect_forms(
     tmp_path: Path,
 ) -> None:
@@ -503,6 +519,7 @@ def test_route_authority_legacy_alias_coverage_includes_all_current_redirect_for
         assert token in descriptions
 
 
+@pytest.mark.usefixtures("isolated_git_environ")
 def test_route_authority_expanded_aliases_do_not_scan_frontend_e2e_unless_old_token(
     tmp_path: Path,
 ) -> None:
@@ -542,6 +559,7 @@ def test_route_authority_expanded_aliases_do_not_scan_frontend_e2e_unless_old_to
     )
 
 
+@pytest.mark.usefixtures("isolated_git_environ")
 def test_route_authority_expanded_aliases_do_not_scan_app_route_source_of_truth(
     tmp_path: Path,
 ) -> None:
@@ -564,6 +582,7 @@ def test_route_authority_expanded_aliases_do_not_scan_app_route_source_of_truth(
     assert _route_authority_findings(tmp_path) == []
 
 
+@pytest.mark.usefixtures("isolated_git_environ")
 def test_route_authority_expanded_aliases_do_not_scan_frontend_fixtures(
     tmp_path: Path,
 ) -> None:
@@ -582,6 +601,7 @@ def test_route_authority_expanded_aliases_do_not_scan_frontend_fixtures(
     assert _route_authority_findings(tmp_path) == []
 
 
+@pytest.mark.usefixtures("isolated_git_environ")
 def test_route_authority_skips_generated_artifact_roots(tmp_path: Path) -> None:
     _write(tmp_path / "artifacts" / "generated.md", "Open /overview for current proof.\n")
 

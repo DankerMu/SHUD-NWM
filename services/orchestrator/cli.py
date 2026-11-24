@@ -67,7 +67,18 @@ from .retention_frontier import (
     read_latest_pass_frontier,
 )
 from .retention_frontier import max_age_from_env as frontier_max_age_from_env
-from .scheduler import MAX_CONTINUOUS_JSON_PASSES, ProductionScheduler, ProductionSchedulerConfig
+from .scheduler import (
+    MAX_CONTINUOUS_JSON_PASSES,
+    ProductionScheduler,
+    ProductionSchedulerConfig,
+    _scheduler_root_check,
+)
+
+# Evidence-root verdicts the cleanup hands on to the receipt read instead of
+# rejecting (#3302), and only for a path the same check places under the
+# workspace: "not_found" keeps the disclosed ``evidence_dir_missing`` (#1503),
+# and "not_writable" is irrelevant to a reader. Every other reason rejects.
+_CLEANUP_EVIDENCE_ROOT_READABLE_REASONS = frozenset({"not_found", "not_writable"})
 
 
 def _publish_tiles(*, cycle_id: str) -> dict[str, object]:
@@ -126,12 +137,44 @@ def _cleanup_frontier(*, now: datetime) -> tuple[FrontierReadResult, str | None]
     otherwise never say *where* the CLI looked — and ``WORKSPACE_ROOT``'s
     relative default under a wrong working directory reads exactly like
     genuinely missing evidence. ``None`` means the directory itself could not
-    be resolved.
+    be resolved, or was rejected by the evidence-root check below.
+
+    Construction tolerates an evidence root outside the workspace and leaves
+    that verdict to the pass's root preflight, which the cleanup never runs
+    (issue #3302). So the derived root gets the pass's own single-field
+    ``evidence_root`` check (must exist, under the workspace, no symlink final
+    component, safe path components) -- but not the rest of the preflight: a
+    lock root, an approved-roots list and a service role say nothing about
+    whether the evidence can be trusted. Any blocker is
+    ``evidence_dir_unresolved`` except ``not_found`` and ``not_writable`` on a
+    path the same check places under the workspace: those fall through to the
+    receipt read, so a missing directory still reports ``evidence_dir_missing``
+    with its path and a read-only one is read as usual. The check runs inside
+    the guard too, so an exception from it also fails closed.
     """
+    unresolved = FrontierReadResult(status="unavailable", reason="evidence_dir_unresolved")
     try:
-        evidence_dir = ProductionSchedulerConfig().evidence_dir
-    except Exception:  # noqa: BLE001 - derivation failure must fail closed, not crash
-        return FrontierReadResult(status="unavailable", reason="evidence_dir_unresolved"), None
+        config = ProductionSchedulerConfig()
+        evidence_dir = config.evidence_dir
+        check, blocker = _scheduler_root_check(
+            "evidence_root",
+            config._evidence_root_preflight_path,
+            (),
+            required=True,
+            must_exist=True,
+            allow_create=False,
+            require_approved_root=False,
+            require_under_workspace=True,
+            workspace_root=config._workspace_root_preflight_path,
+            evidence_safe_paths=True,
+            raw_value=getattr(config, "_evidence_root_raw_preflight_path", config._evidence_root_preflight_path),
+        )
+        if blocker is not None and not (
+            blocker.get("reason") in _CLEANUP_EVIDENCE_ROOT_READABLE_REASONS and check.get("under_workspace") is True
+        ):
+            return unresolved, None
+    except Exception:  # noqa: BLE001 - derivation or verdict failure must fail closed, not crash
+        return unresolved, None
     result = read_latest_pass_frontier(evidence_dir, now=now, max_age=frontier_max_age_from_env())
     return result, str(evidence_dir)
 
@@ -211,7 +254,8 @@ def _run_cleanup(*, retention_days: int | None, dry_run: bool) -> dict[str, obje
             "forced_dry_run": True,
             "receipt_path": frontier.receipt_path,
             # Always present, null only when the directory could not be
-            # resolved: the blocker shape must not vary by reason (#1503).
+            # resolved or failed the evidence-root check (#3302): the blocker
+            # shape must not vary by reason (#1503).
             "evidence_dir": evidence_dir,
         }
     return payload

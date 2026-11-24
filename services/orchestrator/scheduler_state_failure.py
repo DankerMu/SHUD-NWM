@@ -24,10 +24,10 @@ from packages.common.source_identity import normalize_source_id
 from packages.common.storage import validate_object_path
 from services.orchestrator.retry import classify_failure
 from services.orchestrator.retry_identity import RETRY_ATTEMPT_FLOOR_FIELD
+from services.orchestrator.scheduler_facade_seam import facade_seam
 from services.orchestrator.scheduler_init_state_match import EVIDENCE_REDACTION_PLACEHOLDERS
 from services.orchestrator.scheduler_state_common import (
     _evidence_safe,
-    _facade_seam,
     _first_state_datetime,
     _forecast_cycle_manifest_uri,
     _is_raw_manifest_object_uri,
@@ -1362,7 +1362,7 @@ def _artifact_uri_missing_status(candidate: SchedulerCandidateLike, artifact_uri
             # ``_object_manifest_is_missing`` is a scheduler-facade monkeypatch seam: a
             # patch on the facade is read here at call time, and a patch on this module
             # still wins while the facade is unpatched.
-            missing = _facade_seam("_object_manifest_is_missing", _object_manifest_is_missing)(candidate, value)
+            missing = facade_seam("_object_manifest_is_missing", _object_manifest_is_missing)(candidate, value)
             if not missing and _object_artifact_target_is_not_a_file(candidate, value):
                 # #1394: "present" from the existence probe only means the store
                 # could stat something there.  A directory squatting on a file key

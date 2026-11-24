@@ -3,6 +3,14 @@
 本页是当前生产值守手册的 §3 开篇、§3.1 开篇、§3.1.1 两节、§3.1.3 分册（#1103 拆分，正文逐字保留）。
 索引与全部分册入口见 [`../current-production-ops.md`](../current-production-ops.md)。
 
+> **计算角色主机说明**：本页的 "node-22" 指计算角色，现由 w3 / w2 承载；字面的
+> `ssh … 210.77.77.22` 命令一律登录 w3 后执行，**不得**在原主机上执行。详见
+> [`current-production-ops.md`](../current-production-ops.md) 顶部横幅。
+>
+> 在新主机上重新 bring-up 计算角色时，另见
+> [`w2-w3-compute-topology.md`](../w2-w3-compute-topology.md) 第 8 节：`loginctl enable-linger`、
+> slurmdbd 与 association、`compute.host.env` 没有模板、无出网主机的 apt / chrony 中继。
+
 ## 3. 如何拉起和确认服务
 
 ### 3.1 下载 / 调度器 / ingest

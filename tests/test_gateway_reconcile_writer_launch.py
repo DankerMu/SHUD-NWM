@@ -21,6 +21,11 @@ from tests.gateway_reconcile_writer_helpers import (
     _round14_clean_writer_checkout,
     _round20_write_execution_binding,
 )
+from tests.git_fixture_env import run_fixture_git
+
+# #3349: git runs here (in-process or in children inheriting os.environ) only
+# against tmp fixture repositories, never REPO_ROOT, so the whole module opts in.
+pytestmark = pytest.mark.usefixtures("isolated_git_environ")
 
 
 def test_round18_launcher_binds_receipt_roots_lock_and_sanitizes_ambient_environment(
@@ -200,7 +205,6 @@ def test_round16_commit_snapshot_closes_post_check_worktree_switch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import hashlib
-    import subprocess
     from pathlib import Path
 
     from services.orchestrator import file_orchestration_migration as migration_module
@@ -230,54 +234,34 @@ def test_round16_commit_snapshot_closes_post_check_worktree_switch(
         "(Path.cwd() / 'writer.txt').read_text(encoding='utf-8'), encoding='utf-8')\n",
         encoding="utf-8",
     )
-    subprocess.run(("git", "add", "services"), cwd=checkout, check=True)
-    subprocess.run(
-        (
-            "git",
-            "-c",
-            "user.name=Round16 Test",
-            "-c",
-            "user.email=round16@example.invalid",
-            "commit",
-            "-q",
-            "-m",
-            "writer A executable",
-        ),
-        cwd=checkout,
-        check=True,
+    run_fixture_git(checkout, "add", "services")
+    run_fixture_git(
+        checkout,
+        "-c",
+        "user.name=Round16 Test",
+        "-c",
+        "user.email=round16@example.invalid",
+        "commit",
+        "-q",
+        "-m",
+        "writer A executable",
     )
-    generation_a = subprocess.run(
-        ("git", "rev-parse", "HEAD"),
-        cwd=checkout,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
+    generation_a = run_fixture_git(checkout, "rev-parse", "HEAD", capture_output=True, text=True).stdout.strip()
     (checkout / "writer.txt").write_text("B\n", encoding="utf-8")
-    subprocess.run(("git", "add", "writer.txt"), cwd=checkout, check=True)
-    subprocess.run(
-        (
-            "git",
-            "-c",
-            "user.name=Round16 Test",
-            "-c",
-            "user.email=round16@example.invalid",
-            "commit",
-            "-q",
-            "-m",
-            "writer B",
-        ),
-        cwd=checkout,
-        check=True,
+    run_fixture_git(checkout, "add", "writer.txt")
+    run_fixture_git(
+        checkout,
+        "-c",
+        "user.name=Round16 Test",
+        "-c",
+        "user.email=round16@example.invalid",
+        "commit",
+        "-q",
+        "-m",
+        "writer B",
     )
-    generation_b = subprocess.run(
-        ("git", "rev-parse", "HEAD"),
-        cwd=checkout,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    subprocess.run(("git", "checkout", "--detach", "--quiet", generation_a), cwd=checkout, check=True)
+    generation_b = run_fixture_git(checkout, "rev-parse", "HEAD", capture_output=True, text=True).stdout.strip()
+    run_fixture_git(checkout, "checkout", "--detach", "--quiet", generation_a)
 
     root = tmp_path / "journal"
     workspace = tmp_path / "workspace"
@@ -358,7 +342,7 @@ def test_round16_commit_snapshot_closes_post_check_worktree_switch(
     )
     replacement_runtime.chmod(0o700)
     os.replace(replacement_runtime, resolved_runtime)
-    subprocess.run(("git", "checkout", "--detach", "--quiet", generation_b), cwd=checkout, check=True)
+    run_fixture_git(checkout, "checkout", "--detach", "--quiet", generation_b)
     continue_child.set()
     thread.join(timeout=10)
     assert not thread.is_alive()

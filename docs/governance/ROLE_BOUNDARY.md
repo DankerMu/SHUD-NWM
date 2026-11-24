@@ -15,6 +15,15 @@ full API and is not a production deployment category.
 
 **Current physical deployment (2026-06-21):**
 
+- The compute role — `node-22` in the bullets below and in every identifier — is
+  hosted since 2026-11-23 on two dedicated LAN hosts behind node-27: `w3` (Slurm
+  controller, compute, scheduler timers, Slurm Gateway, scheduler journal) and
+  `w2` (compute, `workspace/runs`). The host `210.77.77.22` is retired from NHMS
+  compute and kept only as a rollback archive. Every boundary stated for node-22
+  in this document applies to both hosts. The one exception is the local PG
+  `:55433` sentence below: it is historical, archived/stopped, do-not-connect
+  material about the retired host itself. Host layout:
+  [`w2-w3-compute-topology.md`](../runbooks/w2-w3-compute-topology.md).
 - node-22 runs the Slurm/SHUD compute wrapper. It does **NOT** connect to any
   active database. The local PG `:55433` instance on node-22 is historical,
   archived, and stopped as of the 2026-06-29 retirement receipt — do not
@@ -50,7 +59,8 @@ Current verification oracle route:
 - node-27: live active DB, ingest, display API, frontend, readonly boundary, and
   cross-plane identity receipts.
 - node-22: Slurm scheduling/SHUD compute behavior only when sbatch, Slurm
-  gateway, SHUD runtime, or scheduler behavior changes.
+  gateway, SHUD runtime, or scheduler behavior changes. Run it on `w3`, the
+  compute role's control host.
 
 Local checks are required but do not replace node-27 live DB/display receipts.
 

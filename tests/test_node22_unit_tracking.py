@@ -4,7 +4,9 @@
 the read-only receipt `docs/runbooks/receipts/2026-10-16-node22-live-units-snapshot.md`,
 and `infra/systemd/node22/MANIFEST.json` lists every file deployed on node-22
 (`{deployed_relative_path, tracked_path, sha256}`), including the fourteen
-top-level oneshot units tracked at `infra/systemd/<name>` (twelve until #3121).
+top-level oneshot units tracked at `infra/systemd/<name>` (twelve until #3121)
+and, since #3345, the two journal-backup units that exist only on w3, the
+compute role's control host.
 
 The rule logic lives in small module-level functions so the synthetic line
 cases at the bottom exercise exactly the code the real scan uses. Stdlib only,
@@ -54,9 +56,10 @@ TOP_LEVEL_ONESHOTS = tuple(
     )
     for suffix in ("service", "timer")
 )
+W3_ONLY_UNITS = ("nhms-w3-journal-backup.service", "nhms-w3-journal-backup.timer")
 EXPECTED_ENTRIES = frozenset(
     {(rel, NODE22_TRACKED_PREFIX + rel) for rel in NODE22_DEPLOYED_FILES}
-    | {(name, f"infra/systemd/{name}") for name in TOP_LEVEL_ONESHOTS}
+    | {(name, f"infra/systemd/{name}") for name in TOP_LEVEL_ONESHOTS + W3_ONLY_UNITS}
 )
 
 _ENVIRONMENT_TOKEN = re.compile(r"""(?:[^\s"']+|"[^"]*"|'[^']*')+""")

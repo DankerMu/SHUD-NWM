@@ -461,7 +461,9 @@ class UnitHost(FakeHost):
 
 
 @pytest.fixture
-def runtime_checkout(tmp_path: Path) -> Path:
+def runtime_checkout(tmp_path: Path, isolated_git_environ: None) -> Path:
+    # #3349: the production Host() runs /usr/bin/git with the inherited environment,
+    # both here and in every test that uses this checkout; isolate it in test scope.
     runtime = tmp_path.resolve() / "runtime"
     runtime.mkdir(mode=0o700)
     (runtime / ".gitignore").write_text(".venv/\n")

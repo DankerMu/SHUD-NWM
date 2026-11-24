@@ -22,6 +22,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.git_fixture_env import run_fixture_git
 from tests.production_ops_runbook import combined_text as production_ops_text
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -137,16 +138,19 @@ def test_mutation_ignored_pin_semantics_is_red(tmp_path: Path) -> None:
     state is simulated in a tmp git repo only; the real worktree is never touched."""
     repo = tmp_path / "repo"
     repo.mkdir()
-    subprocess.run(["git", "init", "-q", str(repo)], cwd=REPO_ROOT, check=True, capture_output=True)
+    run_fixture_git(repo, "init", "-q", capture_output=True)
     pin = repo / ".python-version"
     pin.write_bytes(EXPECTED_PIN_BYTES)
-    subprocess.run(["git", "add", ".python-version"], cwd=repo, check=True, capture_output=True)
+    run_fixture_git(repo, "add", ".python-version", capture_output=True)
     (repo / ".gitignore").write_text(".python-version\n", encoding="utf-8")
 
     def ls_files_tracked(path: Path) -> bool:
-        completed = subprocess.run(
-            ["git", "ls-files", "--error-unmatch", "--", str(path)],
-            cwd=repo,
+        completed = run_fixture_git(
+            repo,
+            "ls-files",
+            "--error-unmatch",
+            "--",
+            str(path),
             check=False,
             capture_output=True,
             text=True,
@@ -154,9 +158,12 @@ def test_mutation_ignored_pin_semantics_is_red(tmp_path: Path) -> None:
         return completed.returncode == 0
 
     def check_ignore_no_index(path: Path) -> bool:
-        completed = subprocess.run(
-            ["git", "check-ignore", "--no-index", "--", str(path)],
-            cwd=repo,
+        completed = run_fixture_git(
+            repo,
+            "check-ignore",
+            "--no-index",
+            "--",
+            str(path),
             check=False,
             capture_output=True,
             text=True,
