@@ -967,7 +967,11 @@ def test_collector_coverage_at_head() -> None:
     ]
     assert not missing, f"collector found no site for: {missing}"
     assert forms.get(("scheduler", "owner-dispatch"), 0) >= 1
-    assert {wrapper for _, _, wrapper in result.wrapper_sites} == {"_scheduler_call", "__getattr__"}
+    assert {(path, wrapper) for path, _, wrapper in result.wrapper_sites} == {
+        ("services/orchestrator/__init__.py", "__getattr__"),
+        ("services/orchestrator/scheduler_candidate_execution_evidence.py", "_scheduler_call"),
+        ("services/orchestrator/scheduler_candidate_manifest.py", "_scheduler_call"),
+    }
     seam_sites = collections.Counter((r.path, r.name) for r in result.reads if r.form == "seam-literal")
     assert seam_sites == collections.Counter(
         {
@@ -995,6 +999,27 @@ def test_relative_facade_imports_are_reads_at_head() -> None:
     assert expected - reads == set()
 
 
+# Every top-level tree that may import a facade (#3366 acceptance 3); kept
+# apart from ``SCAN_ROOTS`` so that dropping a root there goes red here.
+REQUIRED_SCAN_ROOTS = ("services/orchestrator", "tests", "apps", "scripts", "workers", "packages")
+
+
+def test_scan_reads_every_required_root_and_skips_node_modules(tmp_path: Path) -> None:
+    probe = "from services.orchestrator import chain\nchain.{}\n"
+    expected = {}
+    for index, root in enumerate(REQUIRED_SCAN_ROOTS):
+        path = f"{root}/probe.py"
+        expected[path] = f"_no_such_name_3366_root_{index}"
+        (tmp_path / root).mkdir(parents=True)
+        (tmp_path / path).write_text(probe.format(expected[path]), encoding="utf-8")
+    vendored = tmp_path / "apps" / "frontend" / "node_modules" / "pkg" / "probe.py"
+    vendored.parent.mkdir(parents=True)
+    vendored.write_text(probe.format("_no_such_name_3366_node_modules"), encoding="utf-8")
+
+    result = scan_tree.__wrapped__(tmp_path)  # uncached: keeps the repo-root cache entry untouched
+    assert {r.path: r.name for r in result.reads} == expected
+
+
 PACKAGE_INIT = "services/orchestrator/__init__.py"
 
 
@@ -1019,15 +1044,40 @@ def package_getattr_forwarded_names(tree: ast.Module) -> set[str]:
     }
     assert len(tables) == 1, f"__getattr__ tests {parameter!r} against {sorted(tables)}; expected one table"
     (table,) = tables
-    literals = [
-        node.value
-        for node in tree.body
-        if isinstance(node, ast.Assign)
-        and [t.id for t in node.targets if isinstance(t, ast.Name)] == [table]
-        and isinstance(node.value, ast.Set)
-    ]
-    assert len(literals) == 1, f"{table} is not bound once to a module-level set literal in {PACKAGE_INIT}"
-    names = {_str_constant(element) for element in literals[0].elts}
+    # Every module-level binding (assignment, annotated or augmented assignment,
+    # any other store or delete) and every method call on the table counts, so
+    # a later ``|=`` or ``.update(...)`` cannot leave a stale literal behind.
+    bindings: list[ast.AST] = []
+    stack: list[ast.AST] = list(tree.body)
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            continue
+        if isinstance(node, ast.Name) and node.id == table and not isinstance(node.ctx, ast.Load):
+            bindings.append(node)
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == table
+        ):
+            bindings.append(node)
+        stack.extend(ast.iter_child_nodes(node))
+    assert len(bindings) == 1, (
+        f"{table} is bound or mutated {len(bindings)} times at module level in {PACKAGE_INIT} "
+        f"(lines {sorted(b.lineno for b in bindings)}); expected one set literal"
+    )
+    literal = next(
+        (
+            node.value
+            for node in tree.body
+            if (isinstance(node, ast.Assign) and node.targets == [bindings[0]])
+            or (isinstance(node, ast.AnnAssign) and node.target is bindings[0])
+        ),
+        None,
+    )
+    assert isinstance(literal, ast.Set), f"{table} is not bound to a set literal in {PACKAGE_INIT}"
+    names = {_str_constant(element) for element in literal.elts}
     assert None not in names, f"{table} holds a non-string element"
     return {name for name in names if name is not None}
 
