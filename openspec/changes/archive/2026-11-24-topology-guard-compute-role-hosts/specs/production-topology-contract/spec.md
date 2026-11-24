@@ -9,11 +9,11 @@ surfaces.
 The database-writer check SHALL recognise the compute role by each of its names:
 the codename and the two host names (`w3`, `w2`).
 The local-PostgreSQL check SHALL have a compute-host leg that recognises the two
-host names. Its other legs describe the retired host and its rollback mirror and
-SHALL keep recognising the codename only.
+host names. Its other legs SHALL NOT recognise the host names.
 A host name SHALL be matched on the original text as a lower-case whole token
 that is not adjacent to an ASCII letter, digit or underscore, is not part of a
-dotted name and is not part of a hyphenated longer name. An upper-case spelling,
+dotted name and is not part of a hyphenated longer name, the ssh alias form
+`nwm-` plus host name aside. An upper-case spelling,
 a domain name, a longer word that contains the letters and a hyphenated
 identifier that contains them are not host names.
 
@@ -39,8 +39,8 @@ identifier that contains them are not host names.
 - **WHEN** a clause of an active surface names a compute host, by host name,
   together with a local PostgreSQL
 - **THEN** the guard reports a finding unless that same clause denies that such
-  a database exists or forbids its use; wording that only calls it non-current
-  or inactive is not a denial
+  a database exists or forbids its use; wording that only calls it inactive or
+  outside today's topology is not a denial
 - **AND** the archived, stopped or rollback wording that excuses a reference to
   the retired host's own PostgreSQL does not excuse it
 
