@@ -24,6 +24,7 @@ Do not hand-edit this file.
 | node-27 | `ssh -p 32099 nwm@210.77.77.27`，`/home/nwm/NWM` | active primary PG + ingest + display API(:8080) + 前端；自己读 NFS 上计算节点的产物 | **本机 PG :55432**（自写自读） |
 
 - 计算节点只能经 node-27 ProxyJump 到达（本机 ssh 别名 `nwm-w3` / `nwm-w2`），生产用户 `frd_muziyao`；w3 = Slurm 控制器 + scheduler 定时器 + slurm-gateway + journal，w2 = 计算 + `workspace/runs`。
+- 生产用户的 user manager 只允许在 w3 上运行：家目录经 NFS 共享到 w2，**不要**以生产用户登录 w2（ssh / `su -` / linger），否则 w2 会再起一套 scheduler 定时器。
 - 计算节点的 `/ghdc/data/nwm/` 与 27 的 `/home/ghdc/nwm/` 是同一份 NFS，零延迟无需 rsync；basin 源数据在 `/home/ghdc/nwm/Basins`。
 - `node-22` / `node22` 是计算角色的历史代号：脚本名、unit 名、env key、receipt schema id、规格名里的它指 w3 / w2，不改名。存储布局、Slurm、部署与冷启动细则见 `docs/runbooks/w2-w3-compute-topology.md`。
 - 原 node-22 主机（`210.77.77.22`）自 2026-11-23 起退出 NWM 计算，仅作 rollback archive：不要在其上跑 NWM 作业；本机 :55433 已 archived/stopped，**不要连**。

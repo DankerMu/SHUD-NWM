@@ -77,6 +77,11 @@ No runtime behavior changes.
   `nhms-mounts-ensure` units present on both hosts; the runbook describes the
   deploy steps and reproduces the two unit files.
 - #3344, #3236, yd-viewer docs, storage purchases.
+- Host-side hardening found while writing the runbook (a mechanical guard
+  against a production-user manager on `w2`, the runs mount missing from
+  `w3`'s slurmd drop-in, no failure alert on the journal-backup unit, one
+  deployed drop-in outside the manifest). The runbook states each as a known
+  gap; the changes to the hosts are tracked in a follow-up issue.
 - The umbrella bookkeeping line in
   `openspec/changes/redesign-orchestration-core/tasks.md` (issue scope item 6)
   rides in that change's final push (PR #3352), because that push archives the
@@ -85,13 +90,14 @@ No runtime behavior changes.
 ## Impact
 
 - Specs: `production-topology-contract`, `production-ops-readiness`,
-  `python-environment-truth`.
+  `python-environment-truth`, `node22-unit-tracking` (manifest entry count).
 - Docs: `instructions/agents/shared.md`, `CLAUDE.md`, `AGENTS.md`,
   `docs/governance/ROLE_BOUNDARY.md`, `docs/runbooks/current-production-ops.md`,
   `docs/runbooks/two-node-deployment-overview.md`,
   `docs/runbooks/node22-control-plane-manual-recovery.md`,
-  `docs/runbooks/production-ops/service-bringup.md`, the new runbook and
-  receipts.
+  `docs/runbooks/production-ops/service-bringup.md`, a one-line pointer on
+  the `production-ops/` pages that carry literal ssh commands to the retired
+  host, the new runbook and receipts.
 - Infra: `infra/systemd/nhms-w3-journal-backup.{service,timer}`,
   `infra/systemd/node22/MANIFEST.json`.
 - Tests: `tests/test_node22_entrypoint_invariant.py` (instruction contract

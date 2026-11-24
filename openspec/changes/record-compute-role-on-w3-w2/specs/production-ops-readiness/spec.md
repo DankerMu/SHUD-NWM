@@ -52,6 +52,9 @@ historical node-22 writer topology.
   in the runbook or its pages is run on `w3` instead and not on the retired
   host
 - **AND** the banner SHALL link `docs/runbooks/w2-w3-compute-topology.md`
+- **AND** every `production-ops/` page that contains a literal ssh command to
+  `210.77.77.22` SHALL carry a one-line pointer at its top to that banner,
+  because alerts link those pages directly
 
 #### Scenario: current runbook frames cross-reference docs safely
 

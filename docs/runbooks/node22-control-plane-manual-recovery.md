@@ -24,7 +24,8 @@ display API 在 `display_readonly` 模式下对控制面动作返回 409；`POST
 
 - 活动 checkout 的 `.venv`（Python 3.11.x）经 NFS 被 w3、w2 上的 Slurm 作业和 scheduler 定时器
   共用：**禁止** `uv sync` 与裸 `uv run`，系统 Python 也不是替代；原 node-22 主机上按 #1831 保留的
-  3.12.7 环境已不是活动环境，那里**不要**运行任何 `uv` 命令。一律在 w3 上用活动解释器 + `-m`：
+  3.12.7 环境已不是活动环境，那里**不要**运行任何 `uv` 命令。环境只在部署改了 `uv.lock` 时同步，且须
+  scheduler 定时器已停、没有在跑的 pass、Slurm 队列里没有 NWM 作业。一律在 w3 上用活动解释器 + `-m`：
 
   ```bash
   cd /scratch/frd_muziyao/NWM

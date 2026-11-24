@@ -47,7 +47,10 @@ copied from `.workplans/3345/migration/` other than the two lock receipts.
   units; retention as deployed and why the extra-roots window stays at 14;
   deploy steps at a pass boundary; cold-boot order and manual starts;
   bring-up gaps (`loginctl enable-linger`, slurmdbd, `compute.host.env` has no
-  template); rollback to the retired host. The cold-boot section states that
+  template); rollback to the retired host; the rule that the production
+  user's systemd manager runs on `w3` only; the `uv.lock` step of a deploy;
+  the gap that `w3`'s slurmd drop-in does not require the runs mount. The
+  cold-boot section states that
   no cold boot has been exercised in the final layout. The two
   `nhms-mounts-ensure` unit files are reproduced in the runbook.
 - [ ] 2.2 Receipts under `docs/runbooks/receipts/`:
@@ -88,6 +91,11 @@ copied from `.workplans/3345/migration/` other than the two lock receipts.
   journal back first.
 - [ ] 3.4 `docs/runbooks/production-ops/service-bringup.md`: pointer to the
   bring-up gaps section of the new runbook.
+- [ ] 3.5 One-line pointer to the index banner at the top of every
+  `docs/runbooks/production-ops/*.md` page that contains a literal ssh
+  command to `210.77.77.22`.
+- [ ] 3.6 `instructions/agents/shared.md` (and regenerated roots): do not log
+  in to `w2` as the production user.
 
 ## 4. Evidence Floor
 

@@ -53,6 +53,16 @@ role, not the retired host.
 - **AND** no current doc presents `w3` or `w2` as an NHMS database host, an
   ingest writer, or a display host
 
+#### Scenario: Only the control host runs the production user's units
+
+- **WHEN** agent instructions or the host-layout runbook describe access to
+  `w2`
+- **THEN** they state that the production user's systemd user manager runs
+  on `w3` only, because the home directory holding the user units is shared
+  with `w2` over NFS
+- **AND** they forbid logging in to `w2` as the production user and enabling
+  linger for it there
+
 #### Scenario: Retired-host material keeps its meaning
 
 - **WHEN** a doc or spec speaks of node-22 local PostgreSQL, port `:55433`, or

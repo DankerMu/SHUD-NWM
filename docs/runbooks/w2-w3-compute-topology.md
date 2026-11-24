@@ -22,6 +22,12 @@ archive。容量、行数、耗时一律以实测为准，本文不记绝对数�
 - 计算角色的全部边界照旧适用于 w3 和 w2：**不连任何活的 NHMS 库**、不是任何 NHMS 库的写入方（w3 上为 slurmdbd 跑的 MariaDB 只是 Slurm
   记账库，不算）、活动操作只用
   精确解释器、生产变更只在 scheduler pass 边界做。
+- **生产用户的 systemd user manager 只允许在 w3 上运行。** `/users/frd_muziyao` 经 NFS 共享到 w2，
+  里面的 user 单元和 `*.wants` 链接在 w2 上同样可见，单元里没有主机条件：一旦 w2 上为生产用户起了
+  user manager（以生产用户 ssh 登录、`su -`、`loginctl enable-linger`），scheduler 定时器、
+  slurm-gateway、journal-backup 会在 w2 上再起一套，与 w3 并发跑 pass。w2 上生产用户只通过 Slurm
+  作业出现；要看文件用运维账号。2026-11-24 实测 w2 上生产用户没有 user manager、没有 linger、
+  没有进程；目前没有机械防护，只有这条纪律。
 - 两台主机上除 NHMS 外还有 yd producer（每小时 cron，`/scratch/frd_muziyao/yd`），与 NHMS
   共用 Slurm 账户：**不要按用户取消 Slurm 作业**。
 
@@ -53,9 +59,9 @@ w2 上的进程走 NFS，两边会同时拿到同一把锁。实测见
 - 所有 NFS 挂载 `vers=4.2,hard,_netdev`；scratch 与 runs 两处挂载在两台主机上都带 `nofail`，
   其中导出方自己的 loopback 挂载另带
   `x-systemd.requires=nfs-server.service,x-systemd.after=nfs-server.service`。
-- scratch 导出带 `no_root_squash`（切换 runs 时加上的，迁移记录里没有留下原因；去掉之前先确认
-  root 身份的 slurmd 是否依赖它）；runs 导出与 node-27 的导出是默认的 root squash——所以在
-  `/ghdc/data` 下读生产用户的私有文件必须以生产用户身份读，root 会被拒。
+- scratch 导出带 `no_root_squash`：runs 嵌套挂在 scratch 导出里面，root 要能穿过导出查到这个嵌套
+  挂载点，所以这两台专用主机的 root 被信任；去掉它，runs 会挂不上。runs 导出没有这个选项。实测
+  root 在 `/ghdc/data` 下读不了生产用户的私有文件，必须以生产用户身份读。
 - 两台主机 nfsd `threads=64`（`/etc/nfs.conf.d/nhms.conf`）。
 - **改 `/etc/fstab` 后先 `systemctl daemon-reload` 再挂载/卸载。** 迁移时 systemd 用旧 fstab
   生成的 `scratch.mount` 把 LV 又挂回了 `/scratch`，盖住了 loopback 挂载；处置是停 slurmd、
@@ -71,15 +77,20 @@ w2 上的进程走 NFS，两边会同时拿到同一把锁。实测见
   分区 `CPU` 含两台主机，`MaxArraySize=2001`。
 - slurmd 有 `RequiresMountsFor` drop-in（`/etc/systemd/system/slurmd.service.d/10-nhms-mounts.conf`）：
   w3 要求 `/scratch/frd_muziyao`、`/ghdc/data`；w2 另外要求 runs、`/users/frd_muziyao`、
-  `/volume/nwm`。挂载不在，slurmd 不起，节点不接作业。
+  `/volume/nwm`。所列挂载不在，slurmd 不起，节点不接作业。
+- **已知缺口：w3 的 drop-in 不含 runs。** w2 不在时，w3 的 runs 挂载因 `nofail` 被跳过，slurmd
+  照常起来；这时落在 w3 上的作业会把结果写进挂载点下面的本地空目录，等 runs 后来挂上就被盖住。
+  w3 重启后、接作业前，先确认 `findmnt /scratch/frd_muziyao/nhms-prod/workspace/runs` 的来源是
+  w2 的导出。
 - **w3 ⇄ w2 互相依赖**：w3 上的作业要用 w2 导出的 runs，w2 要用 w3 导出的 scratch。任一台
   停机，另一台上的作业会挂在 `hard` 挂载上等待，而不是失败。
 
 ## 4. 定时器与单元
 
-用户单元（`frd_muziyao`，已 `loginctl enable-linger`）与迁移前同名，清单与校验值见
-`infra/systemd/node22/MANIFEST.json`，漂移探针 `scripts/node22_unit_drift_check.py`。只在 w3
-上存在的两项：
+用户单元（`frd_muziyao`，w3 上已 `loginctl enable-linger`）与迁移前同名，清单与校验值见
+`infra/systemd/node22/MANIFEST.json`，漂移探针 `scripts/node22_unit_drift_check.py`。单元文件在
+共享家目录里，w2 上也看得见，但只允许 w3 运行它们（见第 1 节）。迁移后新增、只在 w3 上运行的
+两项：
 
 - `nhms-w3-journal-backup.service` / `.timer`（仓库副本在 `infra/systemd/`）：每小时 `:40`
   把 scheduler journal `rsync -a --delete --max-delete=5000` 到
@@ -119,6 +130,8 @@ scheduler 与 retention 单元读 `infra/env/compute.scheduler-dbfree.env`：
 - `NHMS_RETENTION_EXTRA_ROOTS_DAYS=14`：**不要跟着调小**——这个窗口同时管 NFS copyback 根
   （node-27 读取的那一份），缩短它等于缩短对外可见的历史。
 - w2 的 runs 卷按当前产出速度能放约两周，余量不大；判断一律 `df -h` 实测。
+- 两个窗口都处于启用状态（`NHMS_RETENTION_ENABLED=true`、`NHMS_RETENTION_EXTRA_ROOTS_ENABLED=true`，
+  `NHMS_RETENTION_DRY_RUN=false`）。
 
 ## 6. 部署（pass 边界、ff-only）
 
@@ -130,17 +143,21 @@ w3 访问 github.com 不稳定，部署走本地打 `git bundle`、经 ssh 送�
    失败时 `git bundle verify` 后从 bundle 取 `refs/remotes/origin/master`；确认目标提交是
    HEAD 的后代且在 `origin/master` 上。
 3. 等一个 pass 在跑（`nhms-compute-scheduler.service` 为 `activating`），停
-   `nhms-compute-scheduler.timer`，等该 pass 结束，`git merge --ff-only <目标>`，立刻重启定时器。
+   `nhms-compute-scheduler.timer`，等该 pass 结束，`git merge --ff-only <目标>`，立刻重启定时器（这次部署改了 `uv.lock` 时先做 3a）。
+   - 3a（仅当 `git diff --name-only <旧 HEAD> <目标> -- uv.lock` 非空）：合入后**先不要**重启定时器。
+     等 `squeue` 里没有 `nhms_*` 作业（yd 的作业不带这个前缀，不用等），以生产用户在 checkout 里
+     执行 `uv sync --frozen --all-extras --dev`（w3 的环境在迁移时就是这样建的），确认
+     `.venv/bin/python -V` 仍是 3.11.x，再重启定时器。w3 上还没有演练过带 `uv.lock` 变更的部署。
 4. 等新代码上的第一个 pass 结束，看 evidence、`scripts/node22_scheduler_stall_health.py` 和
    `systemctl --user --failed`。
 
 **绝不**切换生产 checkout 的分支、手改工作树、`git stash pop`。`.venv` 经 NFS 被两台主机上的
-Slurm 作业和定时器共用：日常禁止在这里同步或重建环境；只有部署改了 `uv.lock` 时才同步，且须
-定时器已停、没有在跑的 pass、Slurm 队列里没有 NWM 作业。
+Slurm 作业和定时器共用：日常禁止在这里同步或重建环境；只有部署改了 `uv.lock` 时才同步（步骤 3a），且须定时器已停、
+没有在跑的 pass、Slurm 队列里没有 NWM 作业。
 
 ## 7. 冷启动
 
-**两台主机在最终布局下还没有做过冷启动演练**（上次开机都早于 2026-11-23 的切换）。下面是按
+**两台主机在最终布局下还没有做过冷启动演练**（`uptime -s`：w3 2026-11-20T07:50Z、w2 2026-11-20T07:40Z，都早于 2026-11-23 的切换）。下面是按
 单元依赖推出的预期顺序和检查清单，第一次真实重启时要逐项核对并回填本节。
 
 预期：
@@ -153,7 +170,8 @@ Slurm 作业和定时器共用：日常禁止在这里同步或重建环境；�
 
 检查：
 
-- `findmnt -t nfs4`：w3 三处、w2 五处挂载齐全，且 `/scratch` 本身**不是**挂载点。
+- `findmnt -t nfs4`：w3 三处、w2 五处挂载齐全，`/scratch` 本身**不是**挂载点，且 runs 的来源在两台
+  主机上都是 w2 的导出（w3 的 slurmd 不会因为缺 runs 而拒绝启动，见第 3 节）。
 - `sinfo -N`：两个节点 `idle`；`systemctl is-active slurmctld slurmdbd slurmd munge nfs-server`。
 - 生产用户 `systemctl --user --failed` 为空，`systemctl --user list-timers` 里每个 `nhms-*`
   定时器（scheduler、journal-backup、两个 health、file-provider-refresh 与各 retention /
@@ -164,7 +182,8 @@ Slurm 作业和定时器共用：日常禁止在这里同步或重建环境；�
 
 ## 8. Bring-up 时踩到的缺口
 
-- 必须 `loginctl enable-linger frd_muziyao`，否则没有登录会话时 user 单元不跑。
+- **只在 w3 上** `loginctl enable-linger frd_muziyao`（否则没有登录会话时 user 单元不跑）；w2 上
+  **禁止**给生产用户开 linger（见第 1 节）。
 - slurmdbd 需要单独装库、建集群与账户 association；`AccountingStorageEnforce` 打开后，没有
   association 的用户提交即被拒。
 - `infra/env/compute.host.env` 没有模板（`infra/env/` 下没有对应的 `.example`），迁移时是从
