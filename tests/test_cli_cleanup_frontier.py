@@ -637,3 +637,188 @@ def test_cleanup_dry_run_lists_the_workspace_slurm_log_lane(
     ] == [(workspace, lane.name, "slurm_log_cycle_aged_out")]
     assert payload["deleted"] == []
     assert lane.is_dir()
+
+
+# ---------------------------------------------------------------------------
+# I9 (#3302) - the cleanup applies the pass-side evidence-root verdict.
+#
+# The DB-free config construction tolerates an evidence root outside the
+# workspace and leaves the verdict to the pass's root preflight, which the
+# cleanup never runs. A fresh receipt in an untrusted directory must not unlock
+# deletion: the directory is treated as unresolved (null ``evidence_dir``) and
+# the cleanup is forced into dry-run.
+# ---------------------------------------------------------------------------
+def _seed_bound_and_expired_cycle(store: Path, evidence_dir: Path) -> Path:
+    """Fresh receipt whose bound lies above an expired cycle, so ``ok`` deletes it."""
+    bound = (NOW - timedelta(days=20)).replace(minute=0, second=0, microsecond=0)
+    expired = _write_cycle(store, "raw", "gfs", _cycle_name(NOW - timedelta(days=40)))
+    _write_receipt(evidence_dir, "pass-1", started_at=NOW, retention=_retention_block(bound))
+    return expired
+
+
+def _assert_rejected_and_kept(payload: dict[str, object], expired: Path) -> None:
+    state = {
+        "dry_run": payload["dry_run"],
+        "deleted": payload["counts"]["deleted"],
+        "expired_cycle_exists": expired.exists(),
+        "frontier_blocker": payload.get("frontier_blocker"),
+    }
+    assert payload["dry_run"] is True, state
+    assert payload["frontier_blocker"]["reason"] == "evidence_dir_unresolved", state
+    assert payload["frontier_blocker"]["evidence_dir"] is None, state
+    assert expired.exists(), state
+
+
+def _assert_ok_and_deleted(payload: dict[str, object], expired: Path) -> None:
+    state = {
+        "dry_run": payload["dry_run"],
+        "deleted": payload["counts"]["deleted"],
+        "frontier_blocker": payload.get("frontier_blocker"),
+    }
+    assert "frontier_blocker" not in payload, state
+    assert payload["dry_run"] is False, state
+    assert payload["frontier_source"] == "receipt:scheduler_pass", state
+    assert payload["counts"]["deleted"] == 1, state
+    assert not expired.exists(), state
+
+
+@pytest.mark.parametrize("entrypoint", ["click", "argparse"])
+def test_evidence_root_outside_workspace_is_not_trusted(
+    env: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    entrypoint: str,
+) -> None:
+    outside = tmp_path / "outside-evidence"
+    outside.mkdir()
+    monkeypatch.setenv("NHMS_SCHEDULER_EVIDENCE_ROOT", str(outside))
+    expired = _seed_bound_and_expired_cycle(env["store"], outside)
+
+    run = cli._click_main if entrypoint == "click" else cli._argparse_main
+    rc = run(["cleanup", "--retention-days", "14", "--execute"])
+
+    assert rc == 0
+    _assert_rejected_and_kept(json.loads(capsys.readouterr().out.strip()), expired)
+
+
+def test_evidence_root_linked_to_outside_is_not_trusted(
+    env: dict[str, Path], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    outside = tmp_path / "outside-evidence"
+    outside.mkdir()
+    link = env["workspace"] / "scheduler" / "linked-evidence"
+    link.symlink_to(outside, target_is_directory=True)
+    monkeypatch.setenv("NHMS_SCHEDULER_EVIDENCE_ROOT", str(link))
+    expired = _seed_bound_and_expired_cycle(env["store"], outside)
+
+    payload = cli._run_cleanup(retention_days=14, dry_run=False)
+
+    _assert_rejected_and_kept(payload, expired)
+
+
+def test_workspace_behind_a_linked_parent_is_still_trusted(
+    env: dict[str, Path], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    real_parent = tmp_path / "real-parent"
+    (real_parent / "workspace" / "scheduler" / "evidence").mkdir(parents=True)
+    link_parent = tmp_path / "link-parent"
+    link_parent.symlink_to(real_parent, target_is_directory=True)
+    workspace = link_parent / "workspace"
+    evidence_dir = workspace / "scheduler" / "evidence"
+    monkeypatch.setenv("WORKSPACE_ROOT", str(workspace))
+    monkeypatch.setenv("NHMS_SCHEDULER_EVIDENCE_ROOT", str(evidence_dir))
+    expired = _seed_bound_and_expired_cycle(env["store"], evidence_dir)
+
+    payload = cli._run_cleanup(retention_days=14, dry_run=False)
+
+    _assert_ok_and_deleted(payload, expired)
+
+
+def test_cleanup_needs_no_lock_root_roots_list_or_role(
+    env: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for name in ("NHMS_SCHEDULER_LOCK_ROOT", "NHMS_SCHEDULER_ALLOWED_ROOTS", "NHMS_SERVICE_ROLE"):
+        monkeypatch.delenv(name, raising=False)
+    expired = _seed_bound_and_expired_cycle(env["store"], env["evidence_dir"])
+
+    payload = cli._run_cleanup(retention_days=14, dry_run=False)
+
+    _assert_ok_and_deleted(payload, expired)
+
+
+def test_evidence_root_linked_inside_workspace_is_not_trusted(
+    env: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = env["workspace"] / "scheduler" / "other-evidence"
+    target.mkdir()
+    link = env["workspace"] / "scheduler" / "linked-evidence"
+    link.symlink_to(target, target_is_directory=True)
+    monkeypatch.setenv("NHMS_SCHEDULER_EVIDENCE_ROOT", str(link))
+    expired = _seed_bound_and_expired_cycle(env["store"], target)
+
+    payload = cli._run_cleanup(retention_days=14, dry_run=False)
+
+    _assert_rejected_and_kept(payload, expired)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root writes regardless of mode bits")
+def test_read_only_evidence_dir_in_workspace_is_read(env: dict[str, Path]) -> None:
+    expired = _seed_bound_and_expired_cycle(env["store"], env["evidence_dir"])
+    original_mode = env["evidence_dir"].stat().st_mode & 0o7777
+    env["evidence_dir"].chmod(0o555)
+    try:
+        payload = cli._run_cleanup(retention_days=14, dry_run=False)
+    finally:
+        env["evidence_dir"].chmod(original_mode)
+
+    _assert_ok_and_deleted(payload, expired)
+
+
+def test_missing_evidence_root_outside_workspace_is_unresolved(
+    env: dict[str, Path], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("NHMS_SCHEDULER_EVIDENCE_ROOT", str(tmp_path / "outside-missing"))
+    expired = _write_cycle(env["store"], "raw", "gfs", _cycle_name(NOW - timedelta(days=40)))
+
+    payload = cli._run_cleanup(retention_days=14, dry_run=False)
+
+    _assert_rejected_and_kept(payload, expired)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root traverses regardless of mode bits")
+def test_outside_root_under_a_locked_parent_is_unresolved(
+    env: dict[str, Path], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    locked_parent = tmp_path / "locked-parent"
+    evidence_dir = locked_parent / "evidence"
+    evidence_dir.mkdir(parents=True)
+    monkeypatch.setenv("NHMS_SCHEDULER_EVIDENCE_ROOT", str(evidence_dir))
+    expired = _seed_bound_and_expired_cycle(env["store"], evidence_dir)
+    original_mode = locked_parent.stat().st_mode & 0o7777
+    locked_parent.chmod(0o000)
+    try:
+        payload = cli._run_cleanup(retention_days=14, dry_run=False)
+    finally:
+        locked_parent.chmod(original_mode)
+
+    _assert_rejected_and_kept(payload, expired)
+
+
+def test_evidence_root_check_raising_fails_closed(
+    env: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[str] = []
+
+    def _raising_check(field_name: str, *args: object, **kwargs: object) -> None:
+        calls.append(field_name)
+        raise RuntimeError("evidence-root check exploded")
+
+    # Patched where _cleanup_frontier looks the name up (cli's module global).
+    monkeypatch.setattr(cli, "_scheduler_root_check", _raising_check)
+    expired = _seed_bound_and_expired_cycle(env["store"], env["evidence_dir"])
+
+    payload = cli._run_cleanup(retention_days=14, dry_run=False)
+
+    assert calls == ["evidence_root"]
+    _assert_rejected_and_kept(payload, expired)
