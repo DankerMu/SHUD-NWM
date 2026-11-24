@@ -219,10 +219,10 @@ Retry jobs SHALL maintain continuity with the original run while obtaining fresh
 #### Scenario: Retry gets new job_id
 
 - **WHEN** a retry job is created
-- **THEN** a new `job_id` (UUID) SHALL be generated for the retry job
+- **THEN** a new `job_id` SHALL be generated for the retry job as the deterministic string `<base>_retry_<n>`, where
+  `n` is the retry attempt and is at least 1
+- **THEN** when a `job_id` carries more than one `_retry_<n>` suffix, the last suffix SHALL be the authoritative attempt
 - **THEN** the relationship between original and retry jobs SHALL be traceable via `pipeline_event.details_json.previous_job_id`
-
----
 
 ### Requirement: Missing upstream artifacts SHALL demote failure-state retries to a stable repair-eligible blocker
 
