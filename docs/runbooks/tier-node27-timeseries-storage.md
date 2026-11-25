@@ -2908,15 +2908,14 @@ uv run --no-sync python scripts/node27_issue1895_readonly_accept_bind.py \
 ```
 
 C3 is a direct, machine-bound current publication/display receipt for this #1895
-invocation, not a generic twelve-lane aggregation.  The generic full-scope
-aggregator remains fail-closed and may run only against a producer-complete bundle;
-an empty directory can never satisfy it and is intentionally absent from G7.  C4
+invocation.  (The generic multi-lane aggregator that once stood beside it was
+deleted in #3221 and is not part of G7.)  C4
 (browser e2e on `/` and `/ops`) still runs first and remains its own dedicated
 receipt lane.  The direct C3 owner then binds its PASS receipt to C4's exact bytes,
 C4's strict GFS/IFS job-log facts, current loopback API identities, readonly DB
 rows, source-scoped registry completeness, and the G1 valid-times baseline.  This
-proves the current published display chain without claiming node-22 scheduling or
-a generic twelve-lane bundle.  This rollout waives nothing in C1-C4.  The dedicated
+proves the current published display chain without claiming node-22 scheduling.
+This rollout waives nothing in C1-C4.  The dedicated
 C4 display receipt lane and independent #1970 river-click P95 lane are executable fences below. The legacy
 monitoring lane was retired by #3202 and was never a C4 substitute. C4 invokes the five-key lane with the
 current frontend/API origins and current C4 basin/segment pins, then accepts
