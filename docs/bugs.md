@@ -434,10 +434,21 @@ river-click config.
 ### BUG-20260527-013: Retry/cancel produced mock Slurm job IDs, not live Slurm receipts
 
 ```yaml
-status: open
+status: resolved
 owner_area: slurm_gateway
 github_issue: https://github.com/DankerMu/SHUD-NWM/issues/3246
+resolved_by: >-
+  #3246: the scheduler's HTTP gateway probe refuses a gateway whose health body
+  names a backend other than `slurm` (unhealthy, not submit-capable,
+  `SLURM_GATEWAY_UNAVAILABLE` with a reason naming the reported backend), so a
+  scheduler configured for the `slurm` backend does not submit through a
+  gateway on the mock backend; `real` is no longer a backend name anywhere in
+  the scheduler. The limits that remain are listed below.
 evidence:
+  - services/orchestrator/scheduler_preflight.py
+  - services/orchestrator/scheduler_gateway.py
+  - tests/test_production_scheduler.py
+  - docs/runbooks/slurm-gateway-preflight.md
   - artifacts/mvp-e2e/qhh-mvp-e2e-20260527T004907Z/api/api_retry_cycle_gfs_2026052618_operator.json
   - artifacts/mvp-e2e/qhh-mvp-e2e-20260527T004907Z/api/api_cancel_cycle_gfs_2026052618_operator.json
   - artifacts/mvp-e2e/qhh-mvp-e2e-20260527T004907Z/db/final_pipeline_jobs_snapshot.log
@@ -483,9 +494,23 @@ retest_command: |-
 `services/slurm_gateway/config.py` still defaults the gateway backend to
 `mock`. A live retry receipt must use the real Slurm backend, show an
 accounting-visible Slurm job id, and write back job/status/log/accounting.
-Production units set `SLURM_GATEWAY_BACKEND=slurm`, but nothing refuses the
-mock default in a production role, and `real`/`slurm` spellings disagree
-between the gateway and the scheduler; #3246 owns both.
+
+Issue #3246 chose the guard at the scheduler's probe, not a refusal at gateway
+start-up: a scheduler configured for the `slurm` backend treats a remote
+gateway whose health body names any other backend as unhealthy and not
+submit-capable, and the pass carries `SLURM_GATEWAY_UNAVAILABLE` with the
+reported backend in the reason. A health body without a backend name is judged
+on health and binaries as before, and the in-process mock probe used in
+development and tests is unchanged. The backend vocabulary is `mock` and
+`slurm`; a scheduler configured with `real` (or any other name) takes the
+in-process path, where `create_gateway` rejects the name, so its gateway check
+is unhealthy. Known limits: a scheduler whose own environment loses
+`SLURM_GATEWAY_BACKEND` takes the in-process path and never asks the remote
+gateway (it loses the HTTP probe and the cohort split, while its submissions
+still go to the gateway URL); the gateway still starts on the mock backend when
+its environment says nothing, and the scheduler no longer submits through it;
+the control API can still mount the gateway routes in-process on the mock
+backend in development.
 
 ### BUG-20260527-014: `/ops` browser feedback for logs and retry was incomplete
 

@@ -105,7 +105,7 @@ def _gateway_self_reference_blocker(
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     """Pure config comparison (no network) for self-referential gateway URLs.
 
-    Rule: a gateway URL is an *invalid* self-reference when (a) a real Slurm
+    Rule: a gateway URL is an *invalid* self-reference when (a) the ``slurm``
     backend is configured, and (b) its host is a loopback / unspecified /
     localhost name, and (c) its (defaulted) port equals this service's own
     control-API listen port. That combination means the "gateway" points back at
@@ -122,7 +122,7 @@ def _gateway_self_reference_blocker(
     endpoint = {"host": host, "port": effective_port}
     if host is None:
         return None, endpoint
-    if backend not in {"real", "slurm"}:
+    if backend != "slurm":
         return None, endpoint
     is_loopback_name = host in _GATEWAY_SELF_HOSTS
     if not is_loopback_name:
@@ -145,7 +145,9 @@ def _gateway_self_reference_blocker(
     return None, endpoint
 
 
-def _interpret_gateway_health(payload: Mapping[str, Any], *, mode: str) -> dict[str, Any]:
+def _interpret_gateway_health(
+    payload: Mapping[str, Any], *, mode: str, required_backend: str | None = None
+) -> dict[str, Any]:
     """Map a gateway ``/api/v1/slurm/health`` body to a probe verdict.
 
     Prefers the Lane 1 structure (top-level ``healthy: bool`` + per-binary
@@ -153,6 +155,13 @@ def _interpret_gateway_health(payload: Mapping[str, Any], *, mode: str) -> dict[
     flips the verdict to unhealthy. Falls back to the legacy ``status`` field
     (``healthy``/``ok``) when the new fields are absent, so a gateway still on
     the old shape is never wrongly fenced or wrongly passed.
+
+    ``required_backend`` (passed by the HTTP probe as ``slurm``): a body whose
+    own ``backend`` value, stripped, differs from it is unhealthy, so a remote
+    gateway on the mock backend is never submit-capable. A body without a
+    ``backend`` key is judged as before; the ``mode`` fallback of the returned
+    ``backend`` is never compared. Without it (the in-process path) the
+    reported backend is not checked.
     """
 
     binaries = payload.get("binaries")
@@ -181,6 +190,14 @@ def _interpret_gateway_health(payload: Mapping[str, Any], *, mode: str) -> dict[
         is_healthy = top_healthy
     else:
         is_healthy = top_healthy and binaries_ok
+
+    if required_backend is not None and "backend" in payload:
+        reported_backend = str(payload["backend"]).strip()
+        if reported_backend != required_backend:
+            is_healthy = False
+            reasons.append(
+                f"gateway reports backend '{reported_backend}', not the required '{required_backend}' backend"
+            )
 
     return {
         "mode": mode,

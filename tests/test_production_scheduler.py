@@ -25763,7 +25763,7 @@ def test_gateway_self_reference_blocker_classifies_numeric_ipv4_loopback_hosts(
     blocker, endpoint = scheduler_module._gateway_self_reference_blocker(
         f"http://{host}:8000",
         8000,
-        backend="real",
+        backend="slurm",
     )
 
     assert endpoint == {"host": host, "port": 8000}
@@ -47825,7 +47825,7 @@ def _gateway_config(tmp_path: Path, *, db_free: bool | None = None, **kwargs: An
 
 def _healthy_gateway_probe(_config: ProductionSchedulerConfig) -> dict[str, Any]:
     return {
-        "mode": "real",
+        "mode": "slurm",
         "backend": "slurm",
         "version": "24.05",
         "healthy": True,
@@ -47840,7 +47840,7 @@ def test_slurm_gateway_check_healthy_records_mode_without_credentials(tmp_path: 
     checks, blockers = scheduler_module._slurm_gateway_check(config, probe=_healthy_gateway_probe)
 
     assert blockers == []
-    assert checks["mode"] == "real"
+    assert checks["mode"] == "slurm"
     assert checks["endpoint"]["host"] == "gw-node22.internal"
     # Credentials in the URL must never reach evidence.
     serialized = json.dumps(checks)
@@ -47852,7 +47852,7 @@ def test_slurm_gateway_check_unavailable_blocks(tmp_path: Path) -> None:
     config = _gateway_config(tmp_path, db_free=True, slurm_gateway_url="http://gw-node22.internal:8000")
 
     def unhealthy(_config: ProductionSchedulerConfig) -> dict[str, Any]:
-        return {"mode": "real", "healthy": False, "reason": "sinfo --version failed"}
+        return {"mode": "slurm", "healthy": False, "reason": "sinfo --version failed"}
 
     checks, blockers = scheduler_module._slurm_gateway_check(config, probe=unhealthy)
 
@@ -47865,7 +47865,7 @@ def test_slurm_gateway_check_self_reference_blocks_with_real_backend(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(scheduler_module, "_slurm_gateway_backend", lambda: "real")
+    monkeypatch.setattr(scheduler_module, "_slurm_gateway_backend", lambda: "slurm")
     config = _gateway_config(tmp_path, db_free=True, slurm_gateway_url="http://localhost:8000", service_port=8000)
 
     checks, blockers = scheduler_module._slurm_gateway_check(config, probe=_healthy_gateway_probe)
@@ -47934,7 +47934,7 @@ def test_slurm_preflight_blocked_when_gateway_unavailable(
     roots = _slurm_roots(tmp_path)
 
     def unhealthy(_config: ProductionSchedulerConfig) -> dict[str, Any]:
-        return {"mode": "real", "healthy": False, "reason": "gateway down"}
+        return {"mode": "slurm", "healthy": False, "reason": "gateway down"}
 
     monkeypatch.setattr(scheduler_module, "_default_gateway_probe", unhealthy)
     config = _gateway_config(
@@ -47967,7 +47967,7 @@ def test_slurm_gateway_check_real_backend_remote_host_is_not_self_reference(
     # never-break reverse: a real backend pointed at a genuine remote node-22
     # host (with or without scheme) must NOT be flagged as a self-reference,
     # even when the port matches the service's own listen port.
-    monkeypatch.setattr(scheduler_module, "_slurm_gateway_backend", lambda: "real")
+    monkeypatch.setattr(scheduler_module, "_slurm_gateway_backend", lambda: "slurm")
     config = _gateway_config(tmp_path, db_free=True, slurm_gateway_url=gateway_url, service_port=8000)
 
     checks, blockers = scheduler_module._slurm_gateway_check(config, probe=_healthy_gateway_probe)
@@ -47986,7 +47986,7 @@ def test_slurm_gateway_check_self_reference_blocks_schemeless_localhost(
     # self-reference and must be blocked. Before the fix _gateway_endpoint
     # mis-parsed ``localhost:`` as a scheme, returned host=None, and the guard
     # silently passed.
-    monkeypatch.setattr(scheduler_module, "_slurm_gateway_backend", lambda: "real")
+    monkeypatch.setattr(scheduler_module, "_slurm_gateway_backend", lambda: "slurm")
     config = _gateway_config(tmp_path, db_free=True, slurm_gateway_url="localhost:8000", service_port=8000)
 
     checks, blockers = scheduler_module._slurm_gateway_check(config, probe=_healthy_gateway_probe)
@@ -48181,10 +48181,10 @@ def _install_fake_httpx(
 ) -> type[_FakeHttpClient]:
     import httpx
 
-    # HTTP probing is the real-gateway path; force backend=real so the probe
+    # HTTP probing is the real-gateway path; force backend=slurm so the probe
     # does not take the in-process mock branch, and provide the scheduler
     # service bearer so the probe does not fail on the missing-token gate.
-    monkeypatch.setenv("SLURM_GATEWAY_BACKEND", "real")
+    monkeypatch.setenv("SLURM_GATEWAY_BACKEND", "slurm")
     monkeypatch.setenv("SLURM_GATEWAY_SERVICE_TOKEN", "preflight-service-token-0123456789abcdef")
     _FakeHttpClient.last_url = None
     _FakeHttpClient.response = response
@@ -48266,7 +48266,7 @@ def test_preflight_http_probe_legacy_status_only_fallback(
 ) -> None:
     # Backward compat: a gateway still on the old shape (only ``status``) is
     # accepted via the legacy fallback.
-    _install_fake_httpx(monkeypatch, response=_FakeHttpResponse(200, {"status": "ok", "backend": "mock"}))
+    _install_fake_httpx(monkeypatch, response=_FakeHttpResponse(200, {"status": "ok"}))
 
     config = _gateway_config(tmp_path, db_free=True, slurm_gateway_url="http://gw-node22.internal:8081")
     result = scheduler_module._default_gateway_probe(config)
@@ -48310,7 +48310,7 @@ def test_slurm_gateway_check_healthy_but_not_submit_capable_blocks(tmp_path: Pat
 
     def healthy_no_submit(_config: ProductionSchedulerConfig) -> dict[str, Any]:
         return {
-            "mode": "real",
+            "mode": "slurm",
             "healthy": True,
             "submit_capable": False,
             "accounting_available": True,
@@ -48322,6 +48322,364 @@ def test_slurm_gateway_check_healthy_but_not_submit_capable_blocks(tmp_path: Pat
     assert "SLURM_GATEWAY_UNAVAILABLE" in codes
     assert checks["healthy"] is True
     assert checks["submit_capable"] is False
+
+
+# --- #3246: the scheduler refuses a gateway that is not on the slurm backend --
+
+
+def _health_body(**overrides: Any) -> dict[str, Any]:
+    """``_healthy_health_payload`` with keys replaced; a value of ``None`` drops the key."""
+
+    payload = _healthy_health_payload()
+    for key, value in overrides.items():
+        if value is None:
+            payload.pop(key, None)
+        else:
+            payload[key] = value
+    return payload
+
+
+_MISSING_SACCT = {
+    name: {"resolved": True, "executable": name != "sacct", "detail": None}
+    for name in ("sbatch", "squeue", "sacct", "scancel")
+}
+
+
+@pytest.mark.parametrize(
+    ("payload", "mode", "kwargs", "healthy", "backend", "reason_parts"),
+    [
+        pytest.param(
+            _health_body(backend="mock"),
+            "slurm",
+            {"required_backend": "slurm"},
+            False,
+            "mock",
+            ("mock", "slurm"),
+            id="required-slurm-reported-mock-refused",
+        ),
+        pytest.param(
+            _health_body(backend="slurm"),
+            "slurm",
+            {"required_backend": "slurm"},
+            True,
+            "slurm",
+            (),
+            id="required-slurm-reported-slurm-healthy",
+        ),
+        pytest.param(
+            _health_body(backend=None),
+            "slurm",
+            {"required_backend": "slurm"},
+            True,
+            "slurm",
+            (),
+            id="required-slurm-no-backend-key-healthy",
+        ),
+        pytest.param(
+            _health_body(backend="mock", binaries=_MISSING_SACCT),
+            "slurm",
+            {"required_backend": "slurm"},
+            False,
+            "mock",
+            ("mock", "sacct"),
+            id="required-slurm-reported-mock-and-missing-binary-both-reasons",
+        ),
+        pytest.param(
+            # Whitespace around the reported name is stripped before comparing;
+            # the returned backend is the reported value as sent.
+            _health_body(backend=" slurm "),
+            "slurm",
+            {"required_backend": "slurm"},
+            True,
+            " slurm ",
+            (),
+            id="required-slurm-reported-padded-slurm-healthy",
+        ),
+        pytest.param(
+            # Case is not folded: the gateway only ever reports the lower-case name.
+            _health_body(backend="SLURM"),
+            "slurm",
+            {"required_backend": "slurm"},
+            False,
+            "SLURM",
+            ("SLURM", "slurm"),
+            id="required-slurm-reported-upper-case-refused",
+        ),
+        pytest.param(
+            # A present ``backend: null`` is compared as the string ``None`` and
+            # refused; the returned backend falls back to the mode.
+            {**_healthy_health_payload(), "backend": None},
+            "slurm",
+            {"required_backend": "slurm"},
+            False,
+            "slurm",
+            ("gateway reports backend 'None', not the required 'slurm' backend",),
+            id="required-slurm-reported-null-refused",
+        ),
+        pytest.param(
+            # The returned backend falls back to the mode, but the comparison
+            # reads only the payload's own value, so the fallback cannot fail it.
+            _health_body(backend=None),
+            "mock",
+            {"required_backend": "slurm"},
+            True,
+            "mock",
+            (),
+            id="required-slurm-no-backend-key-mock-mode-healthy",
+        ),
+        pytest.param(
+            # The in-process path passes no required backend.
+            _health_body(backend="mock"),
+            "mock",
+            {},
+            True,
+            "mock",
+            (),
+            id="no-required-backend-reported-mock-healthy",
+        ),
+    ],
+)
+def test_interpret_gateway_health_required_backend(
+    payload: dict[str, Any],
+    mode: str,
+    kwargs: dict[str, Any],
+    healthy: bool,
+    backend: str,
+    reason_parts: tuple[str, ...],
+) -> None:
+    result = scheduler_module._interpret_gateway_health(payload, mode=mode, **kwargs)
+
+    assert result["healthy"] is healthy
+    assert result["submit_capable"] is healthy
+    assert result["accounting_available"] is healthy
+    assert result["backend"] == backend
+    assert result["mode"] == mode
+    if healthy:
+        assert result["reason"] is None
+    else:
+        for part in reason_parts:
+            assert part in result["reason"]
+
+
+def test_preflight_http_probe_refuses_gateway_reporting_mock_backend(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _install_fake_httpx(monkeypatch, response=_FakeHttpResponse(200, _health_body(backend="mock")))
+    monkeypatch.setenv("SLURM_GATEWAY_BACKEND", "slurm")
+
+    config = _gateway_config(tmp_path, db_free=True, slurm_gateway_url="http://gw-node22.internal:8081")
+    result = scheduler_module._default_gateway_probe(config)
+
+    assert client.last_url == "http://gw-node22.internal:8081/api/v1/slurm/health"
+    assert result["backend"] == "mock"
+    assert result["healthy"] is False
+    assert result["submit_capable"] is False
+    assert result["accounting_available"] is False
+    assert "mock" in result["reason"]
+
+
+@pytest.mark.parametrize(
+    ("reported_backend", "refused"),
+    [("mock", True), ("slurm", False), (None, False)],
+    ids=["reported-mock", "reported-slurm", "no-backend-key"],
+)
+def test_slurm_gateway_check_refuses_remote_gateway_not_on_slurm_backend(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reported_backend: str | None,
+    refused: bool,
+) -> None:
+    client = _install_fake_httpx(
+        monkeypatch, response=_FakeHttpResponse(200, _health_body(backend=reported_backend))
+    )
+    monkeypatch.setenv("SLURM_GATEWAY_BACKEND", "slurm")
+    config = _gateway_config(tmp_path, db_free=True, slurm_gateway_url="http://gw-node22.internal:8081")
+
+    checks, blockers = scheduler_module._slurm_gateway_check(config)
+
+    assert client.last_url == "http://gw-node22.internal:8081/api/v1/slurm/health"
+    assert checks["mode"] == "slurm"
+    # Absent key: the recorded backend is the scheduler's own mode.
+    assert checks["backend"] == (reported_backend or "slurm")
+    if refused:
+        assert checks["healthy"] is False
+        assert checks["submit_capable"] is False
+        assert len(blockers) == 1
+        blocker = blockers[0]
+        assert blocker["code"] == "SLURM_GATEWAY_UNAVAILABLE"
+        assert blocker["field"] == "SLURM_GATEWAY_URL"
+        assert (blocker["host"], blocker["port"]) == ("gw-node22.internal", 8081)
+        assert "mock" in blocker["reason"]
+    else:
+        assert blockers == []
+        assert checks["healthy"] is True
+        assert checks["submit_capable"] is True
+
+
+def test_scheduler_pass_blocked_when_remote_gateway_reports_mock_backend(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The pass-level setup of the SHUD preflight tests, with a valid SHUD
+    # executable and the real default probe put back in place of the helper's
+    # healthy stub, so the HTTP branch reads the fake gateway's health body.
+    default_probe = scheduler_module._default_gateway_probe
+    scheduler, orchestrator = _slurm_shud_scheduler(
+        tmp_path, monkeypatch, shud_executable=os.environ["SHUD_EXECUTABLE"]
+    )
+    monkeypatch.setattr(scheduler_module, "_default_gateway_probe", default_probe)
+    client = _install_fake_httpx(monkeypatch, response=_FakeHttpResponse(200, _health_body(backend="mock")))
+    monkeypatch.setenv("SLURM_GATEWAY_BACKEND", "slurm")
+
+    result = scheduler.run_once()
+
+    assert str(client.last_url).endswith("@gw-node22.internal:8000/api/v1/slurm/health")
+    assert result.status == "preflight_blocked"
+    assert result.evidence["execution_boundary"] == "slurm_preflight_blocked"
+    assert result.evidence["counts"]["submitted_count"] == 0
+    assert result.evidence["no_mutation_proof"]["slurm_submit_called"] is False
+    assert orchestrator.calls == []
+    slurm_preflight = result.evidence["slurm_preflight"]
+    assert {b["code"] for b in slurm_preflight["blockers"]} == {"SLURM_GATEWAY_UNAVAILABLE"}
+    (blocker,) = slurm_preflight["blockers"]
+    assert "mock" in blocker["reason"]
+    gateway = slurm_preflight["checks"]["gateway"]
+    assert gateway["backend"] == "mock"
+    assert gateway["healthy"] is False
+    assert gateway["submit_capable"] is False
+    assert "secret" not in json.dumps(result.evidence)
+
+
+@pytest.mark.parametrize("reported_backend", ["slurm", "mock"], ids=["reported-slurm-submits", "reported-mock-blocked"])
+def test_submitting_pass_stops_only_when_remote_gateway_reports_non_slurm_backend(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reported_backend: str,
+) -> None:
+    # The setup of the pass that submits through the orchestrator, with the
+    # gateway check going through the real default probe over the fake HTTP
+    # client. The gateway URL names a remote host: the config default
+    # (localhost at the service port) is a self-reference on the slurm backend.
+    roots = _db_free_slurm_roots(monkeypatch, tmp_path, generated_at=_dt("2026-05-21T12:00:00Z"))
+    client = _install_fake_httpx(
+        monkeypatch, response=_FakeHttpResponse(200, _health_body(backend=reported_backend))
+    )
+    monkeypatch.setenv("SLURM_GATEWAY_BACKEND", "slurm")
+    orchestrator = FakeProductionOrchestrator()
+    config = _config(
+        roots["workspace_root"],
+        db_free=True,
+        now=_dt("2026-05-21T12:00:00Z"),
+        dry_run=False,
+        slurm_execution_enabled=True,
+        slurm_gateway_url="http://gw-node22.internal:8081",
+        object_store_root=roots["object_store_root"],
+        log_root=roots["log_root"],
+        runtime_root=roots["runtime_root"],
+        allowed_storage_roots=(tmp_path,),
+        slurm_env={"NHMS_PROFILE": "prod/gfs_00", "NHMS_RUN_LABEL": "prod_gfs_00"},
+        slurm_job_type_templates=dict(DEFAULT_JOB_TYPE_TEMPLATES),
+    )
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert client.last_url == "http://gw-node22.internal:8081/api/v1/slurm/health"
+    gateway = result.evidence["slurm_preflight"]["checks"]["gateway"]
+    assert gateway["mode"] == "slurm"
+    assert gateway["backend"] == reported_backend
+    if reported_backend == "slurm":
+        assert result.status == "submitted"
+        assert result.evidence["execution_boundary"] == "slurm_gateway_orchestration"
+        assert result.evidence["counts"]["submitted_count"] == 1
+        assert result.evidence["no_mutation_proof"]["slurm_submit_called"] is True
+        assert result.evidence["slurm_preflight"]["status"] == "ready"
+        assert gateway["healthy"] is True
+        assert gateway["submit_capable"] is True
+        assert len(orchestrator.calls) == 1
+        assert orchestrator.calls[0]["basins"][0]["slurm_env"] == {
+            "NHMS_PROFILE": "prod/gfs_00",
+            "NHMS_RUN_LABEL": "prod_gfs_00",
+        }
+    else:
+        assert orchestrator.calls == []
+        assert result.evidence["counts"]["submitted_count"] == 0
+        assert result.evidence["no_mutation_proof"]["slurm_submit_called"] is False
+        assert result.status == "preflight_blocked"
+        assert result.evidence["execution_boundary"] == "slurm_preflight_blocked"
+        assert result.evidence["slurm_preflight"]["status"] == "blocked"
+        blockers = result.evidence["slurm_preflight"]["blockers"]
+        assert [b["code"] for b in blockers] == ["SLURM_GATEWAY_UNAVAILABLE"]
+        assert "mock" in blockers[0]["reason"]
+        assert gateway["healthy"] is False
+        assert gateway["submit_capable"] is False
+
+
+def test_slurm_gateway_check_unknown_backend_real_is_unhealthy_without_http(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # ``real`` is not a backend name: the in-process path runs and
+    # ``create_gateway`` rejects it, even though a healthy slurm gateway answers.
+    client = _install_fake_httpx(monkeypatch, response=_FakeHttpResponse(200, _health_body(backend="slurm")))
+    monkeypatch.setenv("SLURM_GATEWAY_BACKEND", "real")
+    config = _gateway_config(tmp_path, db_free=True, slurm_gateway_url="http://gw-node22.internal:8081")
+
+    checks, blockers = scheduler_module._slurm_gateway_check(config)
+
+    assert client.last_url is None
+    assert checks["healthy"] is False
+    assert checks["submit_capable"] is False
+    assert [b["code"] for b in blockers] == ["SLURM_GATEWAY_UNAVAILABLE"]
+    assert "Unsupported Slurm gateway backend: real" in blockers[0]["reason"]
+
+
+@pytest.mark.parametrize(
+    ("backend", "self_reference"),
+    [("slurm", True), ("real", False)],
+)
+def test_gateway_self_reference_blocker_applies_to_slurm_backend_only(
+    backend: str,
+    self_reference: bool,
+) -> None:
+    blocker, endpoint = scheduler_module._gateway_self_reference_blocker(
+        "http://127.0.0.1:8000",
+        8000,
+        backend=backend,
+    )
+
+    assert endpoint == {"host": "127.0.0.1", "port": 8000}
+    if self_reference:
+        assert blocker is not None
+        assert blocker["code"] == "SLURM_GATEWAY_SELF_REFERENCE"
+    else:
+        assert blocker is None
+
+
+def test_slurm_gateway_check_development_default_uses_in_process_mock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _install_fake_httpx(monkeypatch, response=_FakeHttpResponse(200, _health_body(backend="slurm")))
+    # No backend configured: the development and test default.
+    monkeypatch.delenv("SLURM_GATEWAY_BACKEND", raising=False)
+    config = _gateway_config(tmp_path, db_free=True, slurm_gateway_url="http://gw-node22.internal:8081")
+
+    checks, blockers = scheduler_module._slurm_gateway_check(config)
+
+    assert client.last_url is None
+    assert blockers == []
+    assert checks["mode"] == "mock"
+    assert checks["backend"] == "mock"
+    assert checks["healthy"] is True
+    assert checks["submit_capable"] is True
+    assert checks["accounting_available"] is True
 
 
 # --- M24 §3A: concurrent submit-and-return with durable reservation ----------
