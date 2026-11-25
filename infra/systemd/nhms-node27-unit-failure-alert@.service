@@ -10,9 +10,16 @@
 # bare template (`systemd-analyze --user verify` on the template alone cannot
 # see instantiation errors).
 #
-# Consumers as of this change (two, both node-27 user-scope oneshots):
+# Consumers (node-27 user-scope oneshots; grep `OnFailure=` under
+# infra/systemd/ for the authoritative list):
 #   - nhms-node27-timeseries-retention.service (#1664)
 #   - nhms-node27-resource-governance.service (#1765)
+#   - nhms-node27-raw-retention.service
+#   - nhms-node27-parse-failure-residency-alert.service (#2529)
+#   - nhms-node27-coverage-freshness-alert.service
+#   - nhms-node27-timeseries-compression.service (#3380); its stderr goes to
+#     its own systemd.err file, so the quoted journal holds only systemd's
+#     lines for it
 # Adding the next consumer stays one `OnFailure=` line in that unit.
 #
 # Delivery volume, governance lane: that audit exits 1 while ANY `critical`

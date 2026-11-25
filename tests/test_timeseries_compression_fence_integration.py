@@ -263,12 +263,19 @@ def _compression_row(hypertable: str, chunk: _Chunk) -> compression.ChunkRow:
 
 
 def _fenced_compress(database_url: str, hypertable: str, chunk: _Chunk, *, fence_wait_ms: int) -> Callable[[], int]:
-    """The real runner seam, with the production keyword-only budget binding."""
+    """The real runner seam, with the production keyword-only budget binding.
+
+    The #3380 lock timeout is the largest value the runner's config accepts
+    (one below the budget left after the fence wait), so the relation-lock
+    waits these #2713 interleavings rely on are bounded by a lock timeout far
+    above any wait they reach.
+    """
     return lambda: compression._default_compress_chunk(
         database_url,
         _compression_row(hypertable, chunk),
         compress_timeout_ms=60_000,
         fence_wait_ms=fence_wait_ms,
+        lock_timeout_ms=60_000 - fence_wait_ms - 1,
     )
 
 

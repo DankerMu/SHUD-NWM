@@ -1,5 +1,6 @@
 [Unit]
 Description=NHMS node-27 timeseries compression
+OnFailure=nhms-node27-unit-failure-alert@%n.service
 
 [Service]
 Type=oneshot

@@ -86,7 +86,7 @@ def test_canonical_compression_receipt_example_matches_the_default_budget() -> N
         )
     )
 
-    assert example["schema_version"] == "2.2"
+    assert example["schema_version"] == "2.3"
     assert example["budget"]["cleanup_margin_seconds"] == budget.COMPRESSION_CLEANUP_MARGIN_SECONDS
     assert example["budget"]["systemd_wall_seconds"] == 3941
     assert resolved.budget == budget.CompressionServiceBudget(3900, 3941, 40)
@@ -97,14 +97,16 @@ def test_canonical_compression_receipt_example_matches_the_default_budget() -> N
 def test_compression_receipt_schema_keeps_2_1_budgets_without_cleanup_margin() -> None:
     example = json.loads(_COMPRESSION_RECEIPT_EXAMPLE.read_text(encoding="utf-8"))
     schema = json.loads(_COMPRESSION_RECEIPT_SCHEMA.read_text(encoding="utf-8"))
-    assert example["schema_version"] == "2.2"
+    assert example["schema_version"] == "2.3"
     example["budget"].pop("cleanup_margin_seconds")
     jsonschema.validate(example, schema)
-    # The committed example is 2.2 since #2713; its 2.1 shape drops the two
-    # fence fields and must still validate without the cleanup margin.
+    # The committed example is 2.3 since #3380; its 2.1 shape drops the two
+    # fence fields and the lock timeout and must still validate without the
+    # cleanup margin.
     example["schema_version"] = "2.1"
     example.pop("deferred_contended_count")
     example["budget"].pop("fence_wait_ms")
+    example["budget"].pop("lock_timeout_ms")
     jsonschema.validate(example, schema)
 
 
@@ -480,3 +482,74 @@ def test_unsafe_noncanonical_path_is_refused_before_parse(tmp_path: Path) -> Non
     with pytest.raises(budget.CompressionBudgetError, match="unavailable or unsafe"):
         budget.read_compression_env_data(tmp_path / "missing.env")
 
+
+
+# ---------------------------------------------------------------------------
+# #3380: the compress statement's lock timeout and the unit's failure alert.
+# ---------------------------------------------------------------------------
+
+_LOCK_TIMEOUT_KEY = "NODE27_TIMESERIES_COMPRESSION_LOCK_TIMEOUT_MS"
+_COMPRESSION_ENV_EXAMPLE = _ROOT / "infra" / "env" / "node27-timeseries-compression.example"
+_COMPRESSION_SERVICE = _ROOT / "infra" / "systemd" / "nhms-node27-timeseries-compression.service"
+
+
+def test_env_example_declares_the_lock_timeout_once_with_its_default(tmp_path: Path) -> None:
+    import re
+
+    text = _COMPRESSION_ENV_EXAMPLE.read_text(encoding="utf-8")
+    declared = re.findall(rf"(?m)^{_LOCK_TIMEOUT_KEY}=(\d+)$", text)
+    assert declared == ["5000"]
+    config = compression.config_from_args(
+        argparse.Namespace(enforce=False, receipt_path=None, lock_path=None),
+        {
+            "DATABASE_URL": _SECRET_DSN,
+            "NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS": "172800",
+            "NODE27_TIMESERIES_COMPRESSION_RECEIPT_PATH": str(tmp_path / "receipt.json"),
+            "NODE27_TIMESERIES_COMPRESSION_LOCK_PATH": str(tmp_path / "runner.lock"),
+            _LOCK_TIMEOUT_KEY: declared[0],
+        },
+    )
+    # The template's declared value is one the runner accepts, and is the 5000 ms in force.
+    assert config.lock_timeout_ms == 5000
+
+
+@pytest.mark.parametrize("declared", [False, True], ids=["live-env-without-the-key", "env-with-the-key"])
+def test_preflight_accepts_an_env_with_and_without_the_lock_timeout(tmp_path: Path, declared: bool) -> None:
+    values = _compression_env(**({_LOCK_TIMEOUT_KEY: "5000"} if declared else {}))
+    compression_env = _write_env(tmp_path / "compression.env", values)
+
+    checked = _preflight("--compression-env", str(compression_env), "--check")
+    lane = _preflight("--compression-env", str(compression_env), "--lane", "compression")
+
+    assert (checked.returncode, checked.stdout, checked.stderr) == (0, "", "")
+    assert (lane.returncode, lane.stdout, lane.stderr) == (0, "3900\n", "")
+
+
+def _unit_sections(text: str) -> dict[str, list[str]]:
+    sections: dict[str, list[str]] = {}
+    current = ""
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            current = line[1:-1]
+            sections.setdefault(current, [])
+        else:
+            sections.setdefault(current, []).append(line)
+    return sections
+
+
+def test_compression_unit_alerts_on_failure_and_keeps_its_launch_pins() -> None:
+    sections = _unit_sections(_COMPRESSION_SERVICE.read_text(encoding="utf-8"))
+
+    on_failure = [line for lines in sections.values() for line in lines if line.startswith("OnFailure=")]
+    assert on_failure == ["OnFailure=nhms-node27-unit-failure-alert@%n.service"]
+    assert on_failure[0] in sections["Unit"]
+    service = sections["Service"]
+    preflight = [i for i, line in enumerate(service) if line.startswith("ExecStartPre=") and "budget_preflight" in line]
+    starts = [i for i, line in enumerate(service) if line.startswith("ExecStart=")]
+    assert len(preflight) == 1 and len(starts) == 1 and preflight[0] < starts[0]
+    assert "TimeoutStartSec=3941" in service
+    assert "StandardOutput=append:/home/nwm/node27-timeseries-compression-logs/systemd.log" in service
+    assert "StandardError=append:/home/nwm/node27-timeseries-compression-logs/systemd.err" in service

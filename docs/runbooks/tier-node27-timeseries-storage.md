@@ -6984,8 +6984,9 @@ chunk and every later selected chunk are recorded `deferred_contended` without
 being attempted, and the tick ends `deferred` (exit 0) instead of being `TERM`ed
 by the wrapper `timeout` during a fence wait. With the defaults the last chunk
 may start its fence at `3900 - 900 - 300 = 2700 s` into the tick. A guard
-deferral carries **no** `fence_wait_elapsed_ms` (an expired fence wait always
-does), which is how to tell the two apart in a receipt. The guard bounds the
+deferral carries `contended_on: "tick_deadline"` and no
+`fence_wait_elapsed_ms`. Tell deferrals apart by `contended_on` (schema 2.3),
+not by that field: a `relation_lock` deferral carries it too. The guard bounds the
 fence-wait share only: compress time after the fence is still governed by the
 Wall constraint.
 
@@ -7006,12 +7007,14 @@ expires is a `55P03` and renders through the existing #1664 segment —
 fence on ... not acquired within the bounded wait` — with no receipt change, so
 the §8.6 item 7 escalation rule counts it like any other refused tick.
 
-**Receipt (schema 2.2).** A chunk whose fence wait expired is
-`selected[].mutation_state = "deferred_contended"` with its
-`fence_wait_elapsed_ms`; nothing was copied and it stays eligible. A chunk the
-tick-deadline guard deferred has the same `mutation_state` and no
-`fence_wait_elapsed_ms`. `deferred_contended_count` counts both, and `budget.fence_wait_ms` records the
-effective knob. Outcome `deferred` (no failure, at least one deferral) exits 0;
+**Receipt (schema 2.2; `contended_on` since 2.3).** A chunk whose fence wait
+expired is `selected[].mutation_state = "deferred_contended"` with its
+`fence_wait_elapsed_ms` and `contended_on: "fence"`; nothing was copied and it
+stays eligible. A chunk the tick-deadline guard deferred has the same
+`mutation_state`, `contended_on: "tick_deadline"` and no
+`fence_wait_elapsed_ms`. `deferred_contended_count` counts every deferral
+(the `relation_lock` kind of the next section included), and
+`budget.fence_wait_ms` records the effective knob. Outcome `deferred` (no failure, at least one deferral) exits 0;
 any real failure still makes the tick `partial` and exit 1. A committed chunk
 also carries the `fence_wait_elapsed_ms` it was charged.
 
@@ -7020,17 +7023,22 @@ chunk is retried by the next daily tick. Escalate on the pattern, mirroring the
 retention rule in §8.6 item 7: three or more CONSECUTIVE days with outcome
 `deferred`, or four or more `deferred` ticks within one week.
 
-First tell the two kinds of deferral apart in the receipt:
+First read `contended_on` of the deferred chunks in the receipt (a receipt
+older than schema 2.3 has no such field: there, a deferred chunk with
+`fence_wait_elapsed_ms` is the first kind and one without it the second):
 
-- A deferred chunk **with** `fence_wait_elapsed_ms` timed out on the fence.
-  Ingest never drained within the fence wait. Check the longest parser
-  transaction (`pg_stat_activity` where
+- `fence`: the chunk timed out on the fence. Ingest never drained within the
+  fence wait. Check the longest parser transaction (`pg_stat_activity` where
   `application_name = 'nhms-output-parser'`) and the uncompressed backlog
   before raising the knob.
-- A deferred chunk **without** `fence_wait_elapsed_ms` was skipped by the
-  tick-deadline guard: the earlier chunks used up the wrapper wall. Handle it
-  under the §4 Wall constraint and the per-tick bound. Do not raise
-  `FENCE_WAIT_MS` for this case: a larger fence wait trips the guard earlier.
+- `tick_deadline`: the chunk was skipped by the tick-deadline guard: the
+  earlier chunks used up the wrapper wall. Handle it under the §4 Wall
+  constraint and the per-tick bound. Do not raise `FENCE_WAIT_MS` for this
+  case: a larger fence wait trips the guard earlier.
+- `relation_lock`: another session held a lock on the chunk when
+  `compress_chunk` asked for its own. See the next section. Do not raise
+  `FENCE_WAIT_MS` for this case either: the fence was acquired, and a larger
+  fence wait only narrows the room the lock timeout must fit in.
 
 
 **Manual ops SQL is not fenced.** `scripts/ops/node27_1729_*.sql` and
@@ -7038,6 +7046,77 @@ First tell the two kinds of deferral apart in the receipt:
 them only while holding the lifecycle flock
 (`/tmp/nhms-node27-timeseries-lifecycle.lock`, e.g. `flock -n` around the
 `psql` call) or with the compression and retention timers stopped.
+
+#### Relation-lock timeout of the compress statement (`#3380`)
+
+The fence orders compression against **fenced writers**. It does nothing about
+any other session that holds a lock on the chunk. After `compress_chunk` has
+rewritten the data it takes `AccessExclusiveLock` on the uncompressed chunk; an
+unfinished transaction that holds `ACCESS SHARE` on the chunk or on its
+hypertable (a long read, a session left idle in a transaction) makes that
+request wait, and **every reader that arrives afterwards queues behind the
+waiting request**.
+
+- 2026-11-19: the river chunk's rewrite finished after about eight minutes;
+  the statement then waited until `statement_timeout` cancelled it at
+  05:25:00Z, 52 minutes later. Seven read queries were cancelled by their own
+  statement timeouts during that wait (04:47, 05:00, 05:02, 05:17Z); on the
+  days around it the log has no such line at all. Who held the lock is not
+  known: `log_lock_waits` is off on this instance.
+- Reproduced on TimescaleDB 2.10.2 (throwaway instance, 2026-11-25): with a
+  reader transaction open, `SET lock_timeout = 3000` makes the statement end
+  after about 3.8 s with `canceling statement due to lock timeout` (55P03),
+  the chunk stays uncompressed, and the queued reader returns at once.
+
+So the compress statement runs under its own short `lock_timeout`:
+
+| Key | Default | Rule |
+|---|---|---|
+| `NODE27_TIMESERIES_COMPRESSION_LOCK_TIMEOUT_MS` | 5000 (in code; a live env file without the key keeps working) | positive integer, strictly less than `compress_timeout_ms - fence_wait_ms` |
+
+It is not the fence wait. The fence is an advisory lock that blocks nobody,
+so it can wait fifteen minutes; a relation-lock wait stalls readers for as
+long as it lasts, and the display role's own `statement_timeout` is 30 s.
+
+**How it reads in a receipt (schema 2.3).** `budget.lock_timeout_ms` records
+the value. A chunk whose compress statement hit the lock timeout is recorded
+after the usual read-only reconcile as `mutation_state: "deferred_contended"`
+with `contended_on: "relation_lock"`, without an `error`; the tick goes on to
+its next chunk and, if nothing failed, ends `deferred` with exit 0. Every
+`deferred_contended` chunk now says why: `fence`, `relation_lock` or
+`tick_deadline`. A statement timeout is still a failure
+(`failed_before_mutation`, `QueryCanceled`, outcome `partial`, non-zero exit).
+
+**What it costs.** The rewrite before the lock request is thrown away (about
+eight minutes for a river chunk). A lock that conflicts at the start of
+`compress_chunk` (an anti-wraparound autovacuum on the chunk, a manual
+`VACUUM`) also ends as a `relation_lock` deferral, with nothing lost.
+
+**When it repeats.** One `relation_lock` deferral needs no action. The chunk
+is no longer the newest eligible one the next day, so whether it is selected
+again depends on the per-tick bound (§4 "Per-tick capacity"; the selection gap
+is tracked in `#3380`). If the same hypertable shows `relation_lock` on
+consecutive ticks, look for the blocker. The compress request itself is
+visible for at most the lock timeout, at an unpredictable moment after the
+rewrite, so do not wait for it: list who holds a lock on the chunk named in
+the receipt (`selected[].chunk_schema` / `chunk_name`), at any time of day,
+oldest transaction first:
+
+```sql
+SELECT a.pid, a.usename, a.application_name, a.state, a.xact_start, l.mode, left(a.query, 80)
+FROM pg_locks l
+JOIN pg_stat_activity a ON a.pid = l.pid
+WHERE l.locktype = 'relation'
+  AND l.granted
+  AND l.relation = '<chunk_schema>.<chunk_name>'::regclass
+ORDER BY a.xact_start;
+```
+
+A session `idle in transaction` with an old `xact_start` is the usual
+finding. A blocker that only appears during the tick is not caught this way;
+`log_lock_waits` would record it, and turning that on is an operator
+decision. Ending a session is an operator decision too (`oncall-sql.md`); the
+runner never cancels another session.
 
 ### 4.12 Forcing contract: migration `000066` (`#1993`) — EXECUTED 2026-11-06
 
@@ -8552,6 +8631,27 @@ before a receipt exists.
    `nhms-node27-resource-governance.service` are what the `#1765`
    `OnFailure=` change needs. Until they are run, the deployed units keep
    their old lanes no matter what the repo says.
+
+   **Compression unit (`#3380`).** `nhms-node27-timeseries-compression.service`
+   declares the same `OnFailure=`. The alert template is already installed and
+   in use by the retention and governance units, so only the unit itself is
+   installed, and the smoke start is skipped (the channel is live, and the
+   start sends real mail):
+
+   ```
+   install -m 0644 ~/NWM/infra/systemd/nhms-node27-timeseries-compression.service \
+     ~/.config/systemd/user/
+   systemctl --user daemon-reload
+   systemctl --user show nhms-node27-timeseries-compression.service -p OnFailure
+   ```
+
+   Do this away from the 04:25Z tick, and **never** `systemctl --user start`
+   the compression unit to test the wiring: that is a live enforcing tick.
+   This unit keeps `StandardError=append:` to
+   `/home/nwm/node27-timeseries-compression-logs/systemd.err`, so the alert
+   mail's journal excerpt holds only systemd's own lines; read the error in
+   that file and in the receipt. A tick that ends `deferred` exits 0 and sends
+   no mail.
 9. **Root-volume discipline for this host (#1765).** A two-day pytest run on
    node-27 filled `/` (98 GB) with 27 GB of `/tmp/pytest-of-nwm`. Two halves,
    both required:

@@ -68,12 +68,13 @@ from packages.common.safe_fs import (
     verify_directory_no_follow,
 )
 from packages.common.timeseries_compression_fence import (
+    LOCK_NOT_AVAILABLE_SQLSTATE,
     FenceContended,
     acquire_compression_fence,
     release_compression_fence,
 )
 
-SCHEMA_VERSION = "2.2"
+SCHEMA_VERSION = "2.3"
 TOOL_VERSION = "node27-timeseries-compression/2"
 PUBLISH_LOCK_TIMEOUT_SECONDS = 5.0
 
@@ -168,6 +169,18 @@ _MAX_CATALOG_ROWS = 50_000
 # requires setting this knob explicitly.
 FENCE_WAIT_KEY = "NODE27_TIMESERIES_COMPRESSION_FENCE_WAIT_MS"
 _DEFAULT_FENCE_WAIT_MS = 900_000
+# #3380: the session ``lock_timeout`` under which ``compress_chunk`` itself
+# runs. After rewriting the data, ``compress_chunk`` takes AccessExclusiveLock
+# on the uncompressed chunk; an open transaction holding ACCESS SHARE on it
+# makes that request wait, and every reader arriving later queues behind the
+# waiting request. On 2026-11-19 that wait lasted until statement_timeout (52
+# min) and seven readers were cancelled. This bounds one lock wait, not the
+# advisory fence wait above (which blocks nobody), so it is a separate and far
+# smaller budget. Default 5000 ms keeps a queued display reader well inside its
+# own 30 s statement timeout. ``config_from_args`` requires it strictly below
+# ``compress_timeout_ms - fence_wait_ms``: a larger value could never fire.
+LOCK_TIMEOUT_KEY = "NODE27_TIMESERIES_COMPRESSION_LOCK_TIMEOUT_MS"
+_DEFAULT_LOCK_TIMEOUT_MS = 5_000
 # Tick clock of the #2713 tick-deadline guard (``build_receipt``); tests
 # replace this module attribute, never ``time`` itself.
 _monotonic = time.monotonic
@@ -177,6 +190,21 @@ _MAX_CANDIDATES = 10_000
 
 class CompressionConfigError(RuntimeError):
     """Fail-closed configuration parse error before any DB call."""
+
+
+class RelationLockContended(RuntimeError):
+    """``compress_chunk`` hit its session ``lock_timeout`` (SQLSTATE 55P03).
+
+    Raised only for the compress statement, after the fence was held, so the
+    fence's own 55P03 (``FenceContended``) can never be mistaken for it. Not a
+    ``FenceContended``: the tick loop reconciles this one before it labels the
+    chunk. Carries the fence wait already charged, never the driver's text.
+    """
+
+    def __init__(self, hypertable: str, fence_wait_elapsed_ms: int) -> None:
+        self.hypertable = hypertable
+        self.fence_wait_elapsed_ms = fence_wait_elapsed_ms
+        super().__init__(f"compress_chunk on a chunk of {hypertable} timed out waiting for a relation lock")
 
 
 def _current_head_sha(*, require_clean: bool = False) -> str:
@@ -227,6 +255,8 @@ class CompressionConfig:
     systemd_wall_seconds: int
     # #2713 fence wait, charged against ``compress_timeout_ms``.
     fence_wait_ms: int
+    # #3380 lock timeout of the compress statement itself.
+    lock_timeout_ms: int
 
 
 # #1647: no statement in this module interpolates a chunk name — every chunk
@@ -361,6 +391,16 @@ def config_from_args(args: argparse.Namespace, env: Mapping[str, str] | None = N
             f"got {fence_wait_ms} >= {compress_timeout_ms}; the fence wait is charged against "
             "the per-chunk compress timeout"
         )
+    try:
+        declared_lock_timeout_ms = parse_positive_int_env(env.get(LOCK_TIMEOUT_KEY), name=LOCK_TIMEOUT_KEY)
+    except CompressionBudgetError as error:
+        raise CompressionConfigError(str(error)) from error
+    lock_timeout_ms = _DEFAULT_LOCK_TIMEOUT_MS if declared_lock_timeout_ms is None else declared_lock_timeout_ms
+    if lock_timeout_ms >= compress_timeout_ms - fence_wait_ms:
+        raise CompressionConfigError(
+            f"{LOCK_TIMEOUT_KEY} must be strictly less than {COMPRESSION_STATEMENT_TIMEOUT_KEY} minus "
+            f"{FENCE_WAIT_KEY}: got {lock_timeout_ms} >= {compress_timeout_ms - fence_wait_ms}"
+        )
     database_url = env.get("DATABASE_URL")
     if not database_url or not database_url.strip():
         raise CompressionConfigError("DATABASE_URL must be set")
@@ -375,6 +415,7 @@ def config_from_args(args: argparse.Namespace, env: Mapping[str, str] | None = N
         wrapper_wall_seconds=wrapper_wall_seconds,
         systemd_wall_seconds=systemd_wall_seconds,
         fence_wait_ms=fence_wait_ms,
+        lock_timeout_ms=lock_timeout_ms,
     )
 
 
@@ -499,8 +540,10 @@ def _iso(value: datetime) -> str:
 # the semantic bug cand-A hardens against.
 #
 # ``CompressChunk`` returns the fence wait in ms it was charged (#2713), or
-# ``None`` when an injected implementation takes no fence; it raises
-# ``FenceContended`` when the bounded fence wait expired before any copy.
+# ``None`` when an injected implementation takes no fence. It raises
+# ``FenceContended`` when the bounded fence wait expired before any copy, and
+# ``RelationLockContended`` (#3380) when ``compress_chunk`` itself hit its
+# ``lock_timeout``; the loop reconciles the latter before labelling the chunk.
 FetchChunks = Callable[[str], list[ChunkRow]]
 MeasureChunkBytes = Callable[..., int]
 CompressChunk = Callable[[str, ChunkRow], int | None]
@@ -620,13 +663,13 @@ def _default_measure_chunk_bytes(database_url: str, chunk: ChunkRow, *, after: b
 
 
 def _default_compress_chunk(
-    database_url: str, chunk: ChunkRow, *, compress_timeout_ms: int, fence_wait_ms: int
+    database_url: str, chunk: ChunkRow, *, compress_timeout_ms: int, fence_wait_ms: int, lock_timeout_ms: int
 ) -> int:
-    # ``compress_timeout_ms`` and ``fence_wait_ms`` are keyword-only with NO
-    # default: the assembly point in ``main()`` binds both with
-    # ``functools.partial`` from the parsed config, and forgetting to do so
-    # must raise TypeError rather than silently fall back to any hardcoded
-    # ceiling. Both values are validated ints, so the interpolations below
+    # ``compress_timeout_ms``, ``fence_wait_ms`` and ``lock_timeout_ms`` are
+    # keyword-only with NO default: the assembly point in ``main()`` binds all
+    # three with ``functools.partial`` from the parsed config, and forgetting
+    # to do so must raise TypeError rather than silently fall back to any
+    # hardcoded ceiling. All are validated ints, so the interpolations below
     # have no injection surface. ``CompressChunk`` stays a two-argument
     # protocol.
     #
@@ -637,6 +680,14 @@ def _default_compress_chunk(
     # server default from cutting the fence wait short (validation guarantees
     # fence_wait_ms < compress_timeout_ms); the wait is then charged against
     # the chunk's budget. FenceContended propagates with nothing copied.
+    #
+    # #3380: the fence's RESET leaves no lock_timeout, so the compress
+    # statement gets its own, set after the fence is held. A 55P03 from that
+    # statement alone becomes RelationLockContended; the fence's 55P03 has
+    # already become FenceContended above, and anything else propagates
+    # unchanged. The test is the fence's own (``pgcode``, not the driver class).
+    # The SET rolls back with a failed transaction; after a commit it only
+    # reaches ``pg_advisory_unlock``, which never waits.
     import psycopg2  # type: ignore[import-untyped]
 
     connection = psycopg2.connect(
@@ -652,10 +703,16 @@ def _default_compress_chunk(
                 fence_wait_elapsed_ms = acquire_compression_fence(cursor, chunk.hypertable_key, fence_wait_ms)
                 fence_held = True
                 cursor.execute(f"SET statement_timeout = {max(1, compress_timeout_ms - fence_wait_elapsed_ms)}")
-                cursor.execute(
-                    "SELECT compress_chunk(%s::regclass)",
-                    (f"{chunk.chunk_schema}.{chunk.chunk_name}",),
-                )
+                cursor.execute(f"SET lock_timeout = {lock_timeout_ms}")
+                try:
+                    cursor.execute(
+                        "SELECT compress_chunk(%s::regclass)",
+                        (f"{chunk.chunk_schema}.{chunk.chunk_name}",),
+                    )
+                except Exception as error:
+                    if getattr(error, "pgcode", None) == LOCK_NOT_AVAILABLE_SQLSTATE:
+                        raise RelationLockContended(chunk.hypertable_key, fence_wait_elapsed_ms) from None
+                    raise
                 cursor.fetchone()
         return fence_wait_elapsed_ms
     finally:
@@ -802,6 +859,8 @@ def _budget(config: CompressionConfig) -> dict[str, int]:
         "cleanup_margin_seconds": _CLEANUP_MARGIN_SECONDS,
         # #2713 (schema 2.2): the fence wait charged against compress_timeout_ms.
         "fence_wait_ms": config.fence_wait_ms,
+        # #3380 (schema 2.3): the lock timeout of the compress statement.
+        "lock_timeout_ms": config.lock_timeout_ms,
     }
 
 
@@ -864,19 +923,20 @@ def build_receipt(
     after_poisoned = {key: False for key in totals}
     selected_descriptors: list[dict[str, Any]] = []
     any_errors = False
-    # #2713: chunks whose bounded fence wait expired. Not an error: nothing was
-    # copied, the chunk stays eligible for the next tick, and it neither
-    # poisons after_bytes nor contributes to any total.
+    # #2713 / #3380: chunks put off by contention (``contended_on`` says which:
+    # an expired fence wait, a relation-lock timeout of ``compress_chunk`` that
+    # reconciled as not compressed, or the tick deadline below). Not an error:
+    # the chunk is uncompressed and eligible again, and it neither poisons
+    # after_bytes nor contributes to any total.
     deferred_contended_count = 0
     # #2713 tick-deadline guard. Fence waits add up to per_tick_bound x
     # fence_wait_ms to a tick, which the per-chunk budget chain does not
     # bound. Before chunk N's fence, if the elapsed tick time plus a full fence
     # wait plus the cleanup margin no longer fits the wrapper wall, chunk N and
     # every later selected chunk are deferred untouched (``deferred_contended``
-    # with NO ``fence_wait_elapsed_ms``, which is what tells them apart from an
-    # expired fence wait), so the runner never starts a fence wait that the
-    # wrapper's TERM could cut short. Once reached it stays reached for the
-    # tick. It
+    # with ``contended_on == "tick_deadline"`` and no ``fence_wait_elapsed_ms``),
+    # so the runner never starts a fence wait that the wrapper's TERM could cut
+    # short. Once reached it stays reached for the tick. It
     # bounds the fence-wait share only: a chunk's compress time is still bounded
     # per chunk by leg 1 and per tick by the runbook section 4 "Per-tick
     # capacity" Wall constraint.
@@ -910,6 +970,7 @@ def build_receipt(
             if tick_deadline_reached:
                 descriptor = _descriptor(chunk, before=before, after=None)
                 descriptor["mutation_state"] = "deferred_contended"
+                descriptor["contended_on"] = "tick_deadline"
                 deferred_contended_count += 1
                 selected_descriptors.append(descriptor)
                 continue
@@ -921,10 +982,14 @@ def build_receipt(
                 descriptor = _descriptor(chunk, before=before, after=None)
                 descriptor["mutation_state"] = "deferred_contended"
                 descriptor["fence_wait_elapsed_ms"] = contended.elapsed_ms
+                descriptor["contended_on"] = "fence"
                 deferred_contended_count += 1
                 selected_descriptors.append(descriptor)
                 continue
             except Exception as error:  # per-chunk isolation per issue spec
+                # #3380: a RelationLockContended takes this same reconcile, and
+                # its indeterminate / committed outcomes are the generic ones;
+                # only "not compressed" is a deferral instead of a failure.
                 try:
                     reconciled_compressed = reconcile_chunk_state(config.database_url, chunk)
                 except Exception:
@@ -937,6 +1002,15 @@ def build_receipt(
                     continue
                 if not reconciled_compressed:
                     descriptor = _descriptor(chunk, before=before, after=None)
+                    if isinstance(error, RelationLockContended):
+                        # Like a fence deferral: no error, no poison, eligible
+                        # again; the rewrite before the lock wait is lost.
+                        descriptor["mutation_state"] = "deferred_contended"
+                        descriptor["fence_wait_elapsed_ms"] = error.fence_wait_elapsed_ms
+                        descriptor["contended_on"] = "relation_lock"
+                        deferred_contended_count += 1
+                        selected_descriptors.append(descriptor)
+                        continue
                     descriptor["mutation_state"] = "failed_before_mutation"
                     descriptor["error"] = _safe_failure("compress_chunk before mutation", error)
                     any_errors = True
@@ -1412,6 +1486,7 @@ def main(
                     _default_compress_chunk,
                     compress_timeout_ms=config.compress_timeout_ms,
                     fence_wait_ms=config.fence_wait_ms,
+                    lock_timeout_ms=config.lock_timeout_ms,
                 ),
                 reconcile_chunk_state=reconcile_chunk_state or _default_reconcile_chunk_state,
                 head_sha=frozen_head_sha,
@@ -1461,7 +1536,7 @@ def main(
             )
             _emit_stderr_diagnostic("failed", f"receipt publication error: {error}", dsn=config.database_url)
             return 1
-        # #2713: ``deferred`` (fence contention only, nothing failed) is a
+        # #2713 / #3380: ``deferred`` (contention only, nothing failed) is a
         # successful tick; ``partial`` stays exit 1.
         return 0 if receipt["outcome"] in ("clean", "deferred") else 1
     finally:

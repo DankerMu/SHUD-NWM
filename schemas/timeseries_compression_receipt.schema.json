@@ -10,7 +10,7 @@
     "outcome"
   ],
   "properties": {
-    "schema_version": {"enum": ["1.0", "2.0", "2.1", "2.2"]},
+    "schema_version": {"enum": ["1.0", "2.0", "2.1", "2.2", "2.3"]},
     "head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
     "mutation_head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
     "provenance_state": {"enum": ["bound", "unavailable"]},
@@ -102,7 +102,7 @@
     },
     {
       "if": {
-        "properties": {"schema_version": {"enum": ["2.1", "2.2"]}},
+        "properties": {"schema_version": {"enum": ["2.1", "2.2", "2.3"]}},
         "required": ["schema_version"]
       },
       "then": {
@@ -150,7 +150,7 @@
     },
     {
       "if": {
-        "properties": {"schema_version": {"const": "2.2"}},
+        "properties": {"schema_version": {"enum": ["2.2", "2.3"]}},
         "required": ["schema_version"]
       },
       "then": {
@@ -158,6 +158,39 @@
         "if": {"properties": {"outcome": {"const": "failed"}}, "required": ["outcome"]},
         "then": {"not": {"required": ["deferred_contended_count"]}},
         "else": {"required": ["deferred_contended_count"]}
+      }
+    },
+    {
+      "if": {
+        "properties": {"schema_version": {"enum": ["1.0", "2.0", "2.1", "2.2"]}},
+        "required": ["schema_version"]
+      },
+      "then": {
+        "properties": {
+          "budget": {"not": {"required": ["lock_timeout_ms"]}},
+          "selected": {"items": {"not": {"required": ["contended_on"]}}}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"schema_version": {"const": "2.3"}},
+        "required": ["schema_version"]
+      },
+      "then": {
+        "properties": {
+          "budget": {"required": ["lock_timeout_ms"]},
+          "selected": {
+            "items": {
+              "if": {
+                "properties": {"mutation_state": {"const": "deferred_contended"}},
+                "required": ["mutation_state"]
+              },
+              "then": {"required": ["contended_on"]},
+              "else": {"not": {"required": ["contended_on"]}}
+            }
+          }
+        }
       }
     },
     {
@@ -175,7 +208,7 @@
     {
       "if": {
         "properties": {
-          "schema_version": {"enum": ["2.0", "2.1", "2.2"]},
+          "schema_version": {"enum": ["2.0", "2.1", "2.2", "2.3"]},
           "outcome": {"enum": ["clean", "partial", "deferred", "refused_lock", "refused_config"]}
         },
         "required": ["schema_version", "outcome"]
@@ -186,7 +219,7 @@
       "if": {"properties": {"outcome": {"const": "failed"}}, "required": ["outcome"]},
       "then": {
         "required": ["failure", "provenance_state"],
-        "properties": {"schema_version": {"enum": ["2.0", "2.1", "2.2"]}},
+        "properties": {"schema_version": {"enum": ["2.0", "2.1", "2.2", "2.3"]}},
         "allOf": [
           {
             "if": {
@@ -217,7 +250,8 @@
         "wrapper_wall_seconds": {"type": "integer", "minimum": 1},
         "systemd_wall_seconds": {"type": "integer", "minimum": 1},
         "cleanup_margin_seconds": {"type": "integer", "minimum": 1},
-        "fence_wait_ms": {"type": "integer", "minimum": 1}
+        "fence_wait_ms": {"type": "integer", "minimum": 1},
+        "lock_timeout_ms": {"type": "integer", "minimum": 1}
       }
     },
     "selected_descriptor": {
@@ -246,7 +280,8 @@
         "mutation_state": {
           "enum": ["not_applicable", "failed_before_mutation", "committed", "indeterminate", "deferred_contended"]
         },
-        "fence_wait_elapsed_ms": {"type": "integer", "minimum": 0}
+        "fence_wait_elapsed_ms": {"type": "integer", "minimum": 0},
+        "contended_on": {"enum": ["fence", "relation_lock", "tick_deadline"]}
       }
     },
     "deferred_descriptor": {
