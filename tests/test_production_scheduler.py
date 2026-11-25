@@ -48551,6 +48551,76 @@ def test_scheduler_pass_blocked_when_remote_gateway_reports_mock_backend(
     assert "secret" not in json.dumps(result.evidence)
 
 
+@pytest.mark.parametrize("reported_backend", ["slurm", "mock"], ids=["reported-slurm-submits", "reported-mock-blocked"])
+def test_submitting_pass_stops_only_when_remote_gateway_reports_non_slurm_backend(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reported_backend: str,
+) -> None:
+    # The setup of the pass that submits through the orchestrator, with the
+    # gateway check going through the real default probe over the fake HTTP
+    # client. The gateway URL names a remote host: the config default
+    # (localhost at the service port) is a self-reference on the slurm backend.
+    roots = _db_free_slurm_roots(monkeypatch, tmp_path, generated_at=_dt("2026-05-21T12:00:00Z"))
+    client = _install_fake_httpx(
+        monkeypatch, response=_FakeHttpResponse(200, _health_body(backend=reported_backend))
+    )
+    monkeypatch.setenv("SLURM_GATEWAY_BACKEND", "slurm")
+    orchestrator = FakeProductionOrchestrator()
+    config = _config(
+        roots["workspace_root"],
+        db_free=True,
+        now=_dt("2026-05-21T12:00:00Z"),
+        dry_run=False,
+        slurm_execution_enabled=True,
+        slurm_gateway_url="http://gw-node22.internal:8081",
+        object_store_root=roots["object_store_root"],
+        log_root=roots["log_root"],
+        runtime_root=roots["runtime_root"],
+        allowed_storage_roots=(tmp_path,),
+        slurm_env={"NHMS_PROFILE": "prod/gfs_00", "NHMS_RUN_LABEL": "prod_gfs_00"},
+        slurm_job_type_templates=dict(DEFAULT_JOB_TYPE_TEMPLATES),
+    )
+    scheduler = ProductionScheduler(
+        config,
+        registry=FakeRegistry([_model("model_a", "basin_a")]),
+        adapters={"gfs": FakeAdapter("gfs", [("2026-05-21T06:00:00Z", True)])},
+        orchestrator_factory=lambda _source_id: orchestrator,
+    )
+
+    result = scheduler.run_once()
+
+    assert client.last_url == "http://gw-node22.internal:8081/api/v1/slurm/health"
+    gateway = result.evidence["slurm_preflight"]["checks"]["gateway"]
+    assert gateway["mode"] == "slurm"
+    assert gateway["backend"] == reported_backend
+    if reported_backend == "slurm":
+        assert result.status == "submitted"
+        assert result.evidence["execution_boundary"] == "slurm_gateway_orchestration"
+        assert result.evidence["counts"]["submitted_count"] == 1
+        assert result.evidence["no_mutation_proof"]["slurm_submit_called"] is True
+        assert result.evidence["slurm_preflight"]["status"] == "ready"
+        assert gateway["healthy"] is True
+        assert gateway["submit_capable"] is True
+        assert len(orchestrator.calls) == 1
+        assert orchestrator.calls[0]["basins"][0]["slurm_env"] == {
+            "NHMS_PROFILE": "prod/gfs_00",
+            "NHMS_RUN_LABEL": "prod_gfs_00",
+        }
+    else:
+        assert orchestrator.calls == []
+        assert result.evidence["counts"]["submitted_count"] == 0
+        assert result.evidence["no_mutation_proof"]["slurm_submit_called"] is False
+        assert result.status == "preflight_blocked"
+        assert result.evidence["execution_boundary"] == "slurm_preflight_blocked"
+        assert result.evidence["slurm_preflight"]["status"] == "blocked"
+        blockers = result.evidence["slurm_preflight"]["blockers"]
+        assert [b["code"] for b in blockers] == ["SLURM_GATEWAY_UNAVAILABLE"]
+        assert "mock" in blockers[0]["reason"]
+        assert gateway["healthy"] is False
+        assert gateway["submit_capable"] is False
+
+
 def test_slurm_gateway_check_unknown_backend_real_is_unhealthy_without_http(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

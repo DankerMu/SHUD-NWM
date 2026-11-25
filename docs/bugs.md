@@ -433,9 +433,10 @@ github_issue: https://github.com/DankerMu/SHUD-NWM/issues/3246
 resolved_by: >-
   #3246: the scheduler's HTTP gateway probe refuses a gateway whose health body
   names a backend other than `slurm` (unhealthy, not submit-capable,
-  `SLURM_GATEWAY_UNAVAILABLE` with a reason naming the reported backend), so no
-  pass submits through a gateway on the mock backend; `real` is no longer a
-  backend name anywhere in the scheduler.
+  `SLURM_GATEWAY_UNAVAILABLE` with a reason naming the reported backend), so a
+  scheduler configured for the `slurm` backend does not submit through a
+  gateway on the mock backend; `real` is no longer a backend name anywhere in
+  the scheduler. The limits that remain are listed below.
 evidence:
   - services/orchestrator/scheduler_preflight.py
   - services/orchestrator/scheduler_gateway.py
