@@ -869,7 +869,8 @@ cohort run id 包含排序后 candidate membership 的稳定摘要；同一成�
 定向过滤或新增/移除流域时生成新 idempotency key，禁止把子集数组误认成全量数组。
 
 **大流域加核（#2543）**：Gateway 只按数组 task 0 的 model_id 解析
-`config/resource_profiles.yaml`（`default` + `overrides[model_id]`），因此 scheduler 在
+`config/resource_profiles.yaml`（`default` + `overrides[model_id]`，其上再叠该 stage 的
+`job_type_overrides[job_type]`，见下文"按 job type 的资源覆盖"），因此 scheduler 在
 restart-compatible cohort 内再按 profile 键拆分：`overrides` 里有条目的 model_id 各自单独
 成一个数组（自己就是 task 0），其余模型仍同在一个 `default` 数组。拆分只在 scheduler 环境
 `SLURM_GATEWAY_BACKEND=slurm` 时生效（与 gateway 选后端的判据相同；mock 后端不读该文件，
@@ -882,9 +883,10 @@ cohort 不拆）。scheduler 与 gateway 读
 
 1. 在 `resource_profiles.overrides` 下为该流域**每个** direct-grid model_id（GFS/IFS 各一个）
    加条目，写 `cpus_per_task`、`memory_gb`、`shud_threads`（必要时加 `walltime`）；
-2. 把 registry 中这些行的 `resource_profile.shud_threads` 设成同一个值。SHUD 线程数取自
+2. 把 registry 中这些行的 `resource_profile.shud_threads` 设成同一个值。求解器自己的线程数取自
    registry 行（`services/orchestrator/chain_manifests.py` 的 `threads`：`shud_threads`
-   优先，其次 `cpus_per_task`），不读 yaml；只改 yaml 会分到更多核，但 SHUD 仍按旧线程数跑。
+   优先，其次 `cpus_per_task`），不读 yaml；yaml 决定的是申请的核数和导出的
+   `SHUD_THREADS` / `OMP_NUM_THREADS`。只改 yaml 会分到更多核，但 SHUD 仍按旧线程数跑。
 
 核验：每趟执行 pass 的 evidence 顶层 `resource_profile_split` 记录 `active`（非 `slurm` 后端时为
 `false`、`inactive_reason=gateway_backend_not_slurm`）、配置的 `override_model_ids`、实际单独成组的
@@ -893,6 +895,38 @@ cohort 不拆）。scheduler 与 gateway 读
 （forcing/forecast 行上的 `cohort_members`），尚未记录成员的 cohort 行仍按整 cycle 保守阻塞。
 没有任何 override 成员时 cohort 拆分结果、membership 与 cohort run id 与旧行为逐字节一致；
 新增 override 只会让该模型离开 default 数组，default 数组因成员变化得到新的 cohort run id。
+
+**按 job type 的资源覆盖（`#3344`）**：yaml 里与 `default`、`overrides` 并列的
+`job_type_overrides` 按 gateway 的 job type 加一层覆盖。解析顺序是 `default` →
+`overrides[model_id]` → `job_type_overrides[job_type]` → 部署级 overlay（partition / exclude），
+job type 压过 model：model override 说的是求解器对这个流域要多少核，job-type override 说的是
+这一 stage 的程序本身用得上多少。
+
+- 条目只能写 `cpus_per_task`、`memory_gb`、`shud_threads`，且 `cpus_per_task` 与 `shud_threads`
+  要么同写要么都不写（只降核不降线程，导出的 `OMP_NUM_THREADS` 仍是 4 或 12，隐式多线程的库会在
+  1 个核上超订）。其它键、非正整数值、
+  条目不是 mapping，都在加载时抛 `ConfigurationError`；scheduler 拆 cohort 读的是同一个 loader，
+  所以坏文件让整趟 pass 零提交失败，而不是跑到 forcing 才失败。
+- cohort 拆分仍只看 `overrides` 的 model 键，加 job-type 条目不会多拆数组。
+- 现有唯一条目：`produce_forcing_array: {cpus_per_task: 1, shud_threads: 1}`。依据是
+  2026-11-25 的 `sacct`：132 个 forcing task 的 (user+sys)/elapsed 为 1.00（单线程、CPU 密集），
+  而每个 task 占 4 核（HLJ 两个模型占 12 核）；同日 forecast 为 3.5–4.0，不动。
+- **内存没有改**：集群是 `select/cons_tres` + `CR_CORE`，`cgroup.conf` 里 `ConstrainRAMSpace=no`，
+  内存既不是可消耗资源也不被强制，`--mem` 不影响并发；forcing 实测峰值 RSS 约 0.46 GB。
+- **并发上限没有改**：`NHMS_SCHEDULER_SLURM_ARRAY_CONCURRENCY_BOUND` 与 `max_concurrent` 仍是 32。
+  forcing 降到 1 核以后，限制它的是这个预算（约 30 个并发）而不再是核数（原来 80 核 / 4 = 20）。
+  要不要提高，看降核后那趟 pass 的实测（各节点 task 数、forcing 阶段墙钟）再定，一次只动一个变量。
+- **收益取决于 task 落在哪台机器**：forcing 每个 task 在 w3 上约 387 s user CPU，在 w2 上约 828 s
+  （w2 的单线程解释型负载慢 2 倍以上，主机层问题，见 issue 3384）；两节点 `Weight` 相同，空闲集群
+  先填 w2。降核后整个 forcing 阶段可能全落在 w2，预计约 57 min（原 70 min），而不是按核数推算的
+  25 min 上下。再往下要靠修掉 w2 的慢、让 w3 先被填满，或提高并发上限让任务溢出到两台机器。
+- 其它 stage 暂不加条目：`nhms_convert` 每趟只有 4 个作业；`nhms_state_save_qc` 主要在等待
+  （CPU 占 8–15%），且在 w2 上慢 3 倍，放出它的核只会把更多 task 挤到 w2。
+- **生效与回滚**：yaml 每次提交都重读，但解析代码在 gateway 进程里。代码首次上线后必须重启一次
+  `nhms-slurm-gateway.service`（在部署窗口内、`squeue` 里没有 `nhms_*` 作业时：gateway 的作业表只在
+  内存里，数组的 `array_task_count` 丢了会让记账不全的数组被提前判成 COMPLETED）。此后增删条目
+  只需正常提交 + 同步 checkout，不用重启；删掉条目就是回滚。旧代码的 gateway 读到新文件时
+  忽略这个键，行为与原来一致。
 
 `NHMS_SCHEDULER_REQUIRE_DIRECT_GRID=true` 是生产硬门禁：publisher 不能用 legacy/IDW
 行覆盖 canonical，consumer 读到任一非 direct-grid 行也会整体阻断。每日

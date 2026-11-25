@@ -5729,3 +5729,246 @@ def test_fetch_logs_bound_job_with_run_log_dir_but_no_out_yet_reports_tree_prese
     assert response.logs == ""
     assert response.array_task_logs is None
     assert response.log_tree_present is True
+
+
+# ---------------------------------------------------------------------------
+# #3344: job_type_overrides through the real gateway class (production
+# templates, fake sbatch capturing the rendered script). The profile file here
+# makes the 12-core model also change memory, walltime and max_concurrent, so
+# the job-type layer is visibly stacked on top of default plus model.
+# ---------------------------------------------------------------------------
+
+_JT_FORCING_ENTRY = {"produce_forcing_array": {"cpus_per_task": 1, "shud_threads": 1}}
+_JT_ARRAY_TASK_COUNT = 4
+_SHIPPED_RESOURCE_PROFILES = Path(__file__).resolve().parents[1] / "config" / "resource_profiles.yaml"
+
+
+def _write_job_type_profiles(directory: Path, job_type_overrides: dict[str, object] | None) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    profiles: dict[str, object] = {
+        "default": {
+            "partition": "compute",
+            "nodes": 1,
+            "ntasks": 1,
+            "cpus_per_task": 4,
+            "memory_gb": 8,
+            "walltime": "14:00:00",
+            "max_concurrent": 3,
+            "shud_threads": 4,
+        },
+        "overrides": {
+            "hlj_dg": {
+                "cpus_per_task": 12,
+                "memory_gb": 16,
+                "walltime": "20:00:00",
+                "max_concurrent": 2,
+                "shud_threads": 12,
+            }
+        },
+    }
+    if job_type_overrides is not None:
+        profiles["job_type_overrides"] = job_type_overrides
+    path = directory / "resource_profiles.yaml"
+    path.write_text(yaml.safe_dump({"resource_profiles": profiles}), encoding="utf-8")
+    return path
+
+
+def _job_type_gateway(tmp_path: Path, profiles_path: Path) -> RealSlurmGateway:
+    return RealSlurmGateway(
+        SlurmGatewaySettings(
+            backend="slurm",
+            template_dir="infra/sbatch",
+            resource_profiles_path=str(profiles_path),
+            job_type_templates=dict(DEFAULT_JOB_TYPE_TEMPLATES),
+            workspace_dir=str(tmp_path / "workspace"),
+        )
+    )
+
+
+def _capture_sbatch(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
+    submissions: list[dict[str, object]] = []
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        if Path(command[0]).name == "sbatch":
+            submissions.append({"argv": list(command), "script": Path(command[-1]).read_text(encoding="utf-8")})
+            return subprocess.CompletedProcess(command, 0, stdout="Submitted batch job 12345\n", stderr="")
+        raise AssertionError(f"unexpected command: {command}")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    return submissions
+
+
+# Production submits a stage's job type under the stage's own name (forcing ->
+# produce_forcing_array, forecast -> run_shud_forecast_array, analysis_run ->
+# run_shud_analysis), so a resolver keyed by the stage name instead of the job
+# type must not pass these tests.
+_PRODUCTION_STAGE_BY_JOB_TYPE = {stage.job_type: stage.stage for stage in (*M3_STAGES, *ANALYSIS_STAGES)}
+
+
+def _production_stage_manifest(tmp_path: Path, job_type: str, model_id: str) -> dict[str, object]:
+    stage_name = _PRODUCTION_STAGE_BY_JOB_TYPE[job_type]
+    assert stage_name != job_type
+    return {
+        **_production_manifest(tmp_path, job_type),
+        "model_id": model_id,
+        "stage": stage_name,
+        "stage_name": stage_name,
+    }
+
+
+def _submit_job_type_array(
+    gateway: RealSlurmGateway, tmp_path: Path, job_type: str, model_id: str
+) -> SlurmJobRecord:
+    workspace = str(tmp_path / "workspace")
+    tasks = [
+        {**_fake_array_task(f"run_{index}", model_id), "workspace_dir": workspace}
+        for index in range(_JT_ARRAY_TASK_COUNT)
+    ]
+    return gateway.submit_job_array(
+        job_type=job_type,
+        cycle_id="cycle_001",
+        stage_name=_PRODUCTION_STAGE_BY_JOB_TYPE[job_type],
+        tasks=tasks,
+        manifest=_production_stage_manifest(tmp_path, job_type, model_id),
+    )
+
+
+def _script_lines(submission: dict[str, object]) -> list[str]:
+    return str(submission["script"]).splitlines()
+
+
+@pytest.mark.parametrize(
+    ("model_id", "memory_gb", "walltime", "throttle"),
+    [("model_001", 8, "14:00:00", 3), ("hlj_dg", 16, "20:00:00", 2)],
+)
+def test_job_type_override_forcing_array_renders_one_core_one_thread(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    model_id: str,
+    memory_gb: int,
+    walltime: str,
+    throttle: int,
+) -> None:
+    gateway = _job_type_gateway(tmp_path, _write_job_type_profiles(tmp_path / "profiles", _JT_FORCING_ENTRY))
+    submissions = _capture_sbatch(monkeypatch)
+
+    record = _submit_job_type_array(gateway, tmp_path, "produce_forcing_array", model_id)
+
+    assert len(submissions) == 1
+    lines = _script_lines(submissions[0])
+    assert "#SBATCH --cpus-per-task=1" in lines
+    assert "export SHUD_THREADS=1" in lines
+    assert "export OMP_NUM_THREADS=1" in lines
+    assert f"#SBATCH --mem={memory_gb}G" in lines
+    assert f"#SBATCH --time={walltime}" in lines
+    assert f"export NHMS_MAX_CONCURRENT={throttle}" in lines
+    assert f"--array=0-{_JT_ARRAY_TASK_COUNT - 1}%{throttle}" in submissions[0]["argv"]
+    assert record.manifest["max_concurrent"] == throttle
+
+
+@pytest.mark.parametrize(("model_id", "walltime"), [("model_001", "14:00:00"), ("hlj_dg", "20:00:00")])
+def test_job_type_override_applies_on_single_submit_render(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    model_id: str,
+    walltime: str,
+) -> None:
+    # Not a production entry: the test's own file gives a non-array job type
+    # values distinct from both default (4/8) and the model override (12/16).
+    entry = {"run_shud_analysis": {"cpus_per_task": 2, "memory_gb": 6, "shud_threads": 2}}
+    gateway = _job_type_gateway(tmp_path, _write_job_type_profiles(tmp_path / "profiles", entry))
+    submissions = _capture_sbatch(monkeypatch)
+
+    gateway.submit_job(
+        SubmitJobRequest(
+            run_id="run_001",
+            model_id=model_id,
+            job_type="run_shud_analysis",
+            manifest=_production_stage_manifest(tmp_path, "run_shud_analysis", model_id),
+        )
+    )
+
+    assert len(submissions) == 1
+    lines = _script_lines(submissions[0])
+    assert "#SBATCH --cpus-per-task=2" in lines
+    assert "#SBATCH --mem=6G" in lines
+    assert f"#SBATCH --time={walltime}" in lines
+    assert "export SHUD_THREADS=2" in lines
+    assert "export OMP_NUM_THREADS=2" in lines
+
+
+@pytest.mark.parametrize(("model_id", "cores"), [("model_001", 4), ("hlj_dg", 12)])
+def test_job_type_override_leaves_forecast_array_render_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    model_id: str,
+    cores: int,
+) -> None:
+    submissions = _capture_sbatch(monkeypatch)
+    normalized: dict[str, str] = {}
+    for variant, job_type_overrides in (("without", None), ("with", _JT_FORCING_ENTRY)):
+        gateway = _job_type_gateway(tmp_path, _write_job_type_profiles(tmp_path / variant, job_type_overrides))
+        record = _submit_job_type_array(gateway, tmp_path, "run_shud_forecast_array", model_id)
+        lines = _script_lines(submissions[-1])
+        assert f"#SBATCH --cpus-per-task={cores}" in lines, variant
+        assert f"export SHUD_THREADS={cores}" in lines, variant
+        assert f"export OMP_NUM_THREADS={cores}" in lines, variant
+        index_path = str(record.manifest["manifest_index_path"])
+        log_dir = str(record.manifest["array_log_dir"])
+        assert index_path in str(submissions[-1]["script"])
+        assert log_dir in str(submissions[-1]["script"])
+        normalized[variant] = (
+            str(submissions[-1]["script"]).replace(log_dir, "<ARRAY_LOG_DIR>").replace(index_path, "<MANIFEST_INDEX>")
+        )
+
+    assert len(submissions) == 2
+    assert submissions[0]["argv"][1] == submissions[1]["argv"][1]
+    assert normalized["with"] == normalized["without"]
+
+
+def test_job_type_override_refused_file_submits_nothing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # The refused entry belongs to a job type other than the one submitted: the
+    # loader, not the resolver's final validation, is what refuses the file.
+    entry = {"produce_forcing_array": {"cpus_per_task": 1, "shud_threads": 1, "max_concurrent": 8}}
+    gateway = _job_type_gateway(tmp_path, _write_job_type_profiles(tmp_path / "profiles", entry))
+    submissions = _capture_sbatch(monkeypatch)
+
+    with pytest.raises(ConfigurationError) as array_exc:
+        _submit_job_type_array(gateway, tmp_path, "run_shud_forecast_array", "model_001")
+    with pytest.raises(ConfigurationError) as single_exc:
+        gateway.submit_job(
+            SubmitJobRequest(
+                run_id="run_001",
+                model_id="model_001",
+                job_type="run_shud_analysis",
+                manifest=_production_manifest(tmp_path, "run_shud_analysis"),
+            )
+        )
+
+    assert submissions == []
+    for exc_info in (array_exc, single_exc):
+        assert "produce_forcing_array" in str(exc_info.value)
+        assert "max_concurrent" in str(exc_info.value)
+
+
+@pytest.mark.parametrize("model_id", ["dg_3b091cccc163690de93cddd9c4c32472", "unlisted_model_3344"])
+def test_shipped_profiles_render_forcing_at_one_core_and_forecast_at_model_cores(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    model_id: str,
+) -> None:
+    forecast_cores = 12 if model_id.startswith("dg_") else 4
+    gateway = _job_type_gateway(tmp_path, _SHIPPED_RESOURCE_PROFILES)
+    submissions = _capture_sbatch(monkeypatch)
+
+    _submit_job_type_array(gateway, tmp_path, "produce_forcing_array", model_id)
+    _submit_job_type_array(gateway, tmp_path, "run_shud_forecast_array", model_id)
+
+    forcing, forecast = (_script_lines(submission) for submission in submissions)
+    assert "#SBATCH --cpus-per-task=1" in forcing
+    assert "export SHUD_THREADS=1" in forcing
+    assert "export OMP_NUM_THREADS=1" in forcing
+    assert f"#SBATCH --cpus-per-task={forecast_cores}" in forecast
+    assert f"export SHUD_THREADS={forecast_cores}" in forecast
+    assert f"export OMP_NUM_THREADS={forecast_cores}" in forecast

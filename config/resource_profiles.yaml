@@ -12,7 +12,10 @@ resource_profiles:
     # applies; every other model shares this default. To give a large basin more
     # cores, add an override for EACH of its direct-grid model_ids (cpus_per_task,
     # memory_gb, shud_threads) and set the registry rows' resource_profile.shud_threads
-    # to the same value -- SHUD threads come from the registry, not from this file.
+    # to the same value -- the solver's own thread count comes from the registry; the
+    # exported SHUD_THREADS / OMP_NUM_THREADS and the core request come from this file.
+    # A job type listed under `job_type_overrides` is then applied on top of the
+    # model's profile for that stage only, and does not change the cohort split.
     # See docs/runbooks/production-ops/service-bringup.md.
     # This walltime stays the ceiling for every default-group member: HHe's SHUD
     # wall-clock swings with forcing intensity (7 min .. >5h50m observed) and
@@ -46,4 +49,20 @@ resource_profiles:
       memory_gb: 1
       walltime: "00:02:00"
       max_concurrent: 1
+      shud_threads: 1
+  # Per-job-type overrides, keyed by the gateway job type (the key of the
+  # job-type -> template mapping). Resolution order: default, then
+  # overrides[model_id], then job_type_overrides[job_type], then the deployment
+  # overlay (partition override / excluded nodes); the job type wins over the
+  # model. An entry may set only cpus_per_task, memory_gb and shud_threads, and
+  # must set cpus_per_task and shud_threads together; anything else is refused
+  # when the file is loaded.
+  job_type_overrides:
+    # The forcing producer is single-threaded and CPU-bound: sacct on 2026-11-25
+    # showed (user+sys)/elapsed = 1.00 on 4-core tasks (0.99 on 12-core HLJ tasks),
+    # peak RSS 0.46 GB, so 3 of every 4 (11 of 12) requested cores sat idle (#3344).
+    # Memory is left at the model's value (not a consumable resource on this
+    # cluster). Rollback: delete this entry; the file is read on every submission.
+    produce_forcing_array:
+      cpus_per_task: 1
       shud_threads: 1

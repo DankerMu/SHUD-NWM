@@ -50569,6 +50569,57 @@ def test_resource_profile_split_array_budgets_stay_within_global_bound(
         assert sorted(budgets) == [1] * 6 + [default_width, default_width]
 
 
+_JOB_TYPE_OVERRIDES_BLOCK = (
+    "  job_type_overrides:\n"
+    "    produce_forcing_array:\n"
+    "      cpus_per_task: 1\n"
+    "      shud_threads: 1\n"
+)
+
+
+def test_resource_profile_split_ignores_job_type_overrides(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # #3344: job_type_overrides changes what a stage asks for, never which model
+    # is task 0 of its own array, so the override id set, the cohorts and their
+    # array budgets are the same with and without it.
+    from services.slurm_gateway.resource_profiles import resource_profile_override_model_ids
+
+    override_models = ("big_a", "hlj_dg")
+    candidates = [
+        _concurrency_candidate(source, model_id, f"basin_{model_id}")
+        for source in ("gfs", "IFS")
+        for model_id in (*override_models, *(f"model_{index:02d}" for index in range(12)))
+    ]
+    observed: dict[str, list[tuple[list[str], str | None, int]]] = {}
+    for variant, extra in (("without", ""), ("with", _JOB_TYPE_OVERRIDES_BLOCK)):
+        directory = tmp_path / variant
+        directory.mkdir()
+        path = _write_profiles(directory, _override_block(*override_models) + extra)
+        assert resource_profile_override_model_ids(path) == frozenset(override_models), variant
+
+        _use_profiles(monkeypatch, str(path))
+        scheduler = _profile_split_scheduler(
+            tmp_path,
+            sources=("gfs", "IFS"),
+            concurrent_submit_bound=4,
+            slurm_array_concurrency_bound=32,
+        )
+        assert scheduler._scheduler_execution_context().resource_profile_override_model_ids() == frozenset(
+            override_models
+        ), variant
+        units = _profile_split_units(scheduler, candidates)
+        observed[variant] = [
+            (
+                [candidate.model_id for candidate in unit.execution_candidates],
+                unit.cohort_run_id,
+                unit.array_max_concurrent,
+            )
+            for unit in units
+        ]
+
+    assert len(observed["without"]) == 6
+    assert observed["with"] == observed["without"]
+
+
 def test_slurm_array_budget_queued_units_weight_by_member_count() -> None:
     import itertools
 
