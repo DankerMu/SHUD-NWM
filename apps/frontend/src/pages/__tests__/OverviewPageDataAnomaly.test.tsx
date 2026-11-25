@@ -1,12 +1,12 @@
 // #2129 裁决 B（design D2/D6）：变形载荷在默认 `/`（gfs）上降级为显式「数据异常」，
 // 不再抛进渲染、不再与请求失败共用文案、也不再让地图 bootstrap 无限加载。
-import { render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import { RouterProvider, createMemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest'
 
 import { OverviewPage } from '@/pages/OverviewPage'
 import { useOverviewDataStore } from '@/stores/overviewData'
-import { installMaplibreStubMap } from '@/test/maplibreStub'
+import { installMaplibreStubMap, maplibreMapStubProps } from '@/test/maplibreStub'
 import { CYCLES_PATH, DEFAULT_CYCLE, basin, mockApi, resetOverviewDataTestState, success } from '@/test/overviewDataFixture'
 
 vi.mock('@/api/client', () => ({
@@ -107,6 +107,95 @@ describe('OverviewPage bootstrap data anomaly (E8)', () => {
     // 有界等待：改动前 bootstrap 快照与 bootstrapError 都不写，加载提示会一直挂着。
     await waitFor(() => expect(screen.queryByTestId('m11-overview-loading')).toBeNull(), { timeout: 2000 })
     expect(screen.getByTestId('m11-overview-empty')).toHaveTextContent('数据异常')
+  })
+})
+
+describe('OverviewPage floating notices keep the map usable', () => {
+  function expectMapAndControlsRendered() {
+    expect(screen.getByTestId('m11-fullscreen-map')).toBeInTheDocument()
+    expect(screen.getByTestId('mock-maplibre-map')).toBeInTheDocument()
+    expect(screen.getByTestId('m11-floating-legend')).toBeInTheDocument()
+    expect(screen.getByTestId('m11-bottom-control-bar')).toBeInTheDocument()
+  }
+
+  it('states the reason in m11-overview-empty when the basin inventory is empty, with the map still rendered', async () => {
+    mockApi({ '/api/v1/basins': () => success([]) })
+    renderDefaultOverview()
+    await enrichmentSettled()
+
+    const notice = await screen.findByTestId('m11-overview-empty', undefined, { timeout: 2000 })
+    expect(useOverviewDataStore.getState().overview?.basins ?? []).toHaveLength(0)
+    expect(useOverviewDataStore.getState().bootstrapError).toBeNull()
+    expect(notice.textContent).toBe('暂无可用流域数据')
+    expectMapAndControlsRendered()
+  })
+
+  it('states the bootstrap failure in m11-overview-empty, with the map still rendered', async () => {
+    mockApi({
+      '/api/v1/basins': () => {
+        throw new Error('basins down')
+      },
+    })
+    renderDefaultOverview()
+    await enrichmentSettled()
+
+    await waitFor(() => expect(useOverviewDataStore.getState().bootstrapError).not.toBeNull())
+    const notice = await screen.findByTestId('m11-overview-empty', undefined, { timeout: 2000 })
+    expect(notice.textContent).toBe(useOverviewDataStore.getState().bootstrapError)
+    expectMapAndControlsRendered()
+  })
+
+  it('shows a business-layer map source error in m11-map-source-error and keeps the layers and controls', async () => {
+    mockApi({})
+    renderDefaultOverview()
+    await enrichmentSettled()
+    await waitFor(() => expect(screen.queryByTestId('m11-overview-loading')).toBeNull(), { timeout: 2000 })
+
+    const sourcesBefore = screen.getAllByTestId('maplibre-source').map((node) => node.getAttribute('data-source-id'))
+    expect(sourcesBefore.length).toBeGreaterThan(0)
+    expect(screen.queryByTestId('m11-map-source-error')).toBeNull()
+
+    // 生产 `onError` 经桩的 props 透出（桩类型只声明了它用到的事件，这里按 MapLibre 的 error 事件形状调用）。
+    const mapProps = maplibreMapStubProps.current as { onError?: (event: { sourceId?: string; error?: { message?: string } }) => void } | null
+    expect(mapProps?.onError).toBeTypeOf('function')
+    act(() => mapProps?.onError?.({ sourceId: 'hydro-mvt', error: { message: 'hydro tile failed' } }))
+
+    expect(screen.getByTestId('m11-map-source-error')).toHaveTextContent('hydro tile failed')
+    expect(screen.getAllByTestId('maplibre-source').map((node) => node.getAttribute('data-source-id'))).toEqual(sourcesBefore)
+    expectMapAndControlsRendered()
+  })
+
+  async function settledMapErrorHandler() {
+    mockApi({})
+    renderDefaultOverview()
+    await enrichmentSettled()
+    await waitFor(() => expect(screen.queryByTestId('m11-overview-loading')).toBeNull(), { timeout: 2000 })
+    const mapProps = maplibreMapStubProps.current as { onError?: (event: { sourceId?: string; error?: { message?: string } }) => void } | null
+    expect(mapProps?.onError).toBeTypeOf('function')
+    return (event: { sourceId?: string; error?: { message?: string } }) => act(() => mapProps?.onError?.(event))
+  }
+
+  it('shows the fixed fallback text in m11-map-source-error when the business-layer error message is empty', async () => {
+    const fireMapError = await settledMapErrorHandler()
+
+    fireMapError({ sourceId: 'hydro-mvt', error: { message: '' } })
+
+    expect(screen.getByTestId('m11-map-source-error').textContent).toBe('地图源加载失败，受影响图层暂不可用。')
+    expectMapAndControlsRendered()
+  })
+
+  it('raises no m11-map-source-error notice for an error whose message mentions glyphs', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    try {
+      const fireMapError = await settledMapErrorHandler()
+
+      fireMapError({ sourceId: 'met-stations', error: { message: 'layers.met-station-count: use of "text-field" requires a style "glyphs" property' } })
+
+      expect(screen.queryByTestId('m11-map-source-error')).toBeNull()
+      expectMapAndControlsRendered()
+    } finally {
+      warn.mockRestore()
+    }
   })
 })
 
