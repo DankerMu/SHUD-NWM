@@ -161,7 +161,7 @@ templates and `hindcast.sbatch` (a minimal smoke template was part of it until #
 - `services/orchestrator/cli.py` and `services/orchestrator/chain.py` import `services.tile_publisher`; `infra/sbatch/publish_tiles.sbatch` invokes `nhms-pipeline publish-tiles`.
 - `apps/api/routes/flood_alerts.py` imports `services.tiles.mvt` and owns `/api/v1/tiles/flood-return-period`, hydro, national hydro, and river-network tile routes.
 - `services/tiles/mvt.py` provides MVT cache, metadata, SQL, and tile URL-template helpers for the display routes.
-- `apps/frontend/src/components/flood` and `apps/frontend/src/components/map` consume flood-return-period tile metadata and render GeoJSON/MVT display layers.
+- `apps/frontend/src/components/map` renders the GeoJSON/MVT display layers. (Historical: `apps/frontend/src/components/flood` was named here as a consumer of flood-return-period tile metadata; #432 (`1710375b1`) deleted that directory.)
 
 `D9` originally confirmed `.github/workflows/ci.yml` contained the paused
 `frontend-m15-visual` job. Issue #366 removed that hidden-disabled job from
@@ -252,7 +252,7 @@ path.
 | `infra/sbatch/publish_tiles.sbatch` | `production` | `slurm_gateway` | `services/slurm_gateway/config.py` maps `publish_tiles` to this template; `tests/test_slurm_array_contract.py` covers the publish command path. | Active Slurm entry for tile publication. | Retain active path; no retirement action. | `D1`, `D6`, `D7` |
 | `apps/api/routes/flood_alerts.py` | `production` | `display_readonly` | Implements display flood alert and tile API routes used by frontend flood/map surfaces. | Active display API counterpart for legacy tile-publisher placeholder claims. | Retain active path; no retirement action. | `D7` |
 | `services/tiles` | `production` | `display_readonly` | Provides tile helpers used by `apps/api/routes/flood_alerts.py`. | Active display tile implementation counterpart. | Retain active path; no retirement action. | `D2`, `D7` |
-| `apps/frontend/src/components/flood` | `production` | `display_readonly` | Frontend flood alert components consume display API and tile products. | Active display frontend counterpart. | Retain active path; no retirement action. | `D7` |
+| `apps/frontend/src/components/flood` | `archived` | `display_readonly` | Frontend flood alert components; the directory no longer exists. | Deleted by #432 (`1710375b1`). | None; the row is kept as history. | `D7` |
 | `apps/frontend/src/components/map` | `production` | `display_readonly` | Map components render active display layers and MVT/GeoJSON overlays. | Active display frontend counterpart. | Retain active path; no retirement action. | `D7` |
 
 ## Follow-Up Ownership
@@ -302,15 +302,13 @@ path.
   test harness: `src/pages/{ForecastPage,FloodAlertPage,SegmentDetailPage}.tsx`,
   `src/pages/meteorology/MeteorologyPage.tsx`, `src/__tests__/legacyPagesHarness.tsx`
   (grep-proven zero external refs; node-27 receipt `pnpm test` 557 passed + build ✓).
-  **Newly orphaned by #410 (dead-code follow-up, not yet removed):**
-  `src/components/flood/{AlertRankingPanel,AlertStatsPanel,AlertTicker,AlertTimeline,FloodAlertMap,SegmentAlertDetail}`
-  and `src/stores/floodAlert` (component body only — the same-named `AlertTimeline`
-  type / `floodAlert` contracts stay live in single-map overview data, must keep),
-  `src/lib/meteorology/{contracts,viewModels,queryState}`, and suspected
-  `src/components/map/MapView` (only referenced by `AppRoutes.test.tsx` + own test).
-  `AppRoutes.test.tsx:12,214` retains #409-residual flood store/component imports
-  (App no longer routes to flood) = test cruft. These stay because some siblings
-  remain live in the single-map forecast popup chain; a focused dead-code sweep owns removal.
+  **Orphaned by #410 and deleted by #432 (`1710375b1`, 2026-06-12):**
+  `src/components/flood/{AlertRankingPanel,AlertStatsPanel,AlertTicker,AlertTimeline,FloodAlertMap,FloodReturnPeriodLayer,SegmentAlertDetail}`,
+  `src/stores/floodAlert`, `src/lib/meteorology/{contracts,viewModels,queryState}` and
+  `src/components/map/MapView`. Nothing under `apps/frontend/src` or `apps/frontend/e2e`
+  refers to flood alerts or `AlertTimeline` any more, and `AppRoutes.test.tsx` imports
+  only the overview page and `lib/m11` (#3243 corrected this entry, which had listed
+  the modules as pending removal).
 - #3222 ran that sweep for the frontend by reachability from `src/main.tsx` over
   non-test imports. Of the forecast siblings only `charts/ForecastChart` was live;
   the forecast panel, its segment-info and scenario-selector components and the
