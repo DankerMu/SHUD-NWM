@@ -7,6 +7,13 @@
 # automatically: a cycle counts as downloaded when its raw files are complete for
 # every selected source, and the runner serves the latest allowed cycle first when
 # it is incomplete, then the oldest incomplete cycle.
+#
+# Usage: node27_download_once.sh [GFS|IFS]
+# The optional argument (any letter case) runs one source: the runner gets
+# --source, and the log and summary files carry -gfs / -ifs before their
+# extension. The systemd template nhms-node27-download@.service passes its
+# instance name here. Without an argument every source of
+# NHMS_NODE27_DOWNLOAD_SOURCES runs and the configured paths are used.
 
 set -u
 
@@ -25,6 +32,30 @@ bootstrap_blocked() {
   echo "[$(ts)] node27-download: BLOCKED rc=2 reason=$reason" >&2
   exit 2
 }
+
+# The configured path with -<source> before the last extension of the file
+# name, or appended when the file name has none.
+source_path() {
+  local path="$1"
+  local name="${1##*/}"
+  case "$name" in
+    ?*.*) echo "${path%"$name"}${name%.*}-${DOWNLOAD_SOURCE_SUFFIX}.${name##*.}" ;;
+    *) echo "${path}-${DOWNLOAD_SOURCE_SUFFIX}" ;;
+  esac
+}
+
+DOWNLOAD_SOURCE=""
+if [ "$#" -gt 1 ]; then
+  bootstrap_blocked "DOWNLOAD_SOURCE_ARGUMENT_INVALID"
+fi
+if [ "$#" -eq 1 ]; then
+  DOWNLOAD_SOURCE=$(printf '%s' "$1" | tr '[:lower:]' '[:upper:]')
+  case "$DOWNLOAD_SOURCE" in
+    GFS|IFS) ;;
+    *) bootstrap_blocked "DOWNLOAD_SOURCE_ARGUMENT_INVALID" ;;
+  esac
+fi
+DOWNLOAD_SOURCE_SUFFIX=$(printf '%s' "$DOWNLOAD_SOURCE" | tr '[:upper:]' '[:lower:]')
 
 if [ -f "$DOWNLOAD_ENV" ]; then
   case "$DOWNLOAD_ENV" in
@@ -49,7 +80,7 @@ if [ -f "$DOWNLOAD_ENV" ]; then
     unset NODE27_DOWNLOAD_LOG_ROOT
     unset NODE27_DOWNLOAD_LOCK_PATH
     unset NODE27_DOWNLOAD_CYCLE_TIME
-    unset NODE27_DOWNLOAD_SOURCES
+    unset NHMS_NODE27_DOWNLOAD_SOURCES
     unset NODE27_DOWNLOAD_SUMMARY_PATH
     unset PGUSER
     unset PGPASSWORD
@@ -93,12 +124,20 @@ fi
 mkdir -p "$NODE27_DOWNLOAD_LOG_ROOT" 2>/dev/null || bootstrap_blocked "NODE27_DOWNLOAD_LOG_ROOT_UNWRITABLE"
 LOG="${NODE27_DOWNLOAD_LOG_FILE:-$NODE27_DOWNLOAD_LOG_ROOT/download.log}"
 SUMMARY="${NODE27_DOWNLOAD_SUMMARY_PATH:-$NODE27_DOWNLOAD_LOG_ROOT/last-summary.json}"
+DOWNLOAD_SOURCE_NOTE=""
+set --
+if [ -n "$DOWNLOAD_SOURCE" ]; then
+  LOG=$(source_path "$LOG")
+  SUMMARY=$(source_path "$SUMMARY")
+  DOWNLOAD_SOURCE_NOTE=" source=$DOWNLOAD_SOURCE"
+  set -- --source "$DOWNLOAD_SOURCE"
+fi
 
 cd "$REPO" || bootstrap_blocked "REPO_UNAVAILABLE"
-echo "[$(ts)] node27-download: start cycle=${NODE27_DOWNLOAD_CYCLE_TIME:-auto}" >> "$LOG"
+echo "[$(ts)] node27-download: start${DOWNLOAD_SOURCE_NOTE} cycle=${NODE27_DOWNLOAD_CYCLE_TIME:-auto}" >> "$LOG"
 "$REPO/.venv/bin/python" "$REPO/scripts/node27_download_cycles.py" \
   --cycle-time "${NODE27_DOWNLOAD_CYCLE_TIME:-}" \
-  --summary-path "$SUMMARY" >> "$LOG" 2>&1
+  --summary-path "$SUMMARY" "$@" >> "$LOG" 2>&1
 RC=$?
-echo "[$(ts)] node27-download: done rc=$RC summary=$SUMMARY" >> "$LOG"
+echo "[$(ts)] node27-download: done${DOWNLOAD_SOURCE_NOTE} rc=$RC summary=$SUMMARY" >> "$LOG"
 exit "$RC"

@@ -4090,7 +4090,7 @@ def test_sibling_units_keep_their_systemd_err_lane() -> None:
     ]
     assert set(with_err_lane) == {
         "nhms-node27-autopipe.service",
-        "nhms-node27-download.service",
+        "nhms-node27-download@.service",
         "nhms-node27-frontier-alert.service",
         "nhms-node27-mvt-cache-retention.service",
         "nhms-node27-raw-retention.service",

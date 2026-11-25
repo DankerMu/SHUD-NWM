@@ -7309,11 +7309,13 @@ a DSN that has not been identified.
 
    ```bash
    export XDG_RUNTIME_DIR=/run/user/$(id -u)
-   timers=(nhms-node27-autopipe.timer nhms-node27-download.timer
+   timers=(nhms-node27-autopipe.timer
+     nhms-node27-download@GFS.timer nhms-node27-download@IFS.timer
      nhms-node27-timeseries-compression.timer nhms-node27-timeseries-retention.timer
      nhms-node27-resource-governance.timer)
    services=(nhms-display-api.service nhms-node27-autopipe.service
-     nhms-node27-download.service nhms-node27-timeseries-compression.service
+     nhms-node27-download@GFS.service nhms-node27-download@IFS.service
+     nhms-node27-timeseries-compression.service
      nhms-node27-timeseries-retention.service nhms-node27-resource-governance.service)
    for unit in "${timers[@]}" "${services[@]}"; do
      test "$(systemctl --user show "$unit" -p LoadState --value)" = loaded
@@ -7342,7 +7344,7 @@ a DSN that has not been identified.
    | `nhms-node27-autopipe.timer` | writes `met.forcing_version` and the narrow fact table, whose foreign keys reference `met.met_station` |
    | `nhms-node27-timeseries-compression.timer` | enumerates the legacy table's chunks from the catalog; `compress_chunk` there locks the same FK-referenced tables |
    | `nhms-node27-timeseries-retention.timer` | same, through `drop_chunks` |
-   | `nhms-node27-download.timer` | writes into `met` — see below |
+   | `nhms-node27-download@GFS.timer`, `nhms-node27-download@IFS.timer` | write into `met` — see below |
    | `nhms-node27-resource-governance.timer` | its collection SQL enumerates every hypertable chunk, the legacy table's included: `hypertable_size_breakdown` and `largest_chunks` read `timescaledb_information.chunks` with no hypertable filter and resolve each chunk through `::regclass` into `pg_relation_size` / `pg_total_relation_size` (`packages/common/node27_resource_governance_collection.py:528-559`). A run that overlaps the drop either holds a lock the `DROP` waits for or loses a chunk mid-statement. Daily at 04:10 UTC, `Persistent=true` |
 
    **The download lane does write into `met`.** Established from the repository,
@@ -8895,7 +8897,7 @@ scan and fails if a lane grows a requirement this table does not cover.
 | Unit (systemd) | Entrypoint | Measured DB requirement | Role |
 |---|---|---|---|
 | `nhms-node27-autopipe.service` | `scripts/node27_autopipeline.py` | DML across `core`/`met`/`hydro`/`ops`/`map`; **`ANALYZE` on frontier chunks and on authority tables** → ownership. No `compress_chunk`/`drop_chunks`/policy calls, no runtime `CREATE TABLE`/`CREATE INDEX`/`TRUNCATE`/`REFRESH MATERIALIZED VIEW` | `nhms_ingest_rw` |
-| `nhms-node27-download.service` | `scripts/node27_download_once.sh` → `node27_download_cycles.py` → `nhms-gfs`/`nhms-ifs download` | DML on `met.data_source` and `met.forecast_cycle` only: the wrapper requires `DATABASE_URL` when it sources its env file (`scripts/node27_download_once.sh:76-78`), and the adapters write through `PsycopgMetStore` (`workers/data_adapters/gfs_adapter.py::GFSAdapter.from_env`, `ifs_adapter.py::IFSAdapter.from_env` → `packages/common/met_store.py::PsycopgMetStore.ensure_data_source` / `::upsert_forecast_cycle` / `::update_forecast_cycle`). There is no SQL text under `workers/data_adapters/` itself; the `met.*` forcing DML is applied from the ingest lane | `nhms_download_rw` (DML on `met` only) |
+| `nhms-node27-download@<SOURCE>.service` | `scripts/node27_download_once.sh` → `node27_download_cycles.py` → `nhms-gfs`/`nhms-ifs download` | DML on `met.data_source` and `met.forecast_cycle` only: the wrapper requires `DATABASE_URL` when it sources its env file (`scripts/node27_download_once.sh`, blocked reason `DATABASE_URL_MISSING`), and the adapters write through `PsycopgMetStore` (`workers/data_adapters/gfs_adapter.py::GFSAdapter.from_env`, `ifs_adapter.py::IFSAdapter.from_env` → `packages/common/met_store.py::PsycopgMetStore.ensure_data_source` / `::upsert_forecast_cycle` / `::update_forecast_cycle`). There is no SQL text under `workers/data_adapters/` itself; the `met.*` forcing DML is applied from the ingest lane | `nhms_download_rw` (DML on `met` only) |
 | `nhms-node27-timeseries-compression.service` (compression leg) | `scripts/node27_timeseries_compression.py::_default_compress_chunk` | `compress_chunk(regclass)` → ownership; read-only watermark query | `nhms_ingest_rw` |
 | Withdrawn cold-residency leg (source retirement complete; R3 removed cold grant/positive audit from repository source; not a deployment instruction) | `scripts/node27_cold_residency.py` → `packages/common/compressed_chunk_cold_residency.py` | Historical `ALTER TABLE/INDEX … SET TABLESPACE nhms_cold` and tablespace `CREATE`; source retirement does not authorize live `REVOKE`/`DROP` | historical `nhms_ingest_rw` requirement only |
 | `nhms-node27-timeseries-retention.service` | `scripts/node27_timeseries_retention.py::_default_drop_chunk` | `drop_chunks(...)` → ownership | `nhms_ingest_rw` |

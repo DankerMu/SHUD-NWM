@@ -515,15 +515,20 @@ Node-27 ingest role:
 Node-27 download role:
 
 - `infra/env/node27-download.example` is the committed template for
-  `scripts/node27_download_once.sh` and
-  `infra/systemd/nhms-node27-download.{service,timer}`. Copy it to untracked
+  `scripts/node27_download_once.sh` and the template units
+  `infra/systemd/nhms-node27-download@.{service,timer}`, deployed as one
+  instance per source (`@GFS`, `@IFS`). Copy it to untracked
   `infra/env/node27-download.env` with mode `0600` and writer-capable
   `DATABASE_URL` on node-27.
 - Leave `NODE27_DOWNLOAD_CYCLE_TIME` empty for production automation. The runner
   scans the allowed cycles from the start of the raw chain (the oldest cycle
   with a raw manifest in the continuity lookback window) up to the latest
   allowed UTC cycle from `NHMS_NODE27_DOWNLOAD_ALLOWED_CYCLE_HOURS_UTC` after
-  `NODE27_DOWNLOAD_CYCLE_DELAY_HOURS` (default template: 8 hours). A cycle
+  the delay. The delay is per source:
+  `NODE27_DOWNLOAD_CYCLE_DELAY_HOURS_<SOURCE>` when set, otherwise the shared
+  `NODE27_DOWNLOAD_CYCLE_DELAY_HOURS` (template: 6 hours for GFS, 8 hours
+  shared); a pass that runs several sources uses the largest of their delays.
+  A cycle
   counts as downloaded only when its raw files are complete for every selected
   source: the manifest matches and every file it lists is a non-empty regular
   file, the rule the scheduler applies. A manifest alone does not count. The
@@ -533,6 +538,12 @@ Node-27 download role:
   as the first seed. The pass summary lists the incomplete cycles with the
   status and reason per source under `cycle_time_selection_detail`. Set
   `NODE27_DOWNLOAD_CYCLE_TIME` only for explicit operator-directed runs.
+- Each unit instance passes its source to the wrapper. The wrapper then runs
+  that source only and writes `download-<source>.log` and
+  `last-summary-<source>.json` next to the configured log and summary files.
+  The runner locks per source (`NODE27_DOWNLOAD_LOCK_PATH` plus `.gfs` /
+  `.ifs`), so the two instances do not block each other, while a manual pass
+  without a source is excluded by either of them.
 - To get past an older cycle the upstream no longer serves, set
   `NODE27_DOWNLOAD_CONTINUITY_START_TIME` to a cycle after it; the scan then
   starts there. This start ignores the lookback window, so unset it again once

@@ -15,21 +15,29 @@
 
 ### 3.1 下载 / 调度器 / ingest
 
-node-27 source download 使用用户级 systemd timer。它不使用 display env，不连
+node-27 source download 使用用户级 systemd timer，每个 source 一个实例
+（`nhms-node27-download@GFS`、`nhms-node27-download@IFS`）：各自的 timer、各自的锁
+（`NODE27_DOWNLOAD_LOCK_PATH` 后加 `.gfs` / `.ifs`）、各自的 log 与 summary，一个 source
+下载慢不会挡住另一个。它不使用 display env，不连
 node-22 DB；未显式设置 `NODE27_DOWNLOAD_CYCLE_TIME` 时自动选择 cycle：一个 cycle 的 raw
 文件对所选的每个 source 都齐全才算下载完成（只有 manifest 不算）；最新允许的 00/12 UTC
 业务 cycle 未完成时先下它，否则补最老的未完成 cycle。pass summary 的
-`cycle_time_selection_detail` 列出未完成的 cycle 及各 source 的状态与原因：
+`cycle_time_selection_detail` 列出未完成的 cycle 及各 source 的状态与原因。
+"最新允许"按 source 计算：`NODE27_DOWNLOAD_CYCLE_DELAY_HOURS_<SOURCE>` 优先，否则用共享的
+`NODE27_DOWNLOAD_CYCLE_DELAY_HOURS`（模板：GFS 6 小时，其余 8 小时）：
 
 ```bash
 ssh -p 32099 nwm@210.77.77.27
-systemctl --user status nhms-node27-download.timer nhms-node27-download.service --no-pager
-tail -n 160 /home/nwm/node27-download-logs/download.log
+systemctl --user status 'nhms-node27-download@*.timer' 'nhms-node27-download@*.service' --no-pager
+tail -n 160 /home/nwm/node27-download-logs/download-gfs.log
+tail -n 160 /home/nwm/node27-download-logs/download-ifs.log
 ```
 
 期望：
 
-- `nhms-node27-download.timer` 为 `active (waiting)`。
+- `nhms-node27-download@GFS.timer` 与 `nhms-node27-download@IFS.timer` 为 `active (waiting)`。
+- 每个实例的 summary 在 `last-summary-gfs.json` / `last-summary-ifs.json`；
+  `last-summary.json` 只由不带 source 的手工 pass 更新。
 - `infra/env/node27-download.env` mode 为 `0600`。
 - 下载 summary 的 `cycle_time_selection` 为 `automatic`，cycle hour 在 `0,12`
   之内。

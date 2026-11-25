@@ -31,6 +31,15 @@ WORKSPACE_ROOT=/home/nwm/node27-download-work
 # lookback window, so unset it again once that cycle has left the window.
 NODE27_DOWNLOAD_CYCLE_TIME=
 NODE27_DOWNLOAD_CYCLE_DELAY_HOURS=8
+# Delay per source: NODE27_DOWNLOAD_CYCLE_DELAY_HOURS_<SOURCE> when set, else
+# the shared key above; a pass with several sources uses the largest of their
+# delays.
+# Basis (34 cycles, Nov 2026): GFS on the first backend by T+5.22 h at the latest, IFS at T+7.57 h.
+# The runner locks per source: the lock path below with .gfs / .ifs appended.
+# When the wrapper is given a source (the nhms-node27-download@GFS / @IFS
+# units), the log and summary files are per source too: the paths below with
+# -gfs / -ifs before the extension.
+NODE27_DOWNLOAD_CYCLE_DELAY_HOURS_GFS=6
 NODE27_DOWNLOAD_CONTINUITY_LOOKBACK_DAYS=14
 NHMS_NODE27_DOWNLOAD_SOURCES=GFS,IFS
 NHMS_NODE27_DOWNLOAD_ALLOWED_CYCLE_HOURS_UTC=0,12
