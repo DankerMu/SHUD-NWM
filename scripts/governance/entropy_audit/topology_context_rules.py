@@ -4,7 +4,13 @@ Split out of ``scripts/governance/audit_repo_entropy.py`` by #1842. Each rule
 reads the surrounding context of a candidate drift line and decides whether it
 is current drift or an allowed boundary: non-current documents, retirement and
 rejection boundaries, compatibility-mirror contracts, guardrail/test meta,
-pre-cutover historical evidence and archived/stopped state claims."""
+pre-cutover historical evidence and archived/stopped state claims.
+
+#3358: the family covers the compute role by codename and by host name (w3,
+w2). The database-writer rules here receive lines whose host names were already
+rewritten to the codename, so their codename patterns apply to both; the
+retired-host local-PostgreSQL rules read the original lines and so stay about
+node-22's own PostgreSQL."""
 
 from __future__ import annotations
 

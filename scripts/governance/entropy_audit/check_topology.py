@@ -5,7 +5,13 @@ Split out of ``scripts/governance/audit_repo_entropy.py`` by #1842. Holds
 scan-file set, the finding builder, the archive/generated and non-current
 document tests, the declared-current-authority front-matter parser, and the
 context-window extractors (``_topology_line_context`` and the three fixed-width
-wrappers over it)."""
+wrappers over it).
+
+#3358: the node-22 database-writer and local-PostgreSQL checks cover the compute
+role by codename and by host name. The database-writer family reads the lines
+with host names rewritten to the codename; the local-PostgreSQL check adds a
+compute-host leg. The retired-host legs and the display-env check read the
+original lines."""
 
 from __future__ import annotations
 
@@ -31,10 +37,12 @@ from scripts.governance.entropy_audit.topology_display_env import (
     _topology_display_env_file_allows_file_level_association,
 )
 from scripts.governance.entropy_audit.topology_predicates import (
+    _topology_line_has_compute_host_local_postgres_drift,
     _topology_line_has_node22_local_postgres_or_mirror_drift,
     _topology_line_may_have_node22_db_writer_drift,
     _topology_line_may_start_node22_db_writer_claim,
     _topology_normalized,
+    _topology_rewrite_compute_hosts,
 )
 
 
@@ -52,33 +60,44 @@ def _check_production_topology_drift(root: Path) -> list[FindingSpec]:
         if _topology_document_is_non_current(rel, lines, declared_authorities=declared_authorities):
             continue
         display_env_facts = _topology_display_env_facts(lines)
+        writer_lines = [_topology_rewrite_compute_hosts(line) for line in lines]
         emitted_writer_claims: set[str] = set()
         emitted_display_contexts: set[str] = set()
         for index, line in enumerate(lines, start=1):
-            if _topology_line_may_start_node22_db_writer_claim(line):
-                writer_context = _topology_node22_writer_claim_context(lines, index)
+            writer_line = writer_lines[index - 1]
+            if _topology_line_may_start_node22_db_writer_claim(writer_line):
+                writer_context = _topology_node22_writer_claim_context(writer_lines, index)
+                # The de-duplication key reads the original lines over the same window, so a
+                # codename line and an otherwise equal host-name line stay two claims.
+                claim_after = _topology_node22_writer_claim_after(writer_line)
+                claim_key = _topology_normalized("\n".join(lines[index - 1 : index + claim_after]))
                 if (
-                    _topology_line_has_node22_db_writer_drift(line, writer_context)
-                    and not _topology_node22_db_writer_context_is_allowed(line, writer_context)
-                    and writer_context not in emitted_writer_claims
+                    _topology_line_has_node22_db_writer_drift(writer_line, writer_context)
+                    and not _topology_node22_db_writer_context_is_allowed(writer_line, writer_context)
+                    and claim_key not in emitted_writer_claims
                 ):
-                    emitted_writer_claims.add(writer_context)
+                    emitted_writer_claims.add(claim_key)
                     findings.append(
                         _topology_finding(
                             root,
                             path,
                             line=index,
                             check_id="production-topology-node22-db-writer",
-                            title="Active topology text assigns DB writer responsibility to node-22",
+                            title=(
+                                "Active topology text assigns DB writer responsibility to the compute role "
+                                "(node-22 / w3 / w2)"
+                            ),
                             description=(
-                                "An active topology surface describes node-22 as the current NHMS active DB writer."
+                                "An active topology surface describes the compute role (node-22 / w3 / w2) as the "
+                                "current NHMS active DB writer."
                             ),
                             recommendation=(
-                                "State that node-22 is compute/Slurm/artifact producer only; route active DB writes "
-                                "and ingest validation to node-27."
+                                "State that the compute role (node-22 / w3 / w2) is compute/Slurm/artifact producer "
+                                "only; route active DB writes and ingest validation to node-27."
                             ),
                         )
                     )
+            has_local_postgres_drift = _topology_line_has_compute_host_local_postgres_drift(line)
             has_node22_pg_or_mirror_drift = _topology_line_has_node22_local_postgres_or_mirror_drift(line)
             has_node22_database_url_scan_drift = False
             contract_context = ""
@@ -88,29 +107,34 @@ def _check_production_topology_drift(root: Path) -> list[FindingSpec]:
                     line,
                     contract_context,
                 )
-            if has_node22_pg_or_mirror_drift or has_node22_database_url_scan_drift:
+            if not has_local_postgres_drift and (has_node22_pg_or_mirror_drift or has_node22_database_url_scan_drift):
                 claim_context = _topology_forward_claim_context(lines, index, after=4)
-                if _topology_local_postgres_context_is_allowed(
+                has_local_postgres_drift = not _topology_local_postgres_context_is_allowed(
                     line,
                     contract_context,
                     claim_context=claim_context,
-                ):
-                    continue
+                )
+            if has_local_postgres_drift:
                 findings.append(
                     _topology_finding(
                         root,
                         path,
                         line=index,
                         check_id="production-topology-node22-local-postgres",
-                        title="Node-22 local PostgreSQL or rollback mirror lacks non-current boundary",
+                        title=(
+                            "Local PostgreSQL of the compute role (node-22 / w3 / w2) or rollback mirror lacks "
+                            "non-current boundary"
+                        ),
                         description=(
-                            "An active topology surface mentions node-22 local PostgreSQL, port :55433, or a "
-                            "node-22 rollback mirror without the required archived/stopped compatibility wording."
+                            "An active topology surface mentions a local PostgreSQL of the compute role "
+                            "(node-22 / w3 / w2), port :55433, or a node-22 rollback mirror without the required "
+                            "boundary wording."
                         ),
                         recommendation=(
-                            "Mark node-22 local PostgreSQL as historical and do-not-connect, and keep any "
-                            "rollback mirror explicit-DSN, archived-rollback-flagged, compatibility-only, "
-                            "and sunset-bound."
+                            "State that the compute role (node-22 / w3 / w2) uses no local PostgreSQL: w3 / w2 "
+                            "run none, and node-22 local PostgreSQL is historical and do-not-connect; keep any "
+                            "rollback mirror explicit-DSN, archived-rollback-flagged, compatibility-only, and "
+                            "sunset-bound."
                         ),
                     )
                 )
@@ -444,13 +468,16 @@ def _topology_forward_claim_context(lines: list[str], line_no: int, *, after: in
 
 
 def _topology_node22_writer_claim_context(lines: list[str], line_no: int) -> str:
-    line = lines[line_no - 1]
+    after = _topology_node22_writer_claim_after(lines[line_no - 1])
+    return _topology_line_context(lines, line_no, before=0, after=after)
+
+
+def _topology_node22_writer_claim_after(line: str) -> int:
     stripped = line.rstrip()
     line_ends_claim = stripped.endswith((".", "。", "!", "！", "?", "？")) or bool(
         re.search(r'[.。!！?？]["\']\s*,?\s*$', stripped)
     )
-    after = 0 if _topology_line_may_have_node22_db_writer_drift(line) and line_ends_claim else 2
-    return _topology_line_context(lines, line_no, before=0, after=after)
+    return 0 if _topology_line_may_have_node22_db_writer_drift(line) and line_ends_claim else 2
 
 
 def _topology_contract_context(lines: list[str], line_no: int) -> str:

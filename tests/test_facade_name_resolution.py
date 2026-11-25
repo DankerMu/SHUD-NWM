@@ -15,14 +15,19 @@ an explicit facade import or delete the read.  It must not add an exemption.
 
 Scope:
 
-* files: ``services/orchestrator/**/*.py`` (*owner* sources) and
-  ``tests/**/*.py`` (*test* sources);
+* files: ``services/orchestrator/**/*.py`` (*owner* sources), and
+  ``tests/**/*.py``, ``apps/**/*.py``, ``scripts/**/*.py``,
+  ``workers/**/*.py``, ``packages/**/*.py`` (*test* sources: every file
+  outside ``services/orchestrator`` gets the test-source treatment), with
+  ``__pycache__`` and ``node_modules`` directories skipped;
 * reads in a facade's own source that target that same facade are skipped.
   A facade's imports from its own owner modules are not reads.
 
 Facade bindings, tracked per function scope:
 
-* ``from services.orchestrator import scheduler|chain [as A]``;
+* ``from services.orchestrator import scheduler|chain [as A]``, and its
+  relative spellings (``from . import chain`` in ``services/orchestrator``,
+  ``from .. import scheduler as A`` one package below);
 * ``import services.orchestrator.scheduler|chain as A``;
 * the bare dotted form ``services.orchestrator.chain.X`` (after a plain
   ``import services.orchestrator.chain``).
@@ -46,12 +51,23 @@ Collected reads, keyed on the first attribute after the facade
   string target ``"services.orchestrator.scheduler.X[.…]"`` /
   ``"services.orchestrator.chain.X[.…]"`` in ``<obj>.setattr`` /
   ``<obj>.delattr`` / ``patch`` / ``mock.patch``;
-* ``from-import``: ``from services.orchestrator.scheduler|chain import X``;
+* ``from-import``: ``from services.orchestrator.scheduler|chain import X``, and
+  its relative spellings (``from .scheduler import X``, ``from ..chain import X``).
+  A relative module is resolved from the scanned file's path and the import's
+  level, then compared with the facade modules; one that resolves elsewhere
+  (``from .scheduler import X`` under ``apps``) or climbs to or above the
+  repo root is not a facade read;
 * ``owner-dispatch``: in an owner source, a module-level function whose body
   calls ``getattr(A, <its own parameter>)`` is a dispatch wrapper (today
   ``_scheduler_call`` in ``scheduler_candidate_manifest.py`` and
-  ``scheduler_candidate_execution_evidence.py``).  Each call to it with a
-  literal argument in that parameter's position is a read of that name;
+  ``scheduler_candidate_execution_evidence.py``, and the package
+  ``__getattr__`` in ``services/orchestrator/__init__.py`` on the chain
+  facade).  Each call to it with a literal argument in that parameter's
+  position is a read of that name.  The package ``__getattr__`` is called by
+  the import system, never with a literal, so the names it forwards are not
+  collected as reads; ``test_package_getattr_forwarded_names_resolve`` checks
+  them instead, taking them from the module-level set literal that its body
+  tests its parameter against (``_CHAIN_EXPORTS``);
 * ``seam-literal``: in an owner source, a call to ``facade_seam`` (bare name or
   an attribute access ending in ``facade_seam``) with a literal first argument
   is a read of that name on the scheduler facade.  The lookup reaches the
@@ -84,8 +100,7 @@ inside a recognised dispatch wrapper, and so does a non-literal
 argument is not a literal.  None of them can be resolved statically, and each
 has zero sites at a306fd5e4.
 
-Not bindings, so not scanned (out of the 10.2 contract): relative imports
-(``from .scheduler import X``, ``from . import chain``),
+Not bindings, so not scanned (out of the 10.2 contract):
 ``importlib.import_module(...)`` and ``sys.modules[...]`` lookups.  The one
 ``sys.modules`` lookup of the scheduler facade in owner code is
 ``facade_seam``, and its literal names are collected as ``seam-literal``.
@@ -117,7 +132,9 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 OWNER_ROOT = "services/orchestrator"
-SCAN_ROOTS = ("services/orchestrator", "tests")
+SCAN_ROOTS = ("services/orchestrator", "tests", "apps", "scripts", "workers", "packages")
+# Bytecode caches and gitignored third-party trees (``apps/frontend/node_modules``).
+_SKIPPED_DIRS = frozenset({"__pycache__", "node_modules"})
 
 FACADE_MODULES = {
     "services.orchestrator.scheduler": "scheduler",
@@ -226,7 +243,26 @@ def _is_patch_object(func: ast.AST) -> bool:
     return receiver is not None and receiver.split(".")[-1] == "patch"
 
 
-def _facade_bindings(statements: Iterable[ast.stmt]) -> dict[str, str]:
+def _absolute_module(node: ast.ImportFrom, path: str) -> str | None:
+    """Dotted module that ``node`` imports from, when written in the file at repo-relative ``path``.
+
+    A relative import is resolved against the file's package (the directory of
+    ``a/b/c.py`` and of ``a/b/__init__.py`` is ``a.b``); one that climbs to or
+    above the repo root resolves to ``None``.
+    """
+
+    if node.level == 0:
+        return node.module
+    package = path.split("/")[:-1]
+    if node.level - 1 >= len(package):
+        return None
+    parts = package[: len(package) - (node.level - 1)]
+    if node.module:
+        parts.append(node.module)
+    return ".".join(parts)
+
+
+def _facade_bindings(statements: Iterable[ast.stmt], path: str) -> dict[str, str]:
     """Facade aliases bound directly in a scope (nested defs and lambdas excluded)."""
 
     aliases: dict[str, str] = {}
@@ -235,7 +271,7 @@ def _facade_bindings(statements: Iterable[ast.stmt]) -> dict[str, str]:
         node = stack.pop()
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
             continue
-        if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module == _FACADE_IMPORT_PARENT:
+        if isinstance(node, ast.ImportFrom) and _absolute_module(node, path) == _FACADE_IMPORT_PARENT:
             for item in node.names:
                 if item.name in FACADE_MODULES.values():
                     aliases[item.asname or item.name] = item.name
@@ -259,15 +295,15 @@ def _positional_parameters(node: ast.FunctionDef | ast.AsyncFunctionDef) -> list
 
 
 def _function_scope(
-    node: ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda, parent: dict[str, str]
+    node: ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda, parent: dict[str, str], path: str
 ) -> dict[str, str]:
     scope = {k: v for k, v in parent.items() if k not in set(_parameters(node))}
     if not isinstance(node, ast.Lambda):
-        scope.update(_facade_bindings(node.body))
+        scope.update(_facade_bindings(node.body, path))
     return scope
 
 
-def _dispatch_wrappers(tree: ast.Module, module_scope: dict[str, str]) -> dict[str, tuple[str, int, str]]:
+def _dispatch_wrappers(tree: ast.Module, module_scope: dict[str, str], path: str) -> dict[str, tuple[str, int, str]]:
     """Module-level functions whose body calls ``getattr(<facade>, <own parameter>)``.
 
     Returns ``{function name: (facade, positional index of the parameter, parameter)}``.
@@ -277,7 +313,7 @@ def _dispatch_wrappers(tree: ast.Module, module_scope: dict[str, str]) -> dict[s
     for node in tree.body:
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
-        scope = _function_scope(node, module_scope)
+        scope = _function_scope(node, module_scope, path)
         positional = _positional_parameters(node)
         for inner in ast.walk(node):
             if not (isinstance(inner, ast.Call) and isinstance(inner.func, ast.Name) and inner.func.id == "getattr"):
@@ -297,10 +333,10 @@ class _Collector(ast.NodeVisitor):
         self.owner = owner
         self.self_facade = FACADE_SOURCES.get(path)
         self.result = ScanResult()
-        module_scope = _facade_bindings(tree.body)
+        module_scope = _facade_bindings(tree.body, path)
         self.scopes: list[dict[str, str]] = [module_scope]
         self.functions: list[ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda] = []
-        self.wrappers = _dispatch_wrappers(tree, module_scope) if owner else {}
+        self.wrappers = _dispatch_wrappers(tree, module_scope, path) if owner else {}
         self.patch_targets: set[int] = set()
 
     # -- helpers -----------------------------------------------------------
@@ -350,7 +386,7 @@ class _Collector(ast.NodeVisitor):
                 outer.append(node.returns)
         for expression in outer:
             self.visit(expression)
-        self.scopes.append(_function_scope(node, self.scopes[-1]))
+        self.scopes.append(_function_scope(node, self.scopes[-1], self.path))
         self.functions.append(node)
         body = [node.body] if isinstance(node, ast.Lambda) else node.body
         for statement in body:
@@ -364,10 +400,11 @@ class _Collector(ast.NodeVisitor):
 
     # -- reads -------------------------------------------------------------
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
-        if node.level == 0 and node.module in FACADE_MODULES:
+        module = _absolute_module(node, self.path)
+        if module in FACADE_MODULES:
             for item in node.names:
                 if item.name != "*":
-                    self._read(FACADE_MODULES[node.module], item.name, "from-import", node.lineno)
+                    self._read(FACADE_MODULES[module], item.name, "from-import", node.lineno)
 
     def visit_Attribute(self, node: ast.Attribute) -> None:
         if isinstance(node.value, ast.Name):
@@ -479,7 +516,7 @@ def scan_source(source: str, path: str) -> ScanResult:
 def iter_scanned_files(root: Path) -> list[Path]:
     files: set[Path] = set()
     for scan_root in SCAN_ROOTS:
-        files.update(path for path in (root / scan_root).rglob("*.py") if "__pycache__" not in path.parts)
+        files.update(path for path in (root / scan_root).rglob("*.py") if not _SKIPPED_DIRS & set(path.parts))
     return sorted(files)
 
 
@@ -555,10 +592,10 @@ def _report(result: ScanResult) -> str:
     dispatch = sorted({r.name for r in result.reads if r.form == "owner-dispatch"})
     lines.append(f"owner-dispatch distinct literal names: {len(dispatch)}")
     lines.append(f"dispatch wrapper getattr sites: {sorted(set(result.wrapper_sites))}")
-    lines.append(f"non-literal reads in tests (counted, not collected): {len(result.nonliteral)}")
+    lines.append(f"non-literal reads in non-owner sources (counted, not collected): {len(result.nonliteral)}")
     for kind, count in sorted(collections.Counter(kind for _, _, kind in result.nonliteral).items()):
         lines.append(f"    {kind}: {count}")
-    lines.append(f"facade path strings outside a literal patch target (tests): {len(result.stray_string_targets)}")
+    lines.append(f"facade path strings outside a literal patch target (non-owner): {len(result.stray_string_targets)}")
     lines.extend(f"    {path}:{line} {value}" for path, line, value in result.stray_string_targets)
     lines.append(f"owner violations: {len(result.violations)}")
     lines.append(f"exemption table ({len(EXEMPTIONS)} entries): {list(EXEMPTIONS)}")
@@ -788,6 +825,48 @@ _FLAG_ROWS = [
         C + "def helper(name, value):\n    setattr(_chain, name, value)\n",
         {("violation", "", "")},
     ),
+    (
+        "relative-from-import-scheduler",
+        OWNER_PATH,
+        f"from .scheduler import ProductionScheduler, {MISSING}\n",
+        {("scheduler", MISSING, "from-import")},
+    ),
+    (
+        "relative-from-import-chain",
+        OWNER_PATH,
+        f"from .chain import OrchestratorError, {MISSING}\n",
+        {("chain", MISSING, "from-import")},
+    ),
+    (
+        "relative-from-import-in-package-init",
+        "services/orchestrator/__init__.py",
+        f"def helper():\n    from .chain import {MISSING}\n",
+        {("chain", MISSING, "from-import")},
+    ),
+    (
+        "relative-package-import-alias",
+        OWNER_PATH,
+        f"from . import scheduler as s\ns.{MISSING}\n",
+        {("scheduler", MISSING, "attr-load")},
+    ),
+    (
+        "relative-package-import-getattr",
+        OWNER_PATH,
+        f"from . import chain\ngetattr(chain, {MISSING!r})\n",
+        {("chain", MISSING, "getattr")},
+    ),
+    (
+        "relative-subpackage-from-import",
+        "services/orchestrator/sub/mod.py",
+        f"from ..scheduler import {MISSING}\n",
+        {("scheduler", MISSING, "from-import")},
+    ),
+    (
+        "relative-subpackage-function-local-package-import",
+        "services/orchestrator/sub/mod.py",
+        f"def helper():\n    from .. import chain as c\n    return c.{MISSING}\n",
+        {("chain", MISSING, "attr-load")},
+    ),
 ]
 
 _NO_FLAG_ROWS = [
@@ -824,7 +903,13 @@ _NO_FLAG_ROWS = [
         f"from services.orchestrator.chain_types import {MISSING}\n"
         "from services.orchestrator import chain_stages as _chain_stages\n",
     ),
-    ("relative-import-out-of-contract", OWNER_PATH, f"from .scheduler import {MISSING}\n"),
+    ("relative-non-facade-sibling", OWNER_PATH, f"from .scheduler_types import {MISSING}\n"),
+    ("relative-resolving-name", OWNER_PATH, "from .scheduler import ProductionScheduler\n"),
+    ("relative-outside-package", "apps/x/y.py", f"from .scheduler import {MISSING}\n"),
+    ("relative-outside-package-binding", "apps/x/y.py", f"from . import chain\nchain.{MISSING}\n"),
+    ("relative-subpackage-sibling", "services/orchestrator/sub/mod.py", f"from .scheduler import {MISSING}\n"),
+    ("relative-climbs-above-repo-root", OWNER_PATH, f"from .... import scheduler\nscheduler.{MISSING}\n"),
+    ("relative-climbs-to-repo-root", OWNER_PATH, f"from ...services.orchestrator.scheduler import {MISSING}\n"),
     (
         "seam-own-name-fallback",
         OWNER_PATH,
@@ -882,7 +967,11 @@ def test_collector_coverage_at_head() -> None:
     ]
     assert not missing, f"collector found no site for: {missing}"
     assert forms.get(("scheduler", "owner-dispatch"), 0) >= 1
-    assert {wrapper for _, _, wrapper in result.wrapper_sites} == {"_scheduler_call"}
+    assert {(path, wrapper) for path, _, wrapper in result.wrapper_sites} == {
+        ("services/orchestrator/__init__.py", "__getattr__"),
+        ("services/orchestrator/scheduler_candidate_execution_evidence.py", "_scheduler_call"),
+        ("services/orchestrator/scheduler_candidate_manifest.py", "_scheduler_call"),
+    }
     seam_sites = collections.Counter((r.path, r.name) for r in result.reads if r.form == "seam-literal")
     assert seam_sites == collections.Counter(
         {
@@ -894,3 +983,108 @@ def test_collector_coverage_at_head() -> None:
             ("services/orchestrator/scheduler_lease.py", "_open_regular_guard_file"): 1,
         }
     )
+
+
+def test_relative_facade_imports_are_reads_at_head() -> None:
+    reads = {(r.path, r.facade, r.name) for r in scan_tree().reads if r.form == "from-import"}
+    expected = {
+        ("services/orchestrator/cli.py", "chain", "OrchestratorError"),
+        ("services/orchestrator/cli.py", "scheduler", "MAX_CONTINUOUS_JSON_PASSES"),
+        ("services/orchestrator/cli.py", "scheduler", "ProductionScheduler"),
+        ("services/orchestrator/cli.py", "scheduler", "ProductionSchedulerConfig"),
+        ("services/orchestrator/cli.py", "scheduler", "_scheduler_root_check"),
+        ("services/orchestrator/operator_action_listing.py", "scheduler", "DEFAULT_ALLOWED_CYCLE_HOURS_UTC"),
+        ("services/orchestrator/operator_action_listing.py", "scheduler", "DEFAULT_PRODUCTION_SOURCES"),
+    }
+    assert expected - reads == set()
+
+
+# Every top-level tree that may import a facade (#3366 acceptance 3); kept
+# apart from ``SCAN_ROOTS`` so that dropping a root there goes red here.
+REQUIRED_SCAN_ROOTS = ("services/orchestrator", "tests", "apps", "scripts", "workers", "packages")
+
+
+def test_scan_reads_every_required_root_and_skips_node_modules(tmp_path: Path) -> None:
+    probe = "from services.orchestrator import chain\nchain.{}\n"
+    expected = {}
+    for index, root in enumerate(REQUIRED_SCAN_ROOTS):
+        path = f"{root}/probe.py"
+        expected[path] = f"_no_such_name_3366_root_{index}"
+        (tmp_path / root).mkdir(parents=True)
+        (tmp_path / path).write_text(probe.format(expected[path]), encoding="utf-8")
+    vendored = tmp_path / "apps" / "frontend" / "node_modules" / "pkg" / "probe.py"
+    vendored.parent.mkdir(parents=True)
+    vendored.write_text(probe.format("_no_such_name_3366_node_modules"), encoding="utf-8")
+
+    result = scan_tree.__wrapped__(tmp_path)  # uncached: keeps the repo-root cache entry untouched
+    assert {r.path: r.name for r in result.reads} == expected
+
+
+PACKAGE_INIT = "services/orchestrator/__init__.py"
+
+
+def package_getattr_forwarded_names(tree: ast.Module) -> set[str]:
+    """Names the package ``__getattr__`` forwards: the module-level set literal it tests its parameter against."""
+
+    getattr_def = next(
+        (n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "__getattr__"),
+        None,
+    )
+    assert getattr_def is not None, f"{PACKAGE_INIT} has no module-level __getattr__"
+    parameter = _positional_parameters(getattr_def)[0]
+    tables = {
+        test.comparators[0].id
+        for test in ast.walk(getattr_def)
+        if isinstance(test, ast.Compare)
+        and isinstance(test.left, ast.Name)
+        and test.left.id == parameter
+        and len(test.ops) == 1
+        and isinstance(test.ops[0], ast.In)
+        and isinstance(test.comparators[0], ast.Name)
+    }
+    assert len(tables) == 1, f"__getattr__ tests {parameter!r} against {sorted(tables)}; expected one table"
+    (table,) = tables
+    # Every module-level binding (assignment, annotated or augmented assignment,
+    # any other store or delete) and every method call on the table counts, so
+    # a later ``|=`` or ``.update(...)`` cannot leave a stale literal behind.
+    bindings: list[ast.AST] = []
+    stack: list[ast.AST] = list(tree.body)
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            continue
+        if isinstance(node, ast.Name) and node.id == table and not isinstance(node.ctx, ast.Load):
+            bindings.append(node)
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == table
+        ):
+            bindings.append(node)
+        stack.extend(ast.iter_child_nodes(node))
+    assert len(bindings) == 1, (
+        f"{table} is bound or mutated {len(bindings)} times at module level in {PACKAGE_INIT} "
+        f"(lines {sorted(b.lineno for b in bindings)}); expected one set literal"
+    )
+    literal = next(
+        (
+            node.value
+            for node in tree.body
+            if (isinstance(node, ast.Assign) and node.targets == [bindings[0]])
+            or (isinstance(node, ast.AnnAssign) and node.target is bindings[0])
+        ),
+        None,
+    )
+    assert isinstance(literal, ast.Set), f"{table} is not bound to a set literal in {PACKAGE_INIT}"
+    names = {_str_constant(element) for element in literal.elts}
+    assert None not in names, f"{table} holds a non-string element"
+    return {name for name in names if name is not None}
+
+
+def test_package_getattr_forwarded_names_resolve() -> None:
+    tree = ast.parse((REPO_ROOT / PACKAGE_INIT).read_text(encoding="utf-8"), filename=PACKAGE_INIT)
+    names = package_getattr_forwarded_names(tree)
+    assert names, f"no names derived from the package __getattr__ in {PACKAGE_INIT}"
+    unresolved = sorted(name for name in names if not resolves("chain", name))
+    assert not unresolved, f"{PACKAGE_INIT} __getattr__ forwards names the chain facade lacks: {unresolved}"
