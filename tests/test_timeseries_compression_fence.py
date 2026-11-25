@@ -378,6 +378,7 @@ def test_compress_session_charges_the_fence_wait_and_releases_after_commit(
         _chunk("_hyper_9_213_chunk", schema="met", name="forcing_station_timeseries"),
         compress_timeout_ms=3_600_000,
         fence_wait_ms=900_000,
+        lock_timeout_ms=5_000,
     )
 
     assert elapsed == 123_400
@@ -387,6 +388,7 @@ def test_compress_session_charges_the_fence_wait_and_releases_after_commit(
         ("SELECT pg_advisory_lock(%s, %s)", (2713, 431776087)),
         ("RESET lock_timeout", None),
         ("SET statement_timeout = 3476600", None),
+        ("SET lock_timeout = 5000", None),
         ("SELECT compress_chunk(%s::regclass)", ("_timescaledb_internal._hyper_9_213_chunk",)),
         ("SELECT pg_advisory_unlock(%s, %s)", (2713, 431776087)),
     ]
@@ -406,7 +408,7 @@ def test_compress_failure_still_releases_the_fence_and_keeps_its_own_error(
 
     with pytest.raises(_DriverError) as excinfo:
         compression._default_compress_chunk(
-            "postgresql://x", _chunk("c1"), compress_timeout_ms=3_600_000, fence_wait_ms=900_000
+            "postgresql://x", _chunk("c1"), compress_timeout_ms=3_600_000, fence_wait_ms=900_000, lock_timeout_ms=5_000
         )
 
     assert excinfo.value is compress_error  # the unlock failure never masks it
@@ -424,7 +426,7 @@ def test_a_contended_fence_copies_nothing_and_skips_the_unlock(monkeypatch: pyte
 
     with pytest.raises(fence.FenceContended) as excinfo:
         compression._default_compress_chunk(
-            "postgresql://x", _chunk("c1"), compress_timeout_ms=3_600_000, fence_wait_ms=900_000
+            "postgresql://x", _chunk("c1"), compress_timeout_ms=3_600_000, fence_wait_ms=900_000, lock_timeout_ms=5_000
         )
 
     assert excinfo.value.elapsed_ms == 900_000
@@ -501,6 +503,7 @@ def test_only_contended_chunks_make_a_deferred_tick_that_exits_zero_and_poisons_
         "after_bytes": None,
         "mutation_state": "deferred_contended",
         "fence_wait_elapsed_ms": 900_000,
+        "contended_on": "fence",
     }
     assert done["mutation_state"] == "committed" and done["fence_wait_elapsed_ms"] == 75
     # The deferred chunk neither counts nor poisons: totals are exactly "done".
@@ -737,7 +740,10 @@ def _example() -> dict:
 
 
 def _deferred_receipt() -> dict:
+    # A 2.2 receipt: the committed example is 2.3 since #3380, so drop its lock timeout.
     receipt = _example()
+    receipt["schema_version"] = "2.2"
+    receipt["budget"].pop("lock_timeout_ms")
     receipt.update(outcome="deferred", deferred_contended_count=1)
     receipt["selected"] = [
         {
@@ -757,7 +763,7 @@ def _deferred_receipt() -> dict:
 
 
 def test_schema_2_2_example_and_deferred_receipt_validate() -> None:
-    assert _example()["schema_version"] == "2.2"
+    assert _example()["schema_version"] == "2.3"
     jsonschema.validate(_example(), _load_schema())
     jsonschema.validate(_deferred_receipt(), _load_schema())
     jsonschema.Draft7Validator(_load_schema()).validate(_deferred_receipt())
@@ -803,6 +809,7 @@ def test_pre_2_2_receipts_cannot_carry_fence_evidence(version: str, leak: str) -
     receipt = _example()
     receipt.pop("deferred_contended_count")
     receipt["budget"].pop("fence_wait_ms")
+    receipt["budget"].pop("lock_timeout_ms")
     receipt["schema_version"] = version
     if version == "2.0":
         receipt.pop("budget")

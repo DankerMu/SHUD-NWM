@@ -85,6 +85,24 @@ NODE27_TIMESERIES_COMPRESSION_COMPRESS_TIMEOUT_MS=3600000
 # Derivation: runbook section 4.11, docs/runbooks/tier-node27-timeseries-storage.md.
 NODE27_TIMESERIES_COMPRESSION_FENCE_WAIT_MS=900000
 #
+# Lock timeout, in milliseconds, of the compress_chunk statement itself (#3380).
+# After rewriting the data, compress_chunk takes AccessExclusiveLock on the
+# uncompressed chunk; an open transaction that holds a read lock on it makes
+# that request wait, and every reader arriving later queues behind it (on
+# 2026-11-19 for 52 minutes, until the statement timeout). This bounds that one
+# lock wait. It is NOT the fence wait above: the fence is an advisory lock that
+# blocks nobody, whereas this wait blocks readers for as long as it lasts, so it
+# is a separate and far smaller budget. A timeout records the chunk as
+# `deferred_contended` with `contended_on: relation_lock` (outcome `deferred`,
+# exit 0) once a read-only check shows it still uncompressed; the rewrite done
+# before the wait is lost and the chunk is attempted when next selected.
+# Must be strictly less than COMPRESS_TIMEOUT_MS minus FENCE_WAIT_MS; the runner
+# refuses otherwise before any DB connection. Optional: unset or empty means the
+# same 5000 default, so an env file without this line keeps working.
+# Default 5000 = 5 s keeps a queued display reader well inside its 30 s
+# statement timeout.
+NODE27_TIMESERIES_COMPRESSION_LOCK_TIMEOUT_MS=5000
+#
 # Wall passed to `timeout --signal=TERM --kill-after=30s` by
 # scripts/node27_timeseries_compression_once.sh. Default 3900.
 NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS=3900

@@ -305,6 +305,7 @@ def test_main_enforce_propagates_the_configured_compress_timeout_to_the_session(
         ("SELECT pg_advisory_lock(%s, %s)", (2713, -1964848284)),
         ("RESET lock_timeout", None),
         ("SET statement_timeout = 1799750", None),
+        ("SET lock_timeout = 5000", None),
         ("SELECT compress_chunk(%s::regclass)", ("_timescaledb_internal.oversized",)),
         ("SELECT pg_advisory_unlock(%s, %s)", (2713, -1964848284)),
     ]
@@ -479,7 +480,7 @@ def test_invalid_config_replaces_disjoint_known_safe_receipt(tmp_path: Path, mon
 
     assert compression.main([]) == 1
     receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
-    assert receipt["schema_version"] == "2.2"
+    assert receipt["schema_version"] == "2.3"
     assert receipt["outcome"] == "failed"
     assert receipt["failure"] == {
         "stage": "config",
@@ -1333,7 +1334,7 @@ def test_receipt_validates_against_schema(tmp_path: Path, monkeypatch: pytest.Mo
         compress_chunk=fake_compress,
     )
     jsonschema.validate(receipt, _load_schema())
-    assert receipt["schema_version"] == "2.2"
+    assert receipt["schema_version"] == "2.3"
     assert receipt["head_sha"] == compression._current_head_sha()
     assert len(receipt["selected"]) == 5
     assert len(receipt["deferred"]) == 1
@@ -1525,6 +1526,9 @@ _NON_DEFAULT_BUDGET = {
 # two 2.1-shaped literals above stay for the 2.1 schema-branch tests below.
 _DEFAULT_BUDGET_V22 = {**_DEFAULT_BUDGET, "fence_wait_ms": 900_000}
 _NON_DEFAULT_BUDGET_V22 = {**_NON_DEFAULT_BUDGET, "fence_wait_ms": 600_000}
+# #3380: schema 2.3 receipts additionally record the lock timeout of the compress statement.
+_DEFAULT_BUDGET_V23 = {**_DEFAULT_BUDGET_V22, "lock_timeout_ms": 5_000}
+_NON_DEFAULT_BUDGET_V23 = {**_NON_DEFAULT_BUDGET_V22, "lock_timeout_ms": 2_000}
 
 
 def _budget_env_override(budget: dict[str, int], *, per_tick_bound: str) -> dict[str, str]:
@@ -1536,6 +1540,8 @@ def _budget_env_override(budget: dict[str, int], *, per_tick_bound: str) -> dict
     }
     if "fence_wait_ms" in budget:
         override["NODE27_TIMESERIES_COMPRESSION_FENCE_WAIT_MS"] = str(budget["fence_wait_ms"])
+    if "lock_timeout_ms" in budget:
+        override["NODE27_TIMESERIES_COMPRESSION_LOCK_TIMEOUT_MS"] = str(budget["lock_timeout_ms"])
     return override
 
 
@@ -1565,13 +1571,13 @@ def test_receipts_record_the_non_default_budget_actually_in_force(
     """(a) A tick run on operator-set budgets is byte-distinguishable from a
     default-budget tick, at every construction point that has a config."""
 
-    env = _base_env(tmp_path, override=_budget_env_override(_NON_DEFAULT_BUDGET_V22, per_tick_bound="1"))
+    env = _base_env(tmp_path, override=_budget_env_override(_NON_DEFAULT_BUDGET_V23, per_tick_bound="1"))
     receipts = _three_config_receipts(monkeypatch, env)
     assert len(receipts) == 3
     for receipt in receipts:
-        assert receipt["schema_version"] == "2.2"
-        assert receipt["budget"] == _NON_DEFAULT_BUDGET_V22
-        assert receipt["budget"] != _DEFAULT_BUDGET_V22
+        assert receipt["schema_version"] == "2.3"
+        assert receipt["budget"] == _NON_DEFAULT_BUDGET_V23
+        assert receipt["budget"] != _DEFAULT_BUDGET_V23
         jsonschema.validate(receipt, _load_schema())
 
 
@@ -1583,8 +1589,8 @@ def test_receipts_record_the_default_budget_when_nothing_is_overridden(
     env = _base_env(tmp_path)
     receipts = _three_config_receipts(monkeypatch, env)
     for receipt in receipts:
-        assert receipt["schema_version"] == "2.2"
-        assert receipt["budget"] == _DEFAULT_BUDGET_V22
+        assert receipt["schema_version"] == "2.3"
+        assert receipt["budget"] == _DEFAULT_BUDGET_V23
         jsonschema.validate(receipt, _load_schema())
 
 
@@ -1602,7 +1608,7 @@ def test_config_tombstone_carries_no_budget_and_still_validates(
     assert compression.main([]) == 1
 
     tombstone = json.loads(receipt_path.read_text(encoding="utf-8"))
-    assert tombstone["schema_version"] == "2.2"
+    assert tombstone["schema_version"] == "2.3"
     assert tombstone["outcome"] == "failed"
     assert tombstone["failure"]["stage"] == "config"
     assert "budget" not in tombstone
@@ -1629,10 +1635,11 @@ def test_config_stage_label_belongs_to_the_tombstone_call_site_only() -> None:
 def _budget_receipt(**overrides: object) -> dict:
     receipt = _example_receipt()
     if overrides.get("schema_version") in ("1.0", "2.0", "2.1"):
-        # Downgrading the 2.2 example: strip the #2713 fields first, so the
-        # assertions below see only the prohibition they are about.
+        # Downgrading the 2.3 example: strip the #2713 and #3380 fields first,
+        # so the assertions below see only the prohibition they are about.
         receipt.pop("deferred_contended_count")
         receipt["budget"].pop("fence_wait_ms")
+        receipt["budget"].pop("lock_timeout_ms")
     receipt.update(overrides)
     return receipt
 
@@ -2313,3 +2320,638 @@ def test_qualified_chunk_accepts_a_real_catalog_name_unchanged() -> None:
     chunk = _chunk_named("_timescaledb_internal", "_hyper_3_8_chunk")
 
     assert chunk.qualified_chunk == '"_timescaledb_internal"."_hyper_3_8_chunk"'
+
+
+# ---------------------------------------------------------------------------
+# #3380: the compress statement runs under its own short ``lock_timeout``, and
+# a lock-wait timeout (SQLSTATE 55P03) after a "not compressed" reconcile is
+# contention, not failure. Only the driver boundary (``psycopg2``) and the
+# clocks are faked; expected values are literals.
+# ---------------------------------------------------------------------------
+
+_LOCK_TIMEOUT_KEY = "NODE27_TIMESERIES_COMPRESSION_LOCK_TIMEOUT_MS"
+_FENCE_WAIT_KEY = "NODE27_TIMESERIES_COMPRESSION_FENCE_WAIT_MS"
+# (classid, objid) of the river family fence, as pinned literally by the fence tests.
+_RIVER_FENCE = (2713, -1964848284)
+_COMPRESS_SQL = "SELECT compress_chunk(%s::regclass)"
+
+
+class LockNotAvailable(Exception):
+    """Driver double named after the psycopg2.errors class; the SQLSTATE is in ``pgcode``."""
+
+    pgcode = "55P03"
+
+
+class QueryCanceled(Exception):
+    """Driver double for a statement timeout."""
+
+    pgcode = "57014"
+
+
+class _ScriptedCursor:
+    """Records every statement; raises the scripted error for an exact ``(sql, params)``."""
+
+    def __init__(self, statements: list[tuple[str, object]], failures: dict[tuple[str, object], Exception]) -> None:
+        self._statements = statements
+        self._failures = failures
+
+    def __enter__(self) -> "_ScriptedCursor":
+        return self
+
+    def __exit__(self, *_exc_info: object) -> bool:
+        return False
+
+    def execute(self, sql: str, params: object = None) -> None:
+        self._statements.append((sql, params))
+        error = self._failures.get((sql, params))
+        if error is not None:
+            raise error
+
+    def fetchone(self) -> tuple[object, ...]:
+        return (None,)
+
+
+class _ScriptedConnection:
+    def __init__(self, statements: list[tuple[str, object]], failures: dict[tuple[str, object], Exception]) -> None:
+        self._statements = statements
+        self._failures = failures
+        self.exits: list[type[BaseException] | None] = []
+        self.closed = 0
+
+    def __enter__(self) -> "_ScriptedConnection":
+        return self
+
+    def __exit__(self, exc_type: type[BaseException] | None, *_exc: object) -> bool:
+        # psycopg2: a clean exit commits, a raising block rolls back.
+        self.exits.append(exc_type)
+        return False
+
+    def cursor(self, *_args: object, **_kwargs: object) -> _ScriptedCursor:
+        return _ScriptedCursor(self._statements, self._failures)
+
+    def close(self) -> None:
+        self.closed += 1
+
+
+def _install_scripted_driver(
+    monkeypatch: pytest.MonkeyPatch, failures: dict[tuple[str, object], Exception] | None = None
+) -> tuple[list[tuple[str, object]], list[_ScriptedConnection]]:
+    statements: list[tuple[str, object]] = []
+    connections: list[_ScriptedConnection] = []
+
+    def connect(*_args: object, **_kwargs: object) -> _ScriptedConnection:
+        connection = _ScriptedConnection(statements, failures or {})
+        connections.append(connection)
+        return connection
+
+    module = types.ModuleType("psycopg2")
+    module.connect = connect  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "psycopg2", module)
+    return statements, connections
+
+
+def _fence_clock(monkeypatch: pytest.MonkeyPatch, *readings: float) -> None:
+    clock = iter(readings)
+    monkeypatch.setattr(fence, "_monotonic", lambda: next(clock))
+
+
+def _compress_once(chunk_name: str = "c1", *, lock_timeout_ms: int = 2000) -> int:
+    """The real ``_default_compress_chunk``: 3600000 ms budget, 900000 ms fence wait."""
+    return compression._default_compress_chunk(
+        "postgresql://x",
+        _chunk("hydro", "river_timeseries", chunk_name, delta_days=10),
+        compress_timeout_ms=3_600_000,
+        fence_wait_ms=900_000,
+        lock_timeout_ms=lock_timeout_ms,
+    )
+
+
+# The whole session when the fence wait took 123.4 s: the remainder 3476600 ms
+# is the compress statement's statement_timeout, and the lock timeout comes
+# after the fence's own RESET and right before the compress statement.
+_LOCK_BOUNDED_SESSION = [
+    ("SET statement_timeout = 3600000", None),
+    ("SET lock_timeout = 900000", None),
+    ("SELECT pg_advisory_lock(%s, %s)", _RIVER_FENCE),
+    ("RESET lock_timeout", None),
+    ("SET statement_timeout = 3476600", None),
+    ("SET lock_timeout = 2000", None),
+    (_COMPRESS_SQL, ("_timescaledb_internal.c1",)),
+    ("SELECT pg_advisory_unlock(%s, %s)", _RIVER_FENCE),
+]
+
+
+# 4.1 configuration ----------------------------------------------------------
+
+
+@pytest.mark.parametrize("raw", [None, ""])
+def test_lock_timeout_defaults_to_five_seconds(tmp_path: Path, raw: str | None) -> None:
+    config = compression.config_from_args(_args(), _base_env(tmp_path, override={_LOCK_TIMEOUT_KEY: raw}))
+    assert config.lock_timeout_ms == 5000
+
+
+def test_a_declared_lock_timeout_is_used(tmp_path: Path) -> None:
+    config = compression.config_from_args(_args(), _base_env(tmp_path, override={_LOCK_TIMEOUT_KEY: "2000"}))
+    assert config.lock_timeout_ms == 2000
+
+
+def test_the_lock_timeout_bound_is_the_budget_left_after_the_fence_wait(tmp_path: Path) -> None:
+    # 3600000 - 3000000 = 600000: one below is accepted, the remainder itself is not.
+    env = {_FENCE_WAIT_KEY: "3000000"}
+    accepted = compression.config_from_args(
+        _args(), _base_env(tmp_path, override={**env, _LOCK_TIMEOUT_KEY: "599999"})
+    )
+    assert accepted.lock_timeout_ms == 599_999
+    with pytest.raises(compression.CompressionConfigError, match=_LOCK_TIMEOUT_KEY):
+        compression.config_from_args(_args(), _base_env(tmp_path, override={**env, _LOCK_TIMEOUT_KEY: "600000"}))
+
+
+# Defaults: compress 3600000 ms, fence wait 900000 ms, so 2700000 is the first refused value.
+_BAD_LOCK_TIMEOUTS = ["abc", "0", "-1", "2700000", "2700001"]
+
+
+@pytest.mark.parametrize("raw", _BAD_LOCK_TIMEOUTS)
+def test_a_bad_lock_timeout_fails_closed(tmp_path: Path, raw: str) -> None:
+    with pytest.raises(compression.CompressionConfigError, match=_LOCK_TIMEOUT_KEY):
+        compression.config_from_args(_args(), _base_env(tmp_path, override={_LOCK_TIMEOUT_KEY: raw}))
+
+
+@pytest.mark.parametrize("raw", _BAD_LOCK_TIMEOUTS)
+def test_a_bad_lock_timeout_is_refused_before_any_connection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], raw: str
+) -> None:
+    # ``fetch_display_watermark`` is deliberately not patched: it opens its own
+    # connection, so a value that slipped through would show in ``connect_calls``.
+    for key, value in _base_env(tmp_path, override={_LOCK_TIMEOUT_KEY: raw}).items():
+        monkeypatch.setenv(key, value)
+    connect_calls, statements = _install_fake_psycopg2(monkeypatch)
+
+    assert compression.main(["--enforce"]) == 1
+    assert connect_calls == [] and statements == []
+    diagnostic = json.loads(capsys.readouterr().err.strip())
+    assert diagnostic["status"] == "failed"
+    assert _LOCK_TIMEOUT_KEY in diagnostic["reason"]
+
+
+def test_the_lock_timeout_is_keyword_only_without_a_default() -> None:
+    parameter = inspect.signature(compression._default_compress_chunk).parameters["lock_timeout_ms"]
+    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+    assert parameter.default is inspect.Parameter.empty
+
+
+# 4.2 session order ----------------------------------------------------------
+
+
+def test_the_compress_statement_runs_under_the_lock_timeout_set_after_the_fence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    statements, connections = _install_scripted_driver(monkeypatch)
+    _fence_clock(monkeypatch, 50.0, 50.0 + 123.4)
+
+    assert _compress_once() == 123_400
+    assert statements == _LOCK_BOUNDED_SESSION
+    [connection] = connections
+    assert connection.exits == [None]
+    assert connection.closed == 1
+
+
+def test_main_binds_the_configured_lock_timeout_into_the_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No injected ``compress_chunk``: the ``functools.partial`` in ``main`` is what is pinned."""
+    env = _base_env(tmp_path, override={_LOCK_TIMEOUT_KEY: "2000"})
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    statements, _connections = _install_scripted_driver(monkeypatch)
+    monkeypatch.setattr(compression, "fetch_display_watermark", lambda _dsn, **_kwargs: _NOW)
+    monkeypatch.setattr(compression, "_current_head_sha", lambda **_kwargs: "a" * 40)
+    _fence_clock(monkeypatch, 100.0, 100.25)
+    chunk = _chunk("hydro", "river_timeseries", "c1", delta_days=9)
+
+    code = compression.main(
+        ["--enforce"],
+        fetch_chunks=lambda _dsn: [chunk],
+        measure_chunk_bytes=lambda _dsn, _chunk, **_kwargs: 100,
+        reconcile_chunk_state=lambda _dsn, _chunk: False,
+    )
+
+    assert code == 0
+    assert statements == [
+        ("SET statement_timeout = 3600000", None),
+        ("SET lock_timeout = 900000", None),
+        ("SELECT pg_advisory_lock(%s, %s)", _RIVER_FENCE),
+        ("RESET lock_timeout", None),
+        ("SET statement_timeout = 3599750", None),
+        ("SET lock_timeout = 2000", None),
+        (_COMPRESS_SQL, ("_timescaledb_internal.c1",)),
+        ("SELECT pg_advisory_unlock(%s, %s)", _RIVER_FENCE),
+    ]
+    receipt = json.loads(Path(env["NODE27_TIMESERIES_COMPRESSION_RECEIPT_PATH"]).read_text())
+    assert receipt["budget"]["lock_timeout_ms"] == 2000
+
+
+# 4.3 translation ------------------------------------------------------------
+
+
+def test_a_lock_timeout_of_the_compress_statement_becomes_relation_lock_contention(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    statements, connections = _install_scripted_driver(
+        monkeypatch, {(_COMPRESS_SQL, ("_timescaledb_internal.c1",)): LockNotAvailable("lock timeout")}
+    )
+    _fence_clock(monkeypatch, 50.0, 50.0 + 123.4)
+
+    with pytest.raises(compression.RelationLockContended) as excinfo:
+        _compress_once()
+
+    assert excinfo.value.fence_wait_elapsed_ms == 123_400
+    assert excinfo.value.hypertable == "hydro.river_timeseries"
+    assert not isinstance(excinfo.value, fence.FenceContended)
+    assert statements == _LOCK_BOUNDED_SESSION  # the fence is released after the rollback
+    [connection] = connections
+    assert connection.exits == [compression.RelationLockContended]
+    assert connection.closed == 1
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [("SET statement_timeout = 3476600", None), ("SET lock_timeout = 2000", None)],
+    ids=["second-statement-timeout", "lock-timeout-set"],
+)
+def test_a_55p03_from_an_earlier_statement_is_not_translated(
+    monkeypatch: pytest.MonkeyPatch, statement: tuple[str, object]
+) -> None:
+    error = LockNotAvailable("earlier statement")
+    statements, connections = _install_scripted_driver(monkeypatch, {statement: error})
+    _fence_clock(monkeypatch, 50.0, 50.0 + 123.4)
+
+    with pytest.raises(LockNotAvailable) as excinfo:
+        _compress_once()
+
+    assert excinfo.value is error
+    assert not any(sql == _COMPRESS_SQL for sql, _ in statements)
+    assert statements[-1] == ("SELECT pg_advisory_unlock(%s, %s)", _RIVER_FENCE)
+    assert connections[0].closed == 1
+
+
+def test_the_fence_wait_stays_fence_contention(monkeypatch: pytest.MonkeyPatch) -> None:
+    statements, connections = _install_scripted_driver(
+        monkeypatch, {("SELECT pg_advisory_lock(%s, %s)", _RIVER_FENCE): LockNotAvailable("fence wait")}
+    )
+    _fence_clock(monkeypatch, 0.0, 900.0)
+
+    with pytest.raises(fence.FenceContended) as excinfo:
+        _compress_once()
+
+    assert not isinstance(excinfo.value, compression.RelationLockContended)
+    assert excinfo.value.elapsed_ms == 900_000
+    assert not any(sql == _COMPRESS_SQL or sql.startswith("SELECT pg_advisory_unlock") for sql, _ in statements)
+    assert connections[0].closed == 1
+
+
+def test_a_statement_timeout_of_the_compress_statement_propagates_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    error = QueryCanceled("statement timeout")
+    statements, connections = _install_scripted_driver(
+        monkeypatch, {(_COMPRESS_SQL, ("_timescaledb_internal.c1",)): error}
+    )
+    _fence_clock(monkeypatch, 50.0, 50.0 + 123.4)
+
+    with pytest.raises(QueryCanceled) as excinfo:
+        _compress_once()
+
+    assert excinfo.value is error
+    assert statements == _LOCK_BOUNDED_SESSION
+    assert connections[0].exits == [QueryCanceled]
+    assert connections[0].closed == 1
+
+
+# 4.4 - 4.6 the tick loop ----------------------------------------------------
+
+
+def _run_main_enforce(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    chunks: list[compression.ChunkRow],
+    *,
+    compress_chunk: compression.CompressChunk | None = None,
+    reconcile: object = False,
+) -> tuple[int, dict, list[str]]:
+    """``main --enforce`` on the default budget; returns (rc, receipt, reconciled chunk names)."""
+    env = _base_env(tmp_path)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(compression, "fetch_display_watermark", lambda _dsn, **_kwargs: _NOW)
+    monkeypatch.setattr(compression, "_current_head_sha", lambda **_kwargs: "a" * 40)
+    reconciled: list[str] = []
+
+    def reconcile_chunk_state(_dsn: str, chunk: compression.ChunkRow) -> bool:
+        reconciled.append(chunk.chunk_name)
+        if isinstance(reconcile, Exception):
+            raise reconcile
+        return bool(reconcile)
+
+    rc = compression.main(
+        ["--enforce"],
+        fetch_chunks=lambda _dsn: list(chunks),
+        measure_chunk_bytes=lambda _dsn, _chunk, *, after=False: 40 if after else 100,
+        compress_chunk=compress_chunk,
+        reconcile_chunk_state=reconcile_chunk_state,
+    )
+    receipt = json.loads(Path(env["NODE27_TIMESERIES_COMPRESSION_RECEIPT_PATH"]).read_text())
+    return rc, receipt, reconciled
+
+
+def _busy_and_done() -> list[compression.ChunkRow]:
+    # Same hypertable; newest first, so "busy" is attempted before "done".
+    return [
+        _chunk("hydro", "river_timeseries", "busy", delta_days=9),
+        _chunk("hydro", "river_timeseries", "done", delta_days=10),
+    ]
+
+
+_BUSY_RANGE = {"range_start": "2026-06-25T12:00:00Z", "range_end": "2026-07-02T12:00:00Z"}
+
+
+def _assert_valid_2_3(receipt: dict, *, lock_timeout_ms: int = 5000) -> None:
+    assert receipt["schema_version"] == "2.3"
+    assert receipt["budget"]["lock_timeout_ms"] == lock_timeout_ms
+    jsonschema.validate(receipt, _load_schema())
+    jsonschema.Draft7Validator(_load_schema()).validate(receipt)
+
+
+def test_a_relation_lock_timeout_through_the_real_session_defers_the_chunk_and_the_tick_goes_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _install_scripted_driver(monkeypatch, {(_COMPRESS_SQL, ("_timescaledb_internal.busy",)): LockNotAvailable()})
+    _fence_clock(monkeypatch, 10.0, 10.25, 20.0, 20.0)
+
+    rc, receipt, reconciled = _run_main_enforce(tmp_path, monkeypatch, _busy_and_done())
+
+    busy, done = receipt["selected"]
+    assert busy == {
+        "hypertable_schema": "hydro",
+        "hypertable_name": "river_timeseries",
+        "chunk_schema": "_timescaledb_internal",
+        "chunk_name": "busy",
+        **_BUSY_RANGE,
+        "before_bytes": 100,
+        "after_bytes": None,
+        "mutation_state": "deferred_contended",
+        "fence_wait_elapsed_ms": 250,
+        "contended_on": "relation_lock",
+    }
+    assert reconciled == ["busy"]  # reconciled before it is labelled
+    assert done["mutation_state"] == "committed" and done["after_bytes"] == 40
+    assert receipt["per_table_totals"]["hydro.river_timeseries"] == {
+        "before_bytes": 100,
+        "after_bytes": 40,
+        "chunks_compressed": 1,
+    }
+    assert (receipt["outcome"], receipt["deferred_contended_count"], rc) == ("deferred", 1, 0)
+    _assert_valid_2_3(receipt)
+
+
+def _busy_times_out(_dsn: str, chunk: compression.ChunkRow) -> int:
+    if chunk.chunk_name == "busy":
+        raise compression.RelationLockContended("hydro.river_timeseries", 250)
+    return 0
+
+
+def test_relation_lock_arm_not_compressed_is_a_counted_deferral_without_error_or_poison(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rc, receipt, reconciled = _run_main_enforce(
+        tmp_path, monkeypatch, _busy_and_done(), compress_chunk=_busy_times_out, reconcile=False
+    )
+
+    assert reconciled == ["busy"]
+    busy, done = receipt["selected"]
+    assert busy["mutation_state"] == "deferred_contended"
+    assert busy["contended_on"] == "relation_lock"
+    assert busy["fence_wait_elapsed_ms"] == 250
+    assert "error" not in busy
+    assert done["mutation_state"] == "committed"
+    assert receipt["per_table_totals"]["hydro.river_timeseries"]["after_bytes"] == 40
+    assert (receipt["outcome"], receipt["deferred_contended_count"], rc) == ("deferred", 1, 0)
+    _assert_valid_2_3(receipt)
+
+
+def test_relation_lock_arm_compressed_after_all_is_committed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    rc, receipt, reconciled = _run_main_enforce(
+        tmp_path, monkeypatch, _busy_and_done(), compress_chunk=_busy_times_out, reconcile=True
+    )
+
+    assert reconciled == ["busy"]
+    busy = receipt["selected"][0]
+    assert busy["mutation_state"] == "committed"
+    assert busy["error"] == "compression committed after lost acknowledgement"
+    assert "contended_on" not in busy
+    assert (receipt["outcome"], receipt["deferred_contended_count"], rc) == ("partial", 0, 1)
+    _assert_valid_2_3(receipt)
+
+
+def test_relation_lock_arm_with_reconcile_unavailable_is_indeterminate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rc, receipt, reconciled = _run_main_enforce(
+        tmp_path,
+        monkeypatch,
+        _busy_and_done(),
+        compress_chunk=_busy_times_out,
+        reconcile=RuntimeError("catalog unavailable"),
+    )
+
+    assert reconciled == ["busy"]
+    busy = receipt["selected"][0]
+    assert busy["mutation_state"] == "indeterminate"
+    assert busy["error"] == "compress_chunk result indeterminate; exact-target reconciliation unavailable"
+    assert "contended_on" not in busy
+    assert (receipt["outcome"], rc) == ("partial", 1)
+    _assert_valid_2_3(receipt)
+
+
+def test_fence_and_tick_deadline_deferrals_name_what_they_contended_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Default walls: a fence may still start at elapsed <= 3900 - 900 - 300 = 2700 s.
+    config = compression.config_from_args(_args(enforce=True), _base_env(tmp_path))
+    clock = iter([10.0, 3000.0])
+    monkeypatch.setattr(compression, "_monotonic", lambda: next(clock))
+
+    def compress(_dsn: str, chunk: compression.ChunkRow) -> int:
+        assert chunk.chunk_name == "busy", "past the tick deadline: must not compress"
+        raise fence.FenceContended("hydro.river_timeseries", 900_000)
+
+    receipt = compression.build_receipt(
+        config,
+        now_utc=_NOW,
+        fetch_chunks=lambda _dsn: _busy_and_done(),
+        measure_chunk_bytes=lambda _dsn, _chunk, *, after=False: 100,
+        compress_chunk=compress,
+        reconcile_chunk_state=lambda _dsn, _chunk: pytest.fail("no reconcile for a deferral"),
+        head_sha="a" * 40,
+        tick_started_monotonic=0.0,
+    )
+
+    fenced, late = receipt["selected"]
+    assert (fenced["mutation_state"], fenced["contended_on"], fenced["fence_wait_elapsed_ms"]) == (
+        "deferred_contended",
+        "fence",
+        900_000,
+    )
+    assert (late["mutation_state"], late["contended_on"]) == ("deferred_contended", "tick_deadline")
+    assert "fence_wait_elapsed_ms" not in late
+    assert (receipt["outcome"], receipt["deferred_contended_count"]) == ("deferred", 2)
+    _assert_valid_2_3(receipt)
+
+
+def test_a_statement_timeout_of_the_compress_statement_stays_a_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Through the real session, so neither the translation nor the loop can
+    # mistake 57014 for contention.
+    _install_scripted_driver(monkeypatch, {(_COMPRESS_SQL, ("_timescaledb_internal.busy",)): QueryCanceled()})
+    _fence_clock(monkeypatch, 10.0, 10.25)
+
+    rc, receipt, reconciled = _run_main_enforce(tmp_path, monkeypatch, _busy_and_done()[:1])
+
+    assert reconciled == ["busy"]
+    [busy] = receipt["selected"]
+    assert busy["mutation_state"] == "failed_before_mutation"
+    assert busy["error"] == "compress_chunk before mutation failed (QueryCanceled)"
+    assert "contended_on" not in busy
+    assert (receipt["outcome"], receipt["deferred_contended_count"], rc) == ("partial", 0, 1)
+    _assert_valid_2_3(receipt)
+
+
+# 4.7 receipt schema 2.3 -----------------------------------------------------
+
+
+def test_refused_lock_and_failed_receipts_carry_the_lock_timeout(tmp_path: Path) -> None:
+    config = compression.config_from_args(
+        _args(enforce=True), _base_env(tmp_path, override={_LOCK_TIMEOUT_KEY: "2000"})
+    )
+    refused = compression.build_refused_lock_receipt(config, now_utc=_NOW, head_sha="a" * 40)
+    failed = compression.build_failed_receipt(config, now_utc=_NOW, stage="runner", head_sha="a" * 40)
+    for receipt in (refused, failed):
+        _assert_valid_2_3(receipt, lock_timeout_ms=2000)
+
+
+def _relation_lock_deferral_2_3() -> dict:
+    receipt = _example_receipt()
+    receipt.update(outcome="deferred", deferred_contended_count=1)
+    receipt["selected"] = [
+        {
+            "hypertable_schema": "hydro",
+            "hypertable_name": "river_timeseries",
+            "chunk_schema": "_timescaledb_internal",
+            "chunk_name": "_hyper_9_213_chunk",
+            **_BUSY_RANGE,
+            "before_bytes": 1,
+            "after_bytes": None,
+            "mutation_state": "deferred_contended",
+            "fence_wait_elapsed_ms": 250,
+            "contended_on": "relation_lock",
+        }
+    ]
+    return receipt
+
+
+def test_schema_2_3_example_and_relation_lock_deferral_validate() -> None:
+    assert _example_receipt()["schema_version"] == "2.3"
+    _assert_valid_2_3(_example_receipt())
+    _assert_valid_2_3(_relation_lock_deferral_2_3())
+
+
+def _commit_the_deferral(receipt: dict) -> None:
+    receipt.update(outcome="clean", deferred_contended_count=0)
+    receipt["selected"][0].update(mutation_state="committed", after_bytes=1)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda r: r["budget"].pop("lock_timeout_ms"),
+        lambda r: r["selected"][0].pop("contended_on"),
+        lambda r: r["selected"][0].update(contended_on="vacuum"),
+        _commit_the_deferral,
+        lambda r: r["budget"].update(lock_timeout_ms=0),
+        # The 2.2 rules hold for 2.3 too.
+        lambda r: r["budget"].pop("fence_wait_ms"),
+        lambda r: r.pop("deferred_contended_count"),
+    ],
+    ids=[
+        "2.3-budget-without-lock-timeout",
+        "2.3-deferral-without-contended-on",
+        "unknown-contended-on",
+        "contended-on-on-a-committed-chunk",
+        "zero-lock-timeout",
+        "2.3-budget-without-fence-wait",
+        "2.3-without-count",
+    ],
+)
+def test_schema_2_3_rejects_an_incoherent_receipt(mutate: object) -> None:
+    receipt = _relation_lock_deferral_2_3()
+    mutate(receipt)  # type: ignore[operator]
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(receipt, _load_schema())
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.Draft7Validator(_load_schema()).validate(receipt)
+
+
+def _fence_deferral_2_2() -> dict:
+    """A receipt as the 2.2 runner wrote it: no lock timeout, no ``contended_on``."""
+    receipt = _relation_lock_deferral_2_3()
+    receipt["schema_version"] = "2.2"
+    receipt["budget"].pop("lock_timeout_ms")
+    receipt["selected"][0].pop("contended_on")
+    receipt["selected"][0]["fence_wait_elapsed_ms"] = 900_000
+    return receipt
+
+
+def test_a_2_2_receipt_keeps_validating() -> None:
+    jsonschema.validate(_fence_deferral_2_2(), _load_schema())
+    jsonschema.Draft7Validator(_load_schema()).validate(_fence_deferral_2_2())
+    committed = _fence_deferral_2_2()
+    _commit_the_deferral(committed)
+    jsonschema.validate(committed, _load_schema())
+
+
+@pytest.mark.parametrize(
+    ("version", "leak"),
+    [
+        ("2.2", "lock_timeout_ms"),
+        ("2.2", "contended_on-on-a-deferral"),
+        ("2.2", "contended_on-on-a-committed-chunk"),
+        ("2.1", "lock_timeout_ms"),
+        ("2.1", "contended_on-on-a-committed-chunk"),
+    ],
+)
+def test_a_pre_2_3_receipt_cannot_carry_lock_timeout_evidence(version: str, leak: str) -> None:
+    receipt = _fence_deferral_2_2()
+    if version == "2.1" or leak == "contended_on-on-a-committed-chunk":
+        _commit_the_deferral(receipt)
+    if version == "2.1":
+        receipt["schema_version"] = "2.1"
+        receipt.pop("deferred_contended_count")
+        receipt["budget"].pop("fence_wait_ms")
+        receipt["selected"][0].pop("fence_wait_elapsed_ms")
+    jsonschema.validate(receipt, _load_schema())  # the baseline is valid
+    if leak == "lock_timeout_ms":
+        receipt["budget"]["lock_timeout_ms"] = 5000
+    else:
+        receipt["selected"][0]["contended_on"] = "relation_lock"
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(receipt, _load_schema())
+
+
+@pytest.mark.parametrize("receipt_path", _COMMITTED_RUNNER_RECEIPTS, ids=lambda path: path.name)
+def test_a_historical_receipt_with_contended_on_injected_is_rejected(receipt_path: Path) -> None:
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    jsonschema.validate(receipt, _load_schema())
+    assert receipt["selected"], "a historical runner receipt without a selected chunk proves nothing here"
+    receipt["selected"][0]["contended_on"] = "fence"
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(receipt, _load_schema())
