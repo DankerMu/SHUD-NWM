@@ -427,6 +427,7 @@ def test_display_control_plane_responses_have_no_static_runtime_drift() -> None:
     cases = [
         ("/api/v1/runs/{run_id}/retry", "post", "409", ["CONTROL_PLANE_MANUAL_ACTION_REQUIRED"]),
         ("/api/v1/runs/{run_id}/cancel", "post", "409", ["CONTROL_PLANE_MANUAL_ACTION_REQUIRED"]),
+        ("/api/v1/runs/{run_id}/cancel", "post", "404", ["RUN_NOT_FOUND"]),
         ("/api/v1/queue/depth", "get", "503", ["CONTROL_PLANE_QUEUE_UNAVAILABLE"]),
         # #1678: reachable Slurm gateway failures re-raised by `queue_depth`.
         # 502 -> services/slurm_gateway/real_backend.py:1191/1208/1218 (command)

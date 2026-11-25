@@ -567,7 +567,15 @@ def cancel_run(
 
     store = context.store
     gateway = context.gateway
-    active_jobs = [job for job in store.query_jobs_by_run(run_id) if job.status in _ACTIVE_JOB_STATUSES]
+    run_jobs = store.query_jobs_by_run(run_id)
+    if not run_jobs and not _hydro_run_exists(store, run_id):
+        raise ApiError(
+            status_code=404,
+            code="RUN_NOT_FOUND",
+            message=f"Run not found: {run_id}",
+            details={"run_id": run_id},
+        )
+    active_jobs = [job for job in run_jobs if job.status in _ACTIVE_JOB_STATUSES]
     cancelled_jobs: list[dict[str, Any]] = []
     failed_jobs: list[dict[str, Any]] = []
     blocked_jobs: list[dict[str, Any]] = []
@@ -993,6 +1001,18 @@ def _coerce_mapping(value: Any) -> dict[str, Any]:
     if callable(model_dump):
         return dict(model_dump(mode="json"))
     return dict(value)
+
+
+def _hydro_run_exists(store: PipelineStore, run_id: str) -> bool:
+    # #3245: read-only existence check for cancel's not-found answer; a table
+    # that cannot be inspected counts as "no row", like `_cancel_hydro_run`.
+    if "run_id" not in _table_columns(store, "hydro_run", "hydro"):
+        return False
+    row = store.session.execute(
+        text("SELECT 1 FROM hydro.hydro_run WHERE run_id = :run_id LIMIT 1"),
+        {"run_id": run_id},
+    ).first()
+    return row is not None
 
 
 def _cancel_hydro_run(store: PipelineStore, run_id: str) -> dict[str, Any] | None:

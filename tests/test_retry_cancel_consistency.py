@@ -993,6 +993,165 @@ def test_cancel_authorized_compute_control_cancels_via_gateway() -> None:
         assert _hydro_status(store, "run_cancel_compute") == "cancelled"
 
 
+# #3245: a run id with no pipeline_job row of any status and no hydro.hydro_run
+# row is answered with 404 RUN_NOT_FOUND, and that answer writes nothing.
+def _assert_run_not_found(response: Any, run_id: str) -> None:
+    assert response.status_code == 404
+    body = response.json()
+    assert body["status"] == "error"
+    assert body["error"]["code"] == "RUN_NOT_FOUND"
+    assert body["error"]["details"]["run_id"] == run_id
+
+
+def _hydro_run_count(store: PipelineStore, run_id: str) -> int:
+    return int(
+        store.session.execute(
+            text("SELECT COUNT(*) FROM hydro.hydro_run WHERE run_id = :run_id"),
+            {"run_id": run_id},
+        ).scalar_one()
+    )
+
+
+def test_cancel_unknown_run_returns_not_found_without_writes() -> None:
+    with _store() as store:
+        gateway = _MockGateway()
+        with _client(store, gateway=gateway) as client:
+            response = client.post("/api/v1/runs/run_unknown/cancel", headers=_operator_headers())
+
+        _assert_run_not_found(response, "run_unknown")
+        assert gateway.cancelled == []
+        assert gateway.submissions == []
+        assert _events(store) == []
+        assert _hydro_run_count(store, "run_unknown") == 0
+
+
+def test_cancel_unknown_run_is_decided_per_run_id_and_leaves_other_runs_untouched() -> None:
+    with _store() as store:
+        _insert_hydro_run(store, "run_other", status="running")
+        _create_job(store, job_id="job_other", run_id="run_other", status="running", slurm_job_id="slurm_other")
+        events_before = len(_events(store))
+        gateway = _MockGateway()
+        with _client(store, gateway=gateway) as client:
+            response = client.post("/api/v1/runs/run_unknown/cancel", headers=_operator_headers())
+
+        _assert_run_not_found(response, "run_unknown")
+        assert gateway.cancelled == []
+        assert gateway.submissions == []
+        assert store.get_job("job_other").status == "running"
+        assert _hydro_status(store, "run_other") == "running"
+        assert len(_events(store)) == events_before
+        assert _hydro_run_count(store, "run_unknown") == 0
+
+
+@pytest.mark.parametrize("terminal_status", ["succeeded", "failed", "cancelled"])
+def test_cancel_run_with_only_terminal_jobs_stays_idempotent_ok(terminal_status: str) -> None:
+    with _store() as store:
+        _create_job(store, job_id="job_terminal", run_id="run_terminal_only", status=terminal_status)
+        gateway = _MockGateway()
+        with _client(store, gateway=gateway) as client:
+            response = client.post("/api/v1/runs/run_terminal_only/cancel", headers=_operator_headers())
+
+        assert response.status_code == 200
+        data = response.json()["data"]
+        assert data["cancelled_jobs"] == []
+        assert data["partial_failure"] is False
+        assert gateway.cancelled == []
+        assert store.get_job("job_terminal").status == terminal_status
+        assert _hydro_run_count(store, "run_terminal_only") == 0
+
+
+def test_cancel_hydro_run_without_jobs_still_cancels_the_run_row() -> None:
+    with _store() as store:
+        _insert_hydro_run(store, "run_without_jobs", status="running")
+        gateway = _MockGateway()
+        with _client(store, gateway=gateway) as client:
+            response = client.post("/api/v1/runs/run_without_jobs/cancel", headers=_operator_headers())
+
+        assert response.status_code == 200
+        data = response.json()["data"]
+        assert data["cancelled_jobs"] == []
+        assert data["hydro_run"]["previous_status"] == "running"
+        assert data["hydro_run"]["status"] == "cancelled"
+        assert _hydro_status(store, "run_without_jobs") == "cancelled"
+        assert gateway.cancelled == []
+
+
+def test_cancel_unknown_run_without_hydro_run_table_returns_not_found() -> None:
+    with _store() as store:
+        store.session.execute(text("DROP TABLE hydro.hydro_run"))
+        store.session.commit()
+        gateway = _MockGateway()
+        with _client(store, gateway=gateway) as client:
+            response = client.post("/api/v1/runs/run_unknown/cancel", headers=_operator_headers())
+
+        _assert_run_not_found(response, "run_unknown")
+        assert gateway.cancelled == []
+        assert _events(store) == []
+
+
+def test_display_cancel_manual_action_wins_over_not_found_for_unknown_run(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("ALLOW_DEV_ROLE_HEADER", "true")
+    request_id = "req-display-cancel-unknown-run"
+    with _store() as store:
+        gateway_probe = _GatewayDependencyProbe()
+        app = create_app(_display_env(tmp_path / "display-object-store"))
+        app.dependency_overrides[pipeline_routes.get_pipeline_store] = lambda: store
+        app.dependency_overrides[pipeline_routes.get_slurm_gateway] = gateway_probe
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/v1/runs/run_unknown/cancel",
+                headers={**_operator_headers(), "X-Request-ID": request_id},
+            )
+
+        assert response.status_code == 409
+        _assert_display_manual_action_error(
+            response,
+            request_id=request_id,
+            run_id="run_unknown",
+            control_action="cancel",
+        )
+        assert gateway_probe.calls == 0
+        assert _events(store) == []
+
+
+@pytest.mark.parametrize(
+    ("role_header", "expected_status", "expected_code"),
+    [
+        (None, 401, "AUTH_REQUIRED"),
+        ({"X-User-Role": "viewer"}, 403, "RBAC_FORBIDDEN"),
+    ],
+)
+def test_cancel_auth_rbac_refusals_win_over_not_found_for_unknown_run(
+    role_header: dict[str, str] | None,
+    expected_status: int,
+    expected_code: str,
+) -> None:
+    request_id = f"req-cancel-unknown-authz-{expected_code.lower()}"
+    with _store() as store:
+        gateway = _MockGateway()
+        with _client(store, gateway=gateway) as client:
+            response = client.post(
+                "/api/v1/runs/run_unknown/cancel",
+                headers={**(role_header or {}), "X-Request-ID": request_id},
+            )
+
+        assert response.status_code == expected_status
+        _assert_policy_error_response(
+            response,
+            request_id=request_id,
+            expected_code=expected_code,
+            expected_action="pipeline.cancel_run",
+            target_id="run_unknown",
+        )
+        assert gateway.cancelled == []
+        assert gateway.submissions == []
+        assert _events(store) == []
+
+
 def test_enum_sets_match_migration() -> None:
     assert HYDRO_RUN_STATUS_ENUM <= _migration_enum_values("hydro.run_status")
     # #2048: 000062 re-adds `frequency_done` to the DB enum as a convergence-only
