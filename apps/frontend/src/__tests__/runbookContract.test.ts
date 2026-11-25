@@ -41,6 +41,17 @@ function sliceSection(text: string, startMarker: string, endMarker: string): str
   return text.slice(start, end)
 }
 
+/** Join hard-wrapped Markdown lines so a sentence can be asserted as written. */
+function prose(text: string): string {
+  return text.replace(/[ \t]*\n[ \t]*/g, ' ')
+}
+
+/** The checklist river-click section's "点不到的 pin" bullet, up to the next sibling bullet. */
+function unclickablePinBullet(): string {
+  const section = sliceSection(readRunbook('docs/runbooks/node-27-bringup-checklist.md'), '#### C4-river-click：', '\n## 上线判定')
+  return sliceSection(section, '  - **点不到的 pin（#3242）**', '\n  - **')
+}
+
 function extractBashBlocks(section: string): string[] {
   const blocks: string[] = []
   const fence = /^[ \t]*```bash\r?\n([\s\S]*?)\r?\n[ \t]*```$/gm
@@ -555,5 +566,68 @@ describe('river-click runbook contract', () => {
     for (const section of [checklist, tier]) {
       expect(section).not.toMatch(new RegExp(['select', 'Rendered', 'River'].join('')))
     }
+  })
+
+  it('checklist "点不到的 pin" bullet states the unclickable-pin receipt signature (#3242)', () => {
+    const bullet = prose(unclickablePinBullet())
+    expect(bullet).toContain(
+      'receipt 的签名是 `failure.code` `HOOK_SELECTION_FAILED`、message 恰为 `hook HOOK_POINT_OCCLUDED`、`warmup_count 0`、`accepted_count 0`；',
+    )
+  })
+
+  it('checklist "点不到的 pin" bullet limits replacements, keeps post-warmup failures NO-GO and the per-role PASS gate (#3242)', () => {
+    const bullet = prose(unclickablePinBullet())
+    expect(bullet).toContain('取自 `networks_by_size.tsv`（按段数升序）')
+    expect(bullet).toContain('每个角色最多换两次。')
+    expect(bullet).toContain('没有可用行，或换满两次仍是同一签名，即 NO-GO。')
+    expect(bullet).toContain('**只有这一个签名可以换 pin**。')
+    expect(bullet).toContain(
+      '其它任何 FAIL / BLOCKED，以及 `warmup_count` 为 1 之后的任何失败 （这个 pin 已经被点通过），一律 NO-GO，不得换 pin 重跑。',
+    )
+    expect(bullet).toContain('门仍然要求三个角色各有一张 `BINDER: PASS`。')
+  })
+
+  it('checklist pin-discovery script writes networks_by_size.tsv ascending and still prints the three pins.tsv rows (#3242)', () => {
+    const section = sliceSection(readRunbook('docs/runbooks/node-27-bringup-checklist.md'), '#### C4-river-click：', '\n## 上线判定')
+    // The heredoc body: from the line after `<<'JS'` up to the closing `JS` line.
+    const heredoc = sliceSection(section, "<<'JS'", '\nJS\n')
+    const script = heredoc.slice(heredoc.indexOf('\n') + 1)
+    expect(script).toContain('fs.writeFileSync(`${dir}/networks_by_size.tsv`')
+    expect(script).toContain("[['largest', rows[n - 1]], ['median', mid], ['smallest', rows[0]]]")
+    // Execute the script on a synthetic five-network input; expected rows are worked out by hand.
+    const dir = mkdtempSync(path.join(tmpdir(), 'nhms-runbook-pins-'))
+    try {
+      writeFileSync(
+        path.join(dir, 'network_pins.tsv'),
+        ['rnv_a\t50\ta_shud_shud_riv_000001\t1', 'rnv_b\t10\tb_shud_shud_riv_000001\t1', 'rnv_c\t30\tc_shud_shud_riv_000001\t1',
+          'rnv_d\t40\td_shud_shud_riv_000001\t1', 'rnv_e\t20\te_shud_shud_riv_000001\t1'].join('\n') + '\n',
+      )
+      writeFileSync(
+        path.join(dir, 'product_networks.tsv'),
+        ['basin_a\trnv_a', 'basin_b\trnv_b', 'basin_c\trnv_c', 'basin_d\trnv_d', 'basin_e\trnv_e'].join('\n') + '\n',
+      )
+      const stdout = execFileSync('node', ['-', dir], { input: script, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] })
+      expect(stdout).toBe(
+        'largest\tbasin_a\ta_shud_shud_riv_000001\t50\n'
+        + 'median\tbasin_c\tc_shud_shud_riv_000001\t30\n'
+        + 'smallest\tbasin_b\tb_shud_shud_riv_000001\t10\n',
+      )
+      expect(readFileSync(path.join(dir, 'networks_by_size.tsv'), 'utf8')).toBe(
+        'basin_b\tb_shud_shud_riv_000001\t10\n'
+        + 'basin_e\te_shud_shud_riv_000001\t20\n'
+        + 'basin_c\tc_shud_shud_riv_000001\t30\n'
+        + 'basin_d\td_shud_shud_riv_000001\t40\n'
+        + 'basin_a\ta_shud_shud_riv_000001\t50\n',
+      )
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('tier runbook 4.9 points its mechanism-defect sentence at the checklist "点不到的 pin" rule (#3242)', () => {
+    const tier = prose(sliceSection(readRunbook('docs/runbooks/tier-node27-timeseries-storage.md'), '### 4.9 Frontend', '\n### 4.10'))
+    expect(tier).toContain(
+      '`SERIES_REQUEST_INVALID` is a mechanism defect to fix. One exception, stated in `docs/runbooks/node-27-bringup-checklist.md` ("点不到的 pin", #3242)',
+    )
   })
 })
