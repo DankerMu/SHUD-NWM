@@ -15,12 +15,12 @@ the next change, not here); the migration-order note of the checklist's C1.
 
 ## 1. Spec (orchestrator)
 
-- [ ] 1.1 `runtime-service-role-boundary`: the requirement "The display
+- [x] 1.1 `runtime-service-role-boundary`: the requirement "The display
   deployment receipt observes the running unit".
 
 ## 2. The receipt script
 
-- [ ] 2.1 `scripts/ops/display-c1-receipt.sh` (bash, executable): the ten
+- [x] 2.1 `scripts/ops/display-c1-receipt.sh` (bash, executable): the ten
   claims of the requirement, one output line each (`<claim>=ok` or
   `<claim>=FAIL <short reason>`), preceded by `repo_root=`,
   `checkout_head=`, `main_pid=`, `port=`, `process_started=`,
@@ -40,7 +40,7 @@ the next change, not here); the migration-order note of the checklist's C1.
   wins); the file is not sourced. No other value of that file reaches the
   output. No `systemctl` verb except `show` / `is-active`; nothing is
   written.
-- [ ] 2.2 `tests/test_display_c1_receipt.py`: the script is run in a
+- [x] 2.2 `tests/test_display_c1_receipt.py`: the script is run in a
   temporary checkout with `systemctl`, `ps`, `curl` faked on `PATH` (the
   pattern of the start-wrapper harness; `ss` faked too). One passing case;
   one case per scenario of the requirement; and for every claim and every
@@ -54,14 +54,14 @@ the next change, not here); the migration-order note of the checklist's C1.
   tree, `.git/index` included, being byte-identical. A case with a
   secret-looking value in the env file asserts that it is absent from
   stdout and stderr.
-- [ ] 2.3 Red runs: for each claim, the check is disabled in the script
+- [x] 2.3 Red runs: for each claim, the check is disabled in the script
   (one at a time), the named failing-case test goes red, the script is
   restored byte-identical (`cmp` against a pristine copy). Recorded in
   `.workplans/3231/red-runs.log`.
 
 ## 3. Tests leave the lane
 
-- [ ] 3.1 Classify all test functions of
+- [x] 3.1 Classify all test functions of
   `tests/test_two_node_docker_runtime.py` by the file under test. Report
   the table (subject, functions, collected items). A function whose
   subject stays in the tree after the lane is deleted
@@ -75,9 +75,9 @@ the next change, not here); the migration-order note of the checklist's C1.
   (`tests/test_env_templates.py`) instead. A
   function that tests both a surviving file and a lane file is split: the
   surviving half moves, the lane half stays.
-- [ ] 3.2 `tests/test_start_display_api_restart_anchor.py` imports its
+- [x] 3.2 `tests/test_start_display_api_restart_anchor.py` imports its
   harness from `tests/test_start_display_api.py`.
-- [ ] 3.3 `tests/test_role_boundary_static.py` no longer imports
+- [x] 3.3 `tests/test_role_boundary_static.py` no longer imports
   `scripts.validate_two_node_docker_runtime`.
   `test_display_env_blockers_align_with_compute_only_static_inventory` is
   replaced by a test on `infra/env/display.example`: the runtime guard
@@ -92,7 +92,7 @@ the next change, not here); the migration-order note of the checklist's C1.
   forbidden key yield a blocker). The assertions about the validator's
   compute-side constants are dropped; the report lists each dropped
   assertion.
-- [ ] 3.4 Counts: the collected ids of the four files (`test_two_node_docker_runtime`,
+- [x] 3.4 Counts: the collected ids of the four files (`test_two_node_docker_runtime`,
   `..._runbook_environment_invariant`, `..._source_trust`,
   `test_start_display_api_restart_anchor`) plus the new files, before and
   after; every id of before exists after under its old or its new file.
@@ -101,22 +101,22 @@ the next change, not here); the migration-order note of the checklist's C1.
 
 ## 4. Docs (orchestrator)
 
-- [ ] 4.1 `docs/runbooks/node-27-bringup-checklist.md` C1: deployment is
+- [x] 4.1 `docs/runbooks/node-27-bringup-checklist.md` C1: deployment is
   the wrapper (a production action, migrations first, the existing note
   kept); the receipt is the script, run from a login shell of the service
   user; what it proves; what it no longer claims and why; the rule that a
   receipt of a commit needs a process started after the checkout reached
   it; `checkout_head` is the `head_sha` of the operator's record.
-- [ ] 4.2 `docs/runbooks/tier-node27-timeseries-storage.md`: the three
+- [x] 4.2 `docs/runbooks/tier-node27-timeseries-storage.md`: the three
   lines of the go/no-go block that run the validator are removed.
 
 ## 5. Evidence
 
-- [ ] 5.1 Local: the new and touched test files, the four files of 3.4,
+- [x] 5.1 Local: the new and touched test files, the four files of 3.4,
   `tests/test_runtime_mode.py`; `ruff check --no-cache .`;
   `openspec validate display-c1-receipt-on-systemd --strict --no-interactive`;
   the entropy hard gate at 247 findings / 0 failing.
-- [ ] 5.2 node-27: the same test files in a detached worktree; and the
+- [x] 5.2 node-27: the same test files in a detached worktree; and the
   script itself, run from the worktree against the production checkout
   (root given as the argument). It is read-only. Expected today: every
   claim `ok` except `process_loaded_head` (the process is older than the
@@ -124,4 +124,4 @@ the next change, not here); the migration-order note of the checklist's C1.
   the port is held by the main process and its two workers, no tracked
   file is modified, both storage roots exist and are not writable. The output is the receipt of the
   script's first contact with the real `systemctl`, `ps` and `curl`.
-- [ ] 5.3 Archive the change in the PR's last push.
+- [x] 5.3 Archive the change in the PR's last push.
