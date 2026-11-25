@@ -571,6 +571,17 @@ click 只能人工截图、无法纳入 C4 自动 receipt：
     segment detail 对两种 id 都回 200，preflight 能过，但地图 discharge 图层渲染的是
     `shud_riv` id，钩子会以 `HOOK_FEATURE_MISMATCH` 拒绝（lane 记 `HOOK_SELECTION_FAILED`，message
     `hook HOOK_FEATURE_MISMATCH`）。
+  - **被另一张河网遮住的 pin（#3242）**：嵌套 / 重叠流域里，一张河网的 `…_000001` 河段可能整段与另一张河网的河段重合。
+    该处的产品点击按图层顺序取第一个要素，落到另一张网的河段上；钩子因此回 `HOOK_POINT_OCCLUDED`，
+    lane 在 warmup 即失败：`HOOK_SELECTION_FAILED`、message `hook HOOK_POINT_OCCLUDED`、`accepted_count 0`。
+    2026-11-25 node-27 实测：`basins_byh_shud_shud_riv_000001` 的锚点在画布上、未被任何控件盖住，
+    沿线每一处真实点击打开的都是 `basins_cj_main_…` 的河段。这说明的是**这个 pin 用户点不到**，
+    不是点击耗时，也不是点击机制的缺陷。
+    - **换 pin**：保留该 receipt，在同一角色内换下一张网，取自 `networks_by_size.tsv`（按段数升序）：
+      largest 换上一行（次大），smallest 换下一行，median 换尚未用过、段数最接近中位数的一行；
+      不得与另外两个角色的 pin 相同；每个角色最多换两次，换满仍是同一签名即 NO-GO。
+    - **只有这一个签名可以换 pin**：零接受样本，且 message 恰为 `hook HOOK_POINT_OCCLUDED`。
+      其它任何 FAIL / BLOCKED，或已有接受样本之后的失败，一律 NO-GO，不得换 pin 重跑。
   - **只读发现命令**（证据落在私有 PIN_DIR，随 receipt 一并记录；`set -euo pipefail`，
     BLOCKED 分支（不足三网或某网 `_shud_riv_000001` 匹配数 ≠ 1）或任一 pin 的 segment detail 非 200
     都会 `exit 1` 停下，不会带着坏 pin 继续）：
@@ -634,6 +645,8 @@ const mid = rows.slice(1, -1).reduce((best, row) => (Math.abs(row.count - median
 for (const [role, row] of [['largest', rows[n - 1]], ['median', mid], ['smallest', rows[0]]]) {
   console.log([role, row.basin, row.pin, row.count].join('\t'))
 }
+// Every product network by ascending segment count: where a replacement pin comes from (#3242).
+fs.writeFileSync(`${dir}/networks_by_size.tsv`, rows.map((row) => [row.basin, row.pin, row.count].join('\t')).join('\n') + '\n')
 JS
 while IFS="$(printf '\t')" read -r ROLE BASIN SEG COUNT; do
   BV=$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(0, "utf8")).data.basin_version_id)' < "$PIN_DIR/gfs-$BASIN.json")
@@ -649,9 +662,10 @@ done < "$PIN_DIR/pins.tsv"
   `PLAYWRIGHT_LIVE_RIVER_BASIN_ID=<basin>`（第 2 列）、`PLAYWRIGHT_LIVE_RIVER_SEGMENT_ID=<pin>`（第 3 列，即该网唯一的 `…_shud_riv_000001`），
   各自重新执行上面的私有运行目录 prelude、exact merged command 与 binder（`set -euo pipefail`）。
   **三次都必须 `BINDER: PASS`**（schema 1.1、`click_dispatch=trusted_pointer_event`、warmup 1 +
-  20 samples、`p95_ms < 2000`）门才算过；任一 FAIL/BLOCKED 即 NO-GO，如实记录，不得重跑到绿。完整样本下的
+  20 samples、`p95_ms < 2000`）门才算过；任一 FAIL/BLOCKED 即 NO-GO，如实记录，不得重跑到绿
+  （唯一例外是上面“被另一张河网遮住的 pin”：按那条规则换 pin，被换下的 receipt 一并记录）。完整样本下的
   `THRESHOLD_EXCEEDED` 是产品发现；`CLICK_DISPATCH_INVALID` / `HOOK_*` / `SERIES_REQUEST_INVALID`
-  是机制缺陷，须修复。
+  是机制缺陷，须修复（零接受样本的 `hook HOOK_POINT_OCCLUDED` 除外：那是 pin 不可点）。
 - **边界**：本 lane 只访问 `/`；`/monitoring` 原文案不变，`/ops`
   不在本 metric 内。
 
