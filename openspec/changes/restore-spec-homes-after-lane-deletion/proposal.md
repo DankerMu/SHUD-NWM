@@ -22,15 +22,19 @@ spec text in the process, or kept text that describes the deleted producer
   `RELEASE_BLOCKED` (the same response `rbac-policy-enforcement` already
   describes as "Release blocked dependency 503"). The CLI path reaches the
   same policy decision but raises its own error, without a 503; the
-  scenario is scoped to HTTP.
+  scenario is scoped to HTTP. A request that a dependency-guarded route
+  refuses for its own shape (a malformed body, an invalid run id, a
+  disabled route) gets that refusal first; the scenario is scoped to
+  well-formed requests to enabled routes.
 
 Two notes about environment files are wrong or misleading:
 
 - `infra/env/node27-download.example` says "the download chain opens no
-  database connection today". The download entry point requires
-  `DATABASE_URL`, and the GFS and IFS adapters are both built with a
-  PostgreSQL met store: they write `met.data_source` and read and write
-  `met.forecast_cycle`.
+  database connection today". The download entry point requires a DSN,
+  and the GFS and IFS adapters are both built with `PsycopgMetStore`
+  from it: they write `met.data_source` and read and write
+  `met.forecast_cycle`. `docs/runbooks/production-ops/artifacts-and-storage.md`
+  repeats the claim in its role table.
 - On the compute host, `compute.host.env` (read by the gateway and the
   compute API) and `compute.replay.env` still carry
   `NHMS_SCHEDULER_CYCLE_LAG_HOURS=16` and `NHMS_SCHEDULER_LOOKBACK_HOURS`

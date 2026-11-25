@@ -68,5 +68,4 @@ written to evidence**.
 ## Residual Risks
 
 A green gateway preflight proves reachability and capability, not solver
-correctness. Final readiness still requires accepted Slurm accounting receipts
-and successful SHUD output (issues #257/#259).
+correctness.

@@ -48,14 +48,17 @@ reads which file.
   chain does with `DATABASE_URL` (the entry script, the adapters it builds
   for each source, which tables they read or write) and rewrite only the
   "Measured scope" sentences of the comment above `DATABASE_URL` to say
-  exactly that. The lines before them, including the warning about the
-  archived PostgreSQL on port 55433 that a test pins, stay verbatim. Keys
-  and values unchanged; no existing test is edited.
+  exactly that. The lines before them, including the warning line that
+  `tests/test_node27_download_cycles.py` pins, stay verbatim. Keys and
+  values unchanged; no existing test is edited.
 - [ ] 3.2 `infra/env/README.md` (orchestrator): the note on the inert
   scheduler lag / lookback keys in `compute.host.env` /
   `compute.replay.env`.
 - [ ] 3.3 `docs/runbooks/slurm-gateway-preflight.md` (orchestrator): the
   "Final readiness ..." sentence is cut.
+- [ ] 3.4 `docs/runbooks/production-ops/artifacts-and-storage.md`
+  (orchestrator): the role table's `nhms_download_rw` row says what the
+  download chain does with the role, as the template comment of 3.1 does.
 
 ## 4. Evidence
 

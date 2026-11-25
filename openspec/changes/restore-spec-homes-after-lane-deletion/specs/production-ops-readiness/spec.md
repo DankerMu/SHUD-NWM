@@ -60,7 +60,8 @@ The system SHALL enforce or explicitly gate backend-side authorization for produ
 
 #### Scenario: Deferred auth is a release blocker
 
-- **WHEN** live identity-provider auth is configured (`AUTH_BACKEND` is `live`, `live_idp`, `oidc` or `saml`, or `NHMS_AUTH_MODE` is `live` or `live_idp`) and an HTTP request to a protected API or Slurm-gateway route carries no accepted live proof of backend auth and is not authenticated by the Slurm scheduler service credential
+- **WHEN** live identity-provider auth is configured (`AUTH_BACKEND` is `live`, `live_idp`, `oidc` or `saml`, or `NHMS_AUTH_MODE` is `live` or `live_idp`)
+- **AND** a well-formed HTTP request to an enabled protected API or Slurm-gateway route carries no accepted live proof of backend auth and is not authenticated by the Slurm scheduler service credential
 - **THEN** the backend answers that request with HTTP 503 and code `RELEASE_BLOCKED` before the route handler runs
 - **AND** the response details carry the redacted policy decision, the audit record and the `removal_criteria` that lift the block
 - **AND** the action does not mutate anything
