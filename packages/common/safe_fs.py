@@ -4,6 +4,9 @@ import errno
 import os
 import stat
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager, suppress
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -322,11 +325,41 @@ def read_bytes_durable_no_follow(
         os.close(parent_fd)
 
 
+@dataclass(slots=True)
+class _PinnedRoot:
+    root: Path
+    fd: int | None  # cleared before the handle is closed: a copied context then finds no pin
+
+
+_PINNED_CONTAINMENT_ROOT: ContextVar[_PinnedRoot | None] = ContextVar("_PINNED_CONTAINMENT_ROOT", default=None)
+
+
+@contextmanager
+def pinned_containment_root(containment_root: Path) -> Iterator[None]:
+    """Open the root's chain once; ``stat_no_follow`` on that root walks from a duplicate (per context)."""
+    outer, root, fd, reuse = _PINNED_CONTAINMENT_ROOT.get(), containment_root, None, False
+    with suppress(Exception):  # entry never raises for the root: a root that cannot be opened pins nothing
+        root = _expand_path(containment_root)
+        reuse = outer is not None and outer.fd is not None and outer.root == root
+        fd = None if reuse else _open_directory_no_follow(root)
+    if reuse:
+        yield
+        return
+    holder = _PinnedRoot(root, fd)
+    token = _PINNED_CONTAINMENT_ROOT.set(holder if fd is not None else None)
+    try:
+        yield
+    finally:
+        holder.fd = None
+        _PINNED_CONTAINMENT_ROOT.reset(token)
+        _close_file_fd(fd)
+
+
 def stat_no_follow(path: Path, *, containment_root: Path | None = None) -> os.stat_result:
     """Stat a filesystem entry without following symlinked parents or target."""
 
     target = _expand_path(path)
-    parent_fd, parent_path = _open_parent_dir(target, containment_root=containment_root, create=False)
+    parent_fd, parent_path = _open_parent_dir(target, containment_root=containment_root, create=False, allow_pin=True)
     try:
         _verify_fd_matches_path(parent_fd, parent_path)
         result = os.stat(target.name, dir_fd=parent_fd, follow_symlinks=False)
@@ -826,6 +859,7 @@ def _open_parent_dir(
     *,
     containment_root: Path | None,
     create: bool,
+    allow_pin: bool = False,
 ) -> tuple[int, Path]:
     if containment_root is not None:
         _relative_parts_under_root(path, containment_root)
@@ -833,7 +867,7 @@ def _open_parent_dir(
     if create:
         ensure_directory_no_follow(parent, containment_root=containment_root)
     root, parts = _anchor_for(parent, containment_root=containment_root)
-    root_fd = _open_directory_no_follow(root)
+    root_fd = _open_root_handle(root, allow_pin=allow_pin and containment_root is not None)
     fd = root_fd
     try:
         for part in parts:
@@ -850,6 +884,16 @@ def _open_parent_dir(
         if fd != -1 and fd != root_fd:
             os.close(fd)
         os.close(root_fd)
+
+
+def _open_root_handle(root: Path, *, allow_pin: bool) -> int:
+    pinned = _PINNED_CONTAINMENT_ROOT.get() if allow_pin else None
+    if pinned is None or pinned.root != root or (pinned_fd := pinned.fd) is None:
+        return _open_directory_no_follow(root)
+    try:
+        return os.dup(pinned_fd)  # the walk closes this duplicate, never the pin itself
+    except OSError as error:
+        raise SafeFilesystemError(f"Failed to open directory {root}: {error}", kind="io") from error
 
 
 def _open_child_dir(parent_fd: int, name: str, path_label: Path) -> int:

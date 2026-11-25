@@ -25,6 +25,7 @@ from packages.common.safe_fs import (
     atomic_write_bytes_no_follow,
     ensure_directory_no_follow,
     list_directory_no_follow_limited,
+    pinned_containment_root,
     read_bytes_limited_no_follow,
     scan_directory_no_follow_limited,
     stat_no_follow,
@@ -3578,73 +3579,74 @@ class FileOrchestrationJournalRepository(
         marker, compare equal and serve the tampered rows — the same hole in a
         new shape.
         """
-        latest_entries: list[tuple[str, str, tuple[int, int, int] | None]] = []
-        journal_signatures: list[tuple[str, Any]] = []
-        event_signatures: list[tuple[str, Any]] = []
-        direct_partition_signatures: list[tuple[str, Any]] = []
-        latest_directory_signatures: list[tuple[str, Any]] = []
-        for source_segment in source_segments:
-            latest_directory = self.root / "latest" / source_segment / cycle_segment
-            # The scandir is the one leg the helper cannot be a drop-in for:
-            # ``os.scandir`` FOLLOWS a symlinked parent and lists the decoy
-            # without raising, so the directory itself is probed first and a
-            # fault short-circuits the listing.  Entries inside a probed-real
-            # directory keep their own ``entry.stat(follow_symlinks=False)``.
-            latest_directory_signature = self._containment_stat_signature(latest_directory)
-            latest_directory_signatures.append((source_segment, latest_directory_signature))
-            if latest_directory_signature is not None and not _signature_has_containment_fault(
-                latest_directory_signature
-            ):
-                try:
-                    with os.scandir(latest_directory) as it:
-                        for entry in it:
-                            if entry.name.endswith(".json"):
-                                try:
-                                    entry_stat = entry.stat(follow_symlinks=False)
-                                    latest_entries.append(
-                                        (
-                                            source_segment,
-                                            entry.name,
-                                            (entry_stat.st_mtime_ns, entry_stat.st_size, entry_stat.st_ino),
+        with pinned_containment_root(self.root):
+            latest_entries: list[tuple[str, str, tuple[int, int, int] | None]] = []
+            journal_signatures: list[tuple[str, Any]] = []
+            event_signatures: list[tuple[str, Any]] = []
+            direct_partition_signatures: list[tuple[str, Any]] = []
+            latest_directory_signatures: list[tuple[str, Any]] = []
+            for source_segment in source_segments:
+                latest_directory = self.root / "latest" / source_segment / cycle_segment
+                # The scandir is the one leg the helper cannot be a drop-in for:
+                # ``os.scandir`` FOLLOWS a symlinked parent and lists the decoy
+                # without raising, so the directory itself is probed first and a
+                # fault short-circuits the listing.  Entries inside a probed-real
+                # directory keep their own ``entry.stat(follow_symlinks=False)``.
+                latest_directory_signature = self._containment_stat_signature(latest_directory)
+                latest_directory_signatures.append((source_segment, latest_directory_signature))
+                if latest_directory_signature is not None and not _signature_has_containment_fault(
+                    latest_directory_signature
+                ):
+                    try:
+                        with os.scandir(latest_directory) as it:
+                            for entry in it:
+                                if entry.name.endswith(".json"):
+                                    try:
+                                        entry_stat = entry.stat(follow_symlinks=False)
+                                        latest_entries.append(
+                                            (
+                                                source_segment,
+                                                entry.name,
+                                                (entry_stat.st_mtime_ns, entry_stat.st_size, entry_stat.st_ino),
+                                            )
                                         )
-                                    )
-                                except OSError:
-                                    latest_entries.append((source_segment, entry.name, None))
-                except OSError:
-                    pass
-            journal_signatures.append(
-                (
-                    source_segment,
-                    self._cycle_segment_signatures(self.root / "journal" / source_segment, cycle_segment),
+                                    except OSError:
+                                        latest_entries.append((source_segment, entry.name, None))
+                    except OSError:
+                        pass
+                journal_signatures.append(
+                    (
+                        source_segment,
+                        self._cycle_segment_signatures(self.root / "journal" / source_segment, cycle_segment),
+                    )
                 )
-            )
-            event_signatures.append(
-                (
-                    source_segment,
-                    self._cycle_segment_signatures(
-                        self.root / "pipeline-events" / source_segment, cycle_segment
-                    ),
+                event_signatures.append(
+                    (
+                        source_segment,
+                        self._cycle_segment_signatures(
+                            self.root / "pipeline-events" / source_segment, cycle_segment
+                        ),
+                    )
                 )
-            )
-            direct_partition_signatures.append(
-                (
-                    source_segment,
-                    self._containment_stat_signature(
-                        self.root / "pipeline-jobs" / "by-cycle" / source_segment / cycle_segment
-                    ),
+                direct_partition_signatures.append(
+                    (
+                        source_segment,
+                        self._containment_stat_signature(
+                            self.root / "pipeline-jobs" / "by-cycle" / source_segment / cycle_segment
+                        ),
+                    )
                 )
+            fingerprint = (
+                tuple(journal_signatures),
+                tuple(event_signatures),
+                tuple(direct_partition_signatures),
+                tuple(sorted(latest_entries)),
+                tuple(latest_directory_signatures),
+                self._containment_stat_signature(self.root / "pipeline-jobs"),
             )
-        fingerprint = (
-            tuple(journal_signatures),
-            tuple(event_signatures),
-            tuple(direct_partition_signatures),
-            tuple(sorted(latest_entries)),
-            tuple(latest_directory_signatures),
-            self._containment_stat_signature(self.root / "pipeline-jobs"),
-        )
-        if _signature_has_containment_fault(fingerprint):
-            return _FINGERPRINT_CONTAINMENT_FAULT
-        return fingerprint
+            if _signature_has_containment_fault(fingerprint):
+                return _FINGERPRINT_CONTAINMENT_FAULT
+            return fingerprint
 
     def _cache_cycle_rows(
         self,
