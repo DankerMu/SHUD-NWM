@@ -6415,7 +6415,10 @@ done < "$PIN_DIR/pins.tsv"
   plus 20 samples, `p95_ms < 2000`). Any FAIL/BLOCKED is NO-GO and is recorded as
   such, never rerun until green. A `THRESHOLD_EXCEEDED` with complete samples
   is a product finding; `CLICK_DISPATCH_INVALID`, `HOOK_*` or
-  `SERIES_REQUEST_INVALID` is a mechanism defect to fix.
+  `SERIES_REQUEST_INVALID` is a mechanism defect to fix. One exception, stated in
+  `docs/runbooks/node-27-bringup-checklist.md` ("点不到的 pin", #3242): a run that
+  ends before the warmup with `hook HOOK_POINT_OCCLUDED` has a pin nobody can
+  click; that pin is replaced by the same role's next network, not failed.
 
 Archive status:
 - status: historical baseline
