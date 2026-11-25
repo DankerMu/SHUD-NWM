@@ -26,7 +26,7 @@ tests stay green unedited, in particular `tests/test_file_orchestration_journal_
 
 ## 1. Primitive (`packages/common/safe_fs.py`)
 
-- [ ] 1.1 `pinned_containment_root(containment_root)` is a context manager.
+- [x] 1.1 `pinned_containment_root(containment_root)` is a context manager.
   A module-level `_PINNED_CONTAINMENT_ROOT: ContextVar[... | None]` (default
   `None`) holds a small holder with the expanded root and the handle. On
   entry the root is expanded and opened with `_open_directory_no_follow`. If
@@ -37,7 +37,7 @@ tests stay green unedited, in particular `tests/test_file_orchestration_journal_
   `finally`: the holder's handle is cleared, the context variable is reset
   with its token, and the handle, if any, is closed. A block that reuses
   an outer pin (1.4) neither clears nor closes the holder.
-- [ ] 1.2 `_open_parent_dir` obtains its root handle from one helper. With a
+- [x] 1.2 `_open_parent_dir` obtains its root handle from one helper. With a
   pin active for the same expanded root and the caller allowing it, the
   helper returns `os.dup` of the pinned handle (an `OSError` from `os.dup`
   is raised as `SafeFilesystemError` with `kind="io"`, as a failed chain
@@ -46,12 +46,12 @@ tests stay green unedited, in particular `tests/test_file_orchestration_journal_
   is unchanged, including the containment check ahead of it and the closing
   of the handle it was given. The pinned handle itself is never closed or
   returned by the walk.
-- [ ] 1.3 Only `stat_no_follow` allows the pin, and only when its
+- [x] 1.3 Only `stat_no_follow` allows the pin, and only when its
   `containment_root` is not `None`. Its body after `_open_parent_dir` is
   unchanged (both `_verify_fd_matches_path` calls, the leaf stat without
   following, the symlink-leaf refusal, the error mapping). No other public
   function changes behaviour inside a block.
-- [ ] 1.4 Nesting: a block for the root already pinned reuses that handle
+- [x] 1.4 Nesting: a block for the root already pinned reuses that handle
   and does not close it on its own exit; a block for another root pins its
   own and restores the outer pin on exit. There is one pin at a time: inside
   the inner block a call that names the outer root takes today's path. The name is importable from
@@ -59,7 +59,7 @@ tests stay green unedited, in particular `tests/test_file_orchestration_journal_
 
 ## 2. Fingerprint (`services/orchestrator/file_orchestration_journal.py`)
 
-- [ ] 2.1 The whole body of `_cycle_rows_source_fingerprint` runs inside
+- [x] 2.1 The whole body of `_cycle_rows_source_fingerprint` runs inside
   `with pinned_containment_root(self.root):`. The name is imported into the
   journal module's namespace like the other `safe_fs` names, and looked up
   there at call time. No other line of the journal changes.
@@ -68,7 +68,7 @@ tests stay green unedited, in particular `tests/test_file_orchestration_journal_
 
 New file `tests/test_safe_fs_pinned_root.py`:
 
-- [ ] 3.1 Outcome matrix. For each row, build the tree in `tmp_path`, call
+- [x] 3.1 Outcome matrix. For each row, build the tree in `tmp_path`, call
   `stat_no_follow(path, containment_root=root)` outside a block and inside
   one, and assert the same outcome: for a result, equal `(st_mode, st_ino,
   st_dev, st_size, st_mtime_ns)`; for an exception, the same class and, for
@@ -81,17 +81,17 @@ New file `tests/test_safe_fs_pinned_root.py`:
   to a real directory; a component above the root is a symlink; path outside
   the root; `root / "sub" / ".."` where `sub` is a real directory (the one
   `..` shape that only the under-root check refuses).
-- [ ] 3.2 The root chain is opened once per block. Count calls of
+- [x] 3.2 The root chain is opened once per block. Count calls of
   `_open_directory_no_follow` (replace the module attribute with a counting
   wrapper): five `stat_no_follow` calls for five paths under the root give
   five outside a block and one inside. A call inside the block with
   `containment_root=None`, and one with a different root, each add one
   (today's path).
-- [ ] 3.3 Other primitives ignore the pin: inside a block,
+- [x] 3.3 Other primitives ignore the pin: inside a block,
   `read_bytes_no_follow(path, containment_root=root)` and
   `open_file_no_follow(path, containment_root=root)` each open the root
   chain themselves (the counter rises).
-- [ ] 3.4 Handle lifetime, one test function per assertion so that a
+- [x] 3.4 Handle lifetime, one test function per assertion so that a
   mutation log shows which one failed. Record the pinned handle number inside the block
   (through `_PINNED_CONTAINMENT_ROOT`); after the block `os.fstat` on it
   raises `OSError` (`EBADF`) and the context variable is back to its
@@ -103,7 +103,7 @@ New file `tests/test_safe_fs_pinned_root.py`:
   directory of the test tree (compare `os.fstat(fd)` `(st_dev, st_ino)` of
   every entry of `/dev/fd` with the tree's directories), which is immune to
   unrelated descriptors opening or closing.
-- [ ] 3.5 Races, with the change made between two calls of one block. Each
+- [x] 3.5 Races, with the change made between two calls of one block. Each
   case also records what the same second call does outside a block, so the
   test documents both columns of the design's race table:
   (a) a directory under the root is replaced by a symlink to a copy: the
@@ -124,7 +124,7 @@ New file `tests/test_safe_fs_pinned_root.py`:
   `FileNotFoundError`).
   The docstrings of (c) and (c2) say they pin stated limits and why the
   returned values are the real files'.
-- [ ] 3.6 Nesting and threads. Same-root nesting: one chain open in total,
+- [x] 3.6 Nesting and threads. Same-root nesting: one chain open in total,
   and the outer block still works after the inner exits. Different-root
   nesting (outer `A`, inner `B`): stats under `B` inside the inner block use
   `B`'s pin (chain opens so far: two); one stat under `A` inside the inner
@@ -135,7 +135,7 @@ New file `tests/test_safe_fs_pinned_root.py`:
 
 New file `tests/test_cycle_rows_fingerprint_pinned_root.py`:
 
-- [ ] 3.7 Value equality. For each tree, compute
+- [x] 3.7 Value equality. For each tree, compute
   `repository._cycle_rows_source_fingerprint(...)` normally and with
   `pinned_containment_root` in the journal module replaced by a context
   manager that pins nothing, and assert equality. Trees: empty journal root;
@@ -153,7 +153,7 @@ New file `tests/test_cycle_rows_fingerprint_pinned_root.py`:
   `("gfs", "GFS")`), because `_cycle_read_source_segments` folds the two
   spellings into one on a case-insensitive filesystem; the trees that need
   two distinct directories are skipped there and run on node-27.
-- [ ] 3.8 Call shape. For a populated cycle and `source_segments=("gfs",
+- [x] 3.8 Call shape. For a populated cycle and `source_segments=("gfs",
   "GFS")` passed explicitly, one fingerprint
   calls `repository._containment_stat_signature` 21 times, each with exactly
   one positional argument and no keyword; calls the journal module's
@@ -163,7 +163,7 @@ New file `tests/test_cycle_rows_fingerprint_pinned_root.py`:
   the chain is opened 21 times. The test derives 21 from the slot list
   (`_journal_segment_names`) and the number of spellings, not from a
   literal.
-- [ ] 3.9 Through the cache. On a populated cycle: a first
+- [x] 3.9 Through the cache. On a populated cycle: a first
   `_cycle_rows`-backed read stores; a second is a hit; then
   `journal/<source>` is replaced by a symlink to a copy and the next read
   raises what a cold repository raises on that tree (same class and token);
@@ -172,13 +172,13 @@ New file `tests/test_cycle_rows_fingerprint_pinned_root.py`:
 
 ## 4. Evidence
 
-- [ ] 4.1 Red first. The new test files cannot run against the unmodified
+- [x] 4.1 Red first. The new test files cannot run against the unmodified
   tree (the name they import does not exist); record that import failure in
   `.workplans/3236/red-runs-b1.log`. Then, with `pinned_containment_root`
   implemented as a block that pins nothing and the fingerprint already
   entering it, record that the "opened once" assertions of 3.2 and 3.8 fail
   (5 and 21 chain opens) while 3.1 and 3.7 pass.
-- [ ] 4.2 Mutations, each applied by hand, the named test run, the outcome
+- [x] 4.2 Mutations, each applied by hand, the named test run, the outcome
   recorded in the same log, the file restored and compared with a scratch
   copy (`cmp`):
   - M1 the pinned path skips the under-root containment check -> 3.1
@@ -203,11 +203,11 @@ New file `tests/test_cycle_rows_fingerprint_pinned_root.py`:
     (b) red (it returns the old directory's entry);
   - M11 exit closes the handle without clearing the holder -> 3.4 (copied
     context) red.
-- [ ] 4.3 Micro-benchmark, recorded, not asserted: on a synthetic
+- [x] 4.3 Micro-benchmark, recorded, not asserted: on a synthetic
   two-spelling cycle under a root six directories deep, wall time of 2,000
   fingerprints with the block and with the no-pin stand-in, on the Mac and
   on node-27. Written to `.workplans/3236/bench-b1.log`.
-- [ ] 4.4 Local: the two new files; `tests/test_safe_fs.py`,
+- [x] 4.4 Local: the two new files; `tests/test_safe_fs.py`,
   `tests/test_safe_fs_lock.py`,
   `tests/test_file_orchestration_journal_read_cache.py`,
   `tests/test_gateway_reconcile_inventory.py`,
@@ -220,13 +220,34 @@ New file `tests/test_cycle_rows_fingerprint_pinned_root.py`:
   pin-containment-root-for-cycle-fingerprint --strict --no-interactive`; the
   repository entropy hard gate stays at its baseline; `wc -l
   packages/common/safe_fs.py` is at most 1,000.
-- [ ] 4.5 node-27 (Linux `O_NOFOLLOW` semantics are the production ones):
+- [x] 4.5 node-27 (Linux `O_NOFOLLOW` semantics are the production ones):
   the same files in a temporary detached worktree, without the integration
   opt-in, so no database is created or dropped. Receipt on the PR.
-- [ ] 4.6 After merge, before the production checkout moves: one plan-only
-  pass of the merged commit from a separate clone at a pass boundary, with
-  the sampling profiler. Record status, counts and the per-source backfill
-  audit against the neighbouring production passes (must be identical), wall
-  and CPU, and the samples under `_cycle_rows_source_fingerprint` against
-  the prediction (about 700, from 2,972). Posted on #3236. Deployment itself
-  follows the compute-node cadence.
+
+After merge, before the production checkout moves (owed on #3236, not a
+merge gate): one plan-only
+pass of the merged commit from a separate clone at a pass boundary, with
+the sampling profiler. Record status, counts and the per-source backfill
+audit against the neighbouring production passes (must be identical), wall
+and CPU, and the samples under `_cycle_rows_source_fingerprint` against
+the prediction (about 700, from 2,972). Posted on #3236. Deployment itself
+follows the compute-node cadence.
+
+## Evidence recorded
+
+- Red runs and mutations M1-M15 (four added after review): `.workplans/3236/red-runs-b1.log`,
+  applied with `.workplans/3236/mutate_b1.py`; every one red where predicted,
+  every restore compared identical.
+- Benchmark, 2,000 fingerprints, two spellings: macOS, root six deep, 6.09 s
+  -> 2.94 s (52 % less); root eight deep, 7.83 s -> 3.21 s (59 % less);
+  node-27 (Linux, local disk, root six deep) 5.52 s -> 3.72 s (33 % less).
+  The production profile attributes 81 % of the fingerprint to the root-chain
+  open; the plan-only pass after merge tests that.
+- node-27, commit `edf16bff7`: 906 passed, none skipped (the two-spelling
+  tree and the thread case ran on a case-sensitive filesystem).
+- `packages/common/safe_fs.py` is 1,000 lines.
+- Deviations: `tests/fixtures/file_journal_cluster_map.json` registers
+  `pinned_containment_root` (the cluster-map governance test compares the map
+  with every name tests replace on the journal module); test 3.9 restores the
+  tree with a copy (a new inode), because putting the original directory back
+  restores the old fingerprint and the read would be a hit, not a store.
