@@ -701,8 +701,8 @@ def test_frontend_forecast_react_requests_segments_and_configures_echarts() -> N
     forecast_data = Path("apps/frontend/src/lib/forecastData.ts").read_text(encoding="utf-8")
     forecast_chart = Path("apps/frontend/src/components/charts/ForecastChart.tsx").read_text(encoding="utf-8")
 
-    assert "#2266cc" in forecast_data
-    assert "#ef7d22" in forecast_data
+    assert "#22d3ee" in forecast_data
+    assert "#34d399" in forecast_data
     assert "markLine" in forecast_chart
     assert "起报时间" in forecast_chart
 

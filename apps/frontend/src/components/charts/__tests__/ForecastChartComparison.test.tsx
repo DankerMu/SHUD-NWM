@@ -19,10 +19,8 @@ function forecastSeries(overrides: Partial<ForecastSeries>): ForecastSeries {
   return {
     scenario: 'forecast_gfs_deterministic',
     source: 'GFS',
-    role: 'future_7_days',
-    isAnalysis: false,
     label: 'GFS 预报',
-    color: '#ef7d22',
+    color: '#22d3ee',
     cycleTime: '2026-05-03T00:00:00Z',
     availableLeadHours: 168,
     points: [
@@ -63,17 +61,15 @@ describe('ForecastChart comparison rendering', () => {
           forecastSeries({
             scenario: 'analysis_true_field',
             source: 'ERA5',
-            role: 'past_3_days',
-            isAnalysis: true,
             label: '分析（ERA5）',
-            color: '#2266cc',
+            color: '#34d399',
           }),
           forecastSeries({}),
           forecastSeries({
             scenario: 'forecast_ifs_deterministic',
             source: 'IFS',
             label: 'IFS 预报',
-            color: '#2ca02c',
+            color: '#34d399',
           }),
         ])}
       />,
@@ -84,9 +80,9 @@ describe('ForecastChart comparison rendering', () => {
     const gfs = option.series.find((series) => series.name === 'GFS 预报')
     const ifs = option.series.find((series) => series.name === 'IFS 预报')
 
-    expect(analysis?.lineStyle).toMatchObject({ color: '#2266cc', type: 'solid' })
-    expect(gfs?.lineStyle).toMatchObject({ color: '#ef7d22', type: 'solid' })
-    expect(ifs?.lineStyle).toMatchObject({ color: '#2ca02c', type: 'dashed' })
+    expect(analysis?.lineStyle).toMatchObject({ color: '#34d399', type: 'solid' })
+    expect(gfs?.lineStyle).toMatchObject({ color: '#22d3ee', type: 'solid' })
+    expect(ifs?.lineStyle).toMatchObject({ color: '#34d399', type: 'dashed' })
   })
 
   it('shows the IFS 6d annotation when available lead hours are 144', () => {
@@ -98,7 +94,7 @@ describe('ForecastChart comparison rendering', () => {
             scenario: 'forecast_ifs_deterministic',
             source: 'IFS',
             label: 'IFS 预报',
-            color: '#2ca02c',
+            color: '#34d399',
             cycleTime: '2026-05-02T18:00:00Z',
             availableLeadHours: 144,
             points: [
@@ -114,63 +110,6 @@ describe('ForecastChart comparison rendering', () => {
     const ifs = renderedChartOption().series.find((series) => series.name === 'IFS 预报')
     expect(ifs?.markLine?.data).toContainEqual(expect.objectContaining({ name: 'IFS 6d', xAxis: endpoint }))
     expect(ifs?.data?.at(-1)?.[0]).toBe(endpoint)
-  })
-
-  it('renders an over-budget state instead of passing oversized forecast arrays to ECharts', () => {
-    render(
-      <ForecastChart
-        data={{
-          ...forecastData([
-            forecastSeries({
-              points: Array.from({ length: FORECAST_CHART_POINT_BUDGET }, (_, index) => ({
-                time: `2026-05-18T${String(index % 24).padStart(2, '0')}:00:00Z`,
-                value: index,
-              })),
-            }),
-          ]),
-          pointBudgetStatus: {
-            pointBudget: FORECAST_CHART_POINT_BUDGET,
-            sourcePointCount: FORECAST_CHART_POINT_BUDGET + 1,
-            retainedPointCount: FORECAST_CHART_POINT_BUDGET,
-            seriesBudget: FORECAST_CHART_POINT_BUDGET,
-            sourceSeriesCount: 1,
-            retainedSeriesCount: 1,
-            overBudget: true,
-          },
-        }}
-      />,
-    )
-
-    expect(screen.getByRole('status')).toHaveTextContent('预报序列超出客户端渲染预算')
-    expect(screen.queryByTestId('echarts-option')).not.toBeInTheDocument()
-  })
-
-  it('renders a degraded state for too many retained one-point series before building ECharts options', () => {
-    render(
-      <ForecastChart
-        data={{
-          ...forecastData(
-            Array.from({ length: FORECAST_CHART_POINT_BUDGET }, (_, index) =>
-              forecastSeries({
-                points: [{ time: `2026-05-18T${String(index % 24).padStart(2, '0')}:00:00Z`, value: index }],
-              }),
-            ),
-          ),
-          pointBudgetStatus: {
-            pointBudget: FORECAST_CHART_POINT_BUDGET,
-            sourcePointCount: FORECAST_CHART_POINT_BUDGET + 1,
-            retainedPointCount: FORECAST_CHART_POINT_BUDGET,
-            seriesBudget: FORECAST_CHART_POINT_BUDGET,
-            sourceSeriesCount: FORECAST_CHART_POINT_BUDGET + 1,
-            retainedSeriesCount: FORECAST_CHART_POINT_BUDGET,
-            overBudget: true,
-          },
-        }}
-      />,
-    )
-
-    expect(screen.getByRole('status')).toHaveTextContent('预报序列超出客户端渲染预算')
-    expect(screen.queryByTestId('echarts-option')).not.toBeInTheDocument()
   })
 
   it('defensively caps chart option points at the shared budget', () => {

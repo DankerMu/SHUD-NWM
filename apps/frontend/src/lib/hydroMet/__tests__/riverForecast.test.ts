@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  HYDRO_MET_RIVER_FORECAST_LIMIT,
+  HYDRO_MET_RIVER_FORECAST_SERIES_INSPECTION_LIMIT,
   HYDRO_MET_RIVER_FORECAST_VARIABLE,
   validateHydroMetRiverForecastForChart,
   type HydroMetRiverForecastPayload,
@@ -143,6 +145,53 @@ describe('validateHydroMetRiverForecastForChart (gold standard honest display)',
     if (result.ok) return
     expect(result.messages.length).toBeGreaterThan(0)
     expect('renderedPoints' in result).toBe(false)
+  })
+
+  it('caps a series above 480 points to its first 480 and reports it as capped', () => {
+    expect(HYDRO_MET_RIVER_FORECAST_LIMIT).toBe(480)
+    // 升序输入：上限在排序之前生效，保留的是前 480 个。
+    const points = Array.from({ length: 481 }, (_, hour) => pointAt(hour, 1000 + hour))
+    const result = validateHydroMetRiverForecastForChart(payload(points), product(), segment)
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.renderedPoints).toHaveLength(480)
+    expect(result.renderedPoints[0]).toEqual({ timestamp: Date.parse(points[0].valid_time), value: 1000 })
+    expect(result.renderedPoints[479]).toEqual({ timestamp: Date.parse(points[479].valid_time), value: 1479 })
+    expect(result.inspectedPointCount).toBe(480)
+    expect(result.pointCount).toBe(481)
+    expect(result.capped).toBe(true)
+  })
+
+  it('renders a series of exactly 480 points in full and does not report it as capped', () => {
+    const points = Array.from({ length: 480 }, (_, hour) => pointAt(hour, 1000 + hour))
+    const result = validateHydroMetRiverForecastForChart(payload(points), product(), segment)
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.renderedPoints).toHaveLength(480)
+    expect(result.renderedPoints[479]).toEqual({ timestamp: Date.parse(points[479].valid_time), value: 1479 })
+    expect(result.pointCount).toBe(480)
+    expect(result.capped).toBe(false)
+  })
+
+  it('fails validation with the inspection-cap message when a response carries more than 8 series', () => {
+    expect(HYDRO_MET_RIVER_FORECAST_SERIES_INSPECTION_LIMIT).toBe(8)
+    const series = Array.from({ length: 9 }, () => ({
+      scenario_id: 'forecast_gfs_deterministic',
+      source_id: 'GFS',
+      cycle_time: CYCLE,
+      points: [pointAt(0, 3000), pointAt(24, 3100)],
+    }))
+    const result = validateHydroMetRiverForecastForChart(
+      payload([], {}, { series }),
+      product(),
+      segment,
+    )
+
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.messages).toEqual([expect.stringContaining('series 数量 9 超过前端检查上限 8')])
   })
 
   it('rejects non-finite / illegal-date points and does not chart a partial clean line', () => {

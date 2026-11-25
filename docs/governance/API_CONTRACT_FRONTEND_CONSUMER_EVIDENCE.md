@@ -44,7 +44,7 @@ Active compatibility dependencies remain and must not be changed in #414:
 `F1` latest-product frontend consumer search:
 
 ```bash
-rg -n "mvp/qhh/latest-product|getQhhLatestProduct|QhhLatestProduct|fetchHydroMetLatestProduct|loadHydroMetBootstrap" apps/frontend/src
+rg -n "mvp/qhh/latest-product|getQhhLatestProduct|QhhLatestProduct|fetchHydroMetLatestProduct" apps/frontend/src
 ```
 
 `F2` forecast-series frontend consumer search:
@@ -72,9 +72,10 @@ rg -n "/api/v1/river-segments/\{segment_id\}/forecast-series|/api/v1/river-segme
 Search `F1`/`F3` found active frontend consumers of the canonical active route:
 
 - Direct generated calls: `apps/frontend/src/stores/hydroMetBootstrap.ts` calls
-  `client.GET('/api/v1/mvp/qhh/latest-product', ...)` twice — `identity_only=true`
-  popup product identity (the live consumer) and the full bootstrap, which has had
-  no production caller since #3222 (only its own tests call it).
+  `client.GET('/api/v1/mvp/qhh/latest-product', ...)` once, with `identity_only=true`,
+  for popup product identity. The full (non-`identity_only`) bootstrap call lost its
+  last production caller in #3222 and was deleted in #3241; no frontend code requests
+  the full mode.
 - Consumer fan-out: `apps/frontend/src/stores/stationLayerData.ts`,
   `apps/frontend/src/components/map/M11RiverForecastPanel.tsx`, and
   `apps/frontend/src/components/map/M11StationForcingPopup.tsx`.
@@ -82,9 +83,8 @@ Search `F1`/`F3` found active frontend consumers of the canonical active route:
   `/api/v1/mvp/qhh/latest-product` path, `QhhLatestProduct` schema, and
   `getQhhLatestProduct` operation.
 - Frontend test coverage: `apps/frontend/src/pages/hydroMet/__tests__/bootstrap.test.ts`
-  asserts direct latest-product calls and strict-identity behavior, and
-  (`bootstrap.test.ts:540`) that the identity-only latest-product is called once
-  per basin, source and cycle.
+  asserts the identity-only latest-product call and (`bootstrap.test.ts:323`) that
+  it is called once per basin, source and cycle.
 
 These are active-contract dependencies, not consumers of a removal-candidate
 replacement. Under #412 there is no selected replacement for this route, so
