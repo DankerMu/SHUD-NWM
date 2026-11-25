@@ -12,13 +12,13 @@ reads which file.
 
 ## 1. Spec (orchestrator)
 
-- [ ] 1.1 `production-ops-readiness`: the monitor requirement added; the
+- [x] 1.1 `production-ops-readiness`: the monitor requirement added; the
   deferred-auth scenario replaced.
-- [ ] 1.2 `output-parsing`: the non-finite requirement added.
+- [x] 1.2 `output-parsing`: the non-finite requirement added.
 
 ## 2. Tests
 
-- [ ] 2.1 `tests/test_live_monitoring.py`: one parametrised test over the
+- [x] 2.1 `tests/test_live_monitoring.py`: one parametrised test over the
   five rows of the requirement's table that drives the alert builder with
   summaries satisfying exactly that row and asserts the alert's `alert`,
   `severity`, `runbook`, that `observed` is present, and that `threshold`
@@ -30,13 +30,13 @@ reads which file.
   path of the five alerts is an existing file under the repository root.
   If the requirement's table disagrees with the code in any cell, stop and
   report the cell (the spec is corrected, not the code).
-- [ ] 2.2 The 503 `RELEASE_BLOCKED` response over HTTP: list, per surface
+- [x] 2.2 The 503 `RELEASE_BLOCKED` response over HTTP: list, per surface
   (API middleware, API dependency, Slurm gateway routes), the tests that
   assert status 503, the code, the policy decision, the audit record and
   `removal_criteria` in the details, and that the handler did not run. Add
   only what is missing, in the file that owns the neighbouring cases (the
   gateway side asserts only status and code today).
-- [ ] 2.3 The non-finite scenario: the existing parser test covers `NaN`,
+- [x] 2.3 The non-finite scenario: the existing parser test covers `NaN`,
   `Inf` and `-Infinity` on the only data row; add a case with a non-finite
   value after a valid row and assert that no row at all is written, and an
   overflowing literal (`1e400`) if the code refuses it with the same code
@@ -44,33 +44,33 @@ reads which file.
 
 ## 3. Environment notes
 
-- [ ] 3.1 `infra/env/node27-download.example`: trace what the download
+- [x] 3.1 `infra/env/node27-download.example`: trace what the download
   chain does with `DATABASE_URL` (the entry script, the adapters it builds
   for each source, which tables they read or write) and rewrite only the
   "Measured scope" sentences of the comment above `DATABASE_URL` to say
   exactly that. The lines before them, including the warning line that
   `tests/test_node27_download_cycles.py` pins, stay verbatim. Keys and
   values unchanged; no existing test is edited.
-- [ ] 3.2 `infra/env/README.md` (orchestrator): the note on the inert
+- [x] 3.2 `infra/env/README.md` (orchestrator): the note on the inert
   scheduler lag / lookback keys in `compute.host.env` /
   `compute.replay.env`.
-- [ ] 3.3 `docs/runbooks/slurm-gateway-preflight.md` (orchestrator): the
+- [x] 3.3 `docs/runbooks/slurm-gateway-preflight.md` (orchestrator): the
   "Final readiness ..." sentence is cut.
-- [ ] 3.4 `docs/runbooks/production-ops/artifacts-and-storage.md`
+- [x] 3.4 `docs/runbooks/production-ops/artifacts-and-storage.md`
   (orchestrator): the role table's `nhms_download_rw` row says what the
   download chain does with the role, as the template comment of 3.1 does.
 
 ## 4. Evidence
 
-- [ ] 4.1 Mutations (by hand or script, restored and compared), each red
+- [x] 4.1 Mutations (by hand or script, restored and compared), each red
   on the 2.1 test: a severity changed; a runbook path changed to a file
   that does not exist; `threshold` added to `slurm_monitor_unavailable`;
   the `elif` of the queue branch turned into `if` (both alerts raised).
-- [ ] 4.2 Local: `tests/test_live_monitoring.py`, the auth test file(s)
+- [x] 4.2 Local: `tests/test_live_monitoring.py`, the auth test file(s)
   touched or listed in 2.2, `tests/test_output_parser.py`, any test that
   reads `infra/env/node27-download.example`; `uv run --no-sync ruff check
   --no-cache .`; `openspec validate restore-spec-homes-after-lane-deletion
   --strict --no-interactive`; markdown lint of the edited documents; the
   entropy hard gate with 0 failing and master's finding count.
-- [ ] 4.3 node-27, temporary detached worktree of the PR head: the test
+- [x] 4.3 node-27, temporary detached worktree of the PR head: the test
   files of 4.2. Receipt on the PR.
