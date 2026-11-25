@@ -17,7 +17,7 @@ the gateway check (`mode`, `backend`, `version`, `healthy`, `submit_capable`,
 
 ## 1. Code
 
-- [ ] 1.1 `_interpret_gateway_health` (`services/orchestrator/scheduler_preflight.py`):
+- [x] 1.1 `_interpret_gateway_health` (`services/orchestrator/scheduler_preflight.py`):
   new keyword-only parameter `required_backend: str | None = None`. When it is
   given and the payload carries a `backend` key whose value, as a stripped
   string, is not equal to it, the verdict is unhealthy (`healthy`,
@@ -27,18 +27,18 @@ the gateway check (`mode`, `backend`, `version`, `healthy`, `submit_capable`,
   the key absent from the payload, the function behaves exactly as today.
   The comparison reads the payload's own `backend` value, never the
   `mode` fallback used for the returned field. Update the docstring.
-- [ ] 1.2 `_default_gateway_probe` (`services/orchestrator/scheduler_gateway.py`):
+- [x] 1.2 `_default_gateway_probe` (`services/orchestrator/scheduler_gateway.py`):
   the HTTP branch passes `required_backend="slurm"`. The branch condition
   becomes "mode is `slurm`" (`real` removed). The in-process call is not
   changed.
-- [ ] 1.3 `_gateway_self_reference_blocker`: the real-backend test becomes
+- [x] 1.3 `_gateway_self_reference_blocker`: the real-backend test becomes
   "backend is `slurm`" (`real` removed). Docstring wording follows.
-- [ ] 1.4 Search the repository (code, infra, docs outside dated receipts and
+- [x] 1.4 Search the repository (code, infra, docs outside dated receipts and
   archives) for other uses of `real` as a backend name and report them. Fix
   `docs/runbooks/slurm-gateway-preflight.md`: every place that names `real`
   as a backend value (three at the time of writing), and add one sentence on
   the new refusal where the runbook describes what the probe checks.
-- [ ] 1.5 `docs/bugs.md` BUG-20260527-013: `status: resolved` with a
+- [x] 1.5 `docs/bugs.md` BUG-20260527-013: `status: resolved` with a
   `resolved_by` field in the form the other resolved entries use, naming
   #3246 and what the scheduler does now; the prose states the chosen guard
   and the known limits from the proposal. `scripts/validate_bugs_ledger.py`
@@ -46,7 +46,7 @@ the gateway check (`mode`, `backend`, `version`, `healthy`, `submit_capable`,
 
 ## 2. Tests
 
-- [ ] 2.1 `_interpret_gateway_health` unit rows. No test calls the function
+- [x] 2.1 `_interpret_gateway_health` unit rows. No test calls the function
   directly today; put the new tests in `tests/test_production_scheduler.py`
   next to the `_install_fake_httpx` helper and the HTTP-probe tests:
   with `required_backend="slurm"` — backend `mock` healthy body -> unhealthy,
@@ -59,16 +59,16 @@ the gateway check (`mode`, `backend`, `version`, `healthy`, `submit_capable`,
   `required_backend="slurm"` -> healthy (the comparison does not read the
   fallback). Without `required_backend` — backend `mock` healthy body ->
   healthy (the in-process path).
-- [ ] 2.2 Probe level, with the fake `httpx` helper the scheduler tests
+- [x] 2.2 Probe level, with the fake `httpx` helper the scheduler tests
   already use: scheduler backend `slurm`, URL and token configured, health
   body healthy with four executable binaries and `backend: "mock"` ->
   `_default_gateway_probe` answers unhealthy, not submit-capable.
-- [ ] 2.3 Check level (`_slurm_gateway_check` with the default probe and the
+- [x] 2.3 Check level (`_slurm_gateway_check` with the default probe and the
   same fake): `checks["backend"] == "mock"`, `checks["healthy"] is False`,
   one blocker with code `SLURM_GATEWAY_UNAVAILABLE` whose `reason` contains
   `mock`. With `backend: "slurm"`: no blocker. With no `backend` key: no
   blocker.
-- [ ] 2.4 Pass level. No existing test drives a whole pass that is blocked
+- [x] 2.4 Pass level. No existing test drives a whole pass that is blocked
   by `SLURM_GATEWAY_UNAVAILABLE`. Reuse the `run_once`-level setup of the
   tests built on `_slurm_shud_scheduler` in `tests/test_production_scheduler.py`
   (they stub the gateway probe as healthy), without the probe stub and with
@@ -76,19 +76,19 @@ the gateway check (`mode`, `backend`, `version`, `healthy`, `submit_capable`,
   submitted, and the pass evidence carries the blocker with the reason. If
   that setup cannot run without the stub for a reason unrelated to this
   change, say so and pin the `_slurm_preflight` aggregation level instead.
-- [ ] 2.5 Scheduler backend `real`: the fake `httpx` records no request, the
+- [x] 2.5 Scheduler backend `real`: the fake `httpx` records no request, the
   gateway check is unhealthy with `SLURM_GATEWAY_UNAVAILABLE`, and the reason
   comes from `create_gateway` rejecting the name.
-- [ ] 2.6 Self-reference: backend `slurm`, loopback URL at the service port
+- [x] 2.6 Self-reference: backend `slurm`, loopback URL at the service port
   -> blocker (existing behaviour; the parametrized test that passed
   `backend="real"` now passes `slurm`). Backend `real` with the same URL ->
   no self-reference blocker (it is not a real backend any more; 2.5 shows the
   check fails anyway).
-- [ ] 2.7 Development default (new; nothing pins it today): backend unset
+- [x] 2.7 Development default (new; nothing pins it today): backend unset
   -> `_slurm_gateway_check` with the default probe is healthy through the
   in-process mock gateway, `checks["backend"] == "mock"`, no blocker, and the
   fake `httpx` records no request.
-- [ ] 2.8 Remove `real` as a backend name from the tests. Record each
+- [x] 2.8 Remove `real` as a backend name from the tests. Record each
   site and its outcome before editing; after the edit every one of these
   tests passes with unchanged assertions, the two exceptions below aside:
   - environment settings in `tests/test_slurm_gateway_auth_deployment.py`
@@ -110,12 +110,12 @@ the gateway check (`mode`, `backend`, `version`, `healthy`, `submit_capable`,
 
 ## 3. Evidence
 
-- [ ] 3.1 Red first: 2.1 (rows with `required_backend`), 2.2, 2.3 (`mock`
+- [x] 3.1 Red first: 2.1 (rows with `required_backend`), 2.2, 2.3 (`mock`
   case), 2.4, 2.5 and the second half of 2.6 fail on the unmodified source;
   2.3 (`slurm` and absent cases), 2.6 first half and 2.7 pass before and
   after. Output saved to
   `.workplans/3246/red-runs.log`.
-- [ ] 3.2 Mutations, each applied by hand, checked, recorded, restored
+- [x] 3.2 Mutations, each applied by hand, checked, recorded, restored
   (`cmp` against a scratch copy):
   - M1: remove the backend comparison in `_interpret_gateway_health` -> 2.1,
     2.2, 2.3 red.
@@ -129,7 +129,7 @@ the gateway check (`mode`, `backend`, `version`, `healthy`, `submit_capable`,
     -> the in-process rows of 2.1 and 2.7 red.
   - M5: put `real` back into the probe's branch condition -> 2.5 red.
   - M6: put `real` back into the self-reference test -> 2.6 second half red.
-- [ ] 3.3 `uv run --no-sync ruff check --no-cache .` clean. Test files:
+- [x] 3.3 `uv run --no-sync ruff check --no-cache .` clean. Test files:
   `tests/test_slurm_gateway_auth_deployment.py`, `tests/test_gateway.py`,
   every `tests/test_slurm_gateway*.py`, the scheduler test files that
   reference the gateway probe or the self-reference blocker
@@ -139,9 +139,12 @@ the gateway check (`mode`, `backend`, `version`, `healthy`, `submit_capable`,
   re-exported through the facade). `tests/test_production_scheduler.py` is
   very large: targeted `-k` selections while iterating, the whole file once at
   the end.
-- [ ] 3.4 node-27: the files of 3.3 in a detached temporary worktree.
-- [ ] 3.5 CI: full suite.
-- [ ] 3.6 Compute node, taken by the orchestrator after merge with an
+- [x] 3.4 node-27: the files of 3.3 in a detached temporary worktree.
+  - Evidence: `e140f5dbb`, 2397 passed, no skips; re-run at `b4b6a14a9` (receipt on the PR).
+- [x] 3.5 CI: full suite.
+## 4. After merge (evidence owed on the issue, not a task of this change)
+
+Compute node, taken by the orchestrator after merge with an
   ordinary fast-forward at a pass boundary and no gateway restart. Idle
   passes do not record a gateway check, so the evidence is: the first idle
   pass on the new code ends `planned` with root preflight `ready`; the next
@@ -149,3 +152,22 @@ the gateway check (`mode`, `backend`, `version`, `healthy`, `submit_capable`,
   `slurm`, healthy and submit-capable, and submits. The gateway unit's start
   time is unchanged across the deploy. The issue is closed with that
   evidence, not by the merge.
+
+## Review (round 1 not clean, round 2 clean)
+
+- Round 1, test-evidence seat: the pass-level test of 2.4 ran on a setup that
+  was blocked before the change for another reason, so it did not show a
+  submit being stopped. Added
+  `test_submitting_pass_stops_only_when_remote_gateway_reports_non_slurm_backend`
+  on the setup that submits: gateway reports `slurm` -> submitted; reports
+  `mock` -> nothing submitted, `SLURM_GATEWAY_UNAVAILABLE`. On the pre-change
+  source the `mock` case fails because the pass submits.
+- The mutation log predated two small follow-up edits (the conditions written
+  as `!= "slurm"`, a `backend: null` row); M1, M2, M5 and M6 were re-run on
+  the final tree with assertion lines. M3 and M4 were not re-run after those
+  edits; the edits do not touch the code they mutate.
+- A body with `backend: null` is refused, and the recorded backend then shows
+  the scheduler's mode (the fallback), not the null. Pinned by a test; the
+  real gateway never sends null.
+- The compute-node evidence of section 4 is collected after the merge; the
+  issue is closed with it.
