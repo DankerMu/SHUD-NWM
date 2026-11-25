@@ -356,7 +356,7 @@ class RealSlurmGateway(SlurmGateway):
             self._validate_manifest(task_manifest)
         first_task = dict(task_list[0])
         model_id = str(first_task.get("model_id") or base_manifest.get("model_id") or "")
-        profile = self.resolve_resource_profile(model_id)
+        profile = self.resolve_resource_profile(model_id, job_type=job_type)
         max_concurrent = int(profile["max_concurrent"])
         if max_concurrent < 1:
             raise SlurmValidationError("max_concurrent must be \u2265 1")
@@ -638,10 +638,11 @@ class RealSlurmGateway(SlurmGateway):
     def load_resource_profiles(self) -> dict[str, Any]:
         return load_resource_profiles(self.settings.resource_profiles_path)
 
-    def resolve_resource_profile(self, model_id: str | None) -> dict[str, Any]:
+    def resolve_resource_profile(self, model_id: str | None, *, job_type: str | None = None) -> dict[str, Any]:
         return resolve_model_resource_profile(
             self.load_resource_profiles(),
             model_id,
+            job_type=job_type,
             partition_override=getattr(self.settings, "partition_override", ""),
             exclude_nodes=getattr(self.settings, "exclude_nodes", ""),
         )
@@ -773,7 +774,11 @@ class RealSlurmGateway(SlurmGateway):
         slurm_env = self._validate_slurm_env(
             manifest_dict.get("slurm_env") or {}, active_binding=active_binding
         )
-        resource_profile = dict(profile or self.resolve_resource_profile(str(manifest_dict.get("model_id") or "")))
+        # The array submit hands in the profile it resolved (with its job type);
+        # only the single-job path resolves here, with the job type it renders.
+        resource_profile = dict(
+            profile or self.resolve_resource_profile(str(manifest_dict.get("model_id") or ""), job_type=job_type)
+        )
         try:
             resource_profile = validate_resource_profile(resource_profile)
             validate_sbatch_directive_context({**manifest_dict, **resource_profile})

@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+import yaml
 
 from services.slurm_gateway import real_backend as real_backend_module
 from services.slurm_gateway.config import DEFAULT_JOB_TYPE_TEMPLATES, SlurmGatewaySettings
@@ -17,6 +18,7 @@ from services.slurm_gateway.gateway import (
     SlurmValidationError,
 )
 from services.slurm_gateway.real_backend import RealSlurmGateway
+from services.slurm_gateway.resource_profiles import load_resource_profiles, resolve_model_resource_profile
 
 
 def _write_profiles(tmp_path: Path, body: str) -> Path:
@@ -622,3 +624,313 @@ def test_hindcast_production_array_submission_writes_required_manifest_fields(mo
     assert tasks[1]["river_network_version_id"] == "rnv_v1"
     assert "export NHMS_MANIFEST_INDEX=" in captured["script"]
     assert str(manifest_index) in captured["script"]
+
+
+# ---------------------------------------------------------------------------
+# #3344: job_type_overrides -- a third resolution layer after the model override.
+# Expected values below are restated from the #3344 fixture (design and spec
+# scenarios), not computed from the resolver.
+# ---------------------------------------------------------------------------
+
+_JT_DEFAULT = {
+    "partition": "compute",
+    "nodes": 1,
+    "ntasks": 1,
+    "cpus_per_task": 4,
+    "memory_gb": 8,
+    "walltime": "14:00:00",
+    "max_concurrent": 32,
+    "shud_threads": 4,
+}
+_JT_MODEL_OVERRIDE = {
+    "cpus_per_task": 12,
+    "memory_gb": 16,
+    "walltime": "20:00:00",
+    "max_concurrent": 6,
+    "shud_threads": 12,
+}
+_JT_FORCING_ENTRY = {"produce_forcing_array": {"cpus_per_task": 1, "shud_threads": 1}}
+_JT_HLJ_RESOLVED = {
+    "partition": "compute",
+    "nodes": 1,
+    "ntasks": 1,
+    "cpus_per_task": 12,
+    "memory_gb": 16,
+    "walltime": "20:00:00",
+    "max_concurrent": 6,
+    "shud_threads": 12,
+}
+
+
+def _jt_profiles(job_type_overrides: object = None) -> dict[str, object]:
+    profiles: dict[str, object] = {
+        "default": dict(_JT_DEFAULT),
+        "overrides": {"hlj_dg": dict(_JT_MODEL_OVERRIDE)},
+    }
+    if job_type_overrides is not None:
+        profiles["job_type_overrides"] = job_type_overrides
+    return profiles
+
+
+def test_job_type_resolution_default_only():
+    assert resolve_model_resource_profile(_jt_profiles(), "model_001") == _JT_DEFAULT
+    assert resolve_model_resource_profile(_jt_profiles(), "model_001", job_type="produce_forcing_array") == _JT_DEFAULT
+
+
+def test_job_type_resolution_model_override_only():
+    assert resolve_model_resource_profile(_jt_profiles(), "hlj_dg") == _JT_HLJ_RESOLVED
+
+
+def test_job_type_resolution_job_type_override_only():
+    resolved = resolve_model_resource_profile(
+        _jt_profiles(_JT_FORCING_ENTRY), "model_001", job_type="produce_forcing_array"
+    )
+
+    assert resolved == {**_JT_DEFAULT, "cpus_per_task": 1, "shud_threads": 1}
+
+
+def test_job_type_resolution_stacks_job_type_over_model_override():
+    profiles = _jt_profiles(_JT_FORCING_ENTRY)
+
+    forcing = resolve_model_resource_profile(profiles, "hlj_dg", job_type="produce_forcing_array")
+    forecast = resolve_model_resource_profile(profiles, "hlj_dg", job_type="run_shud_forecast_array")
+
+    assert forcing == {
+        "partition": "compute",
+        "nodes": 1,
+        "ntasks": 1,
+        "cpus_per_task": 1,
+        "memory_gb": 16,
+        "walltime": "20:00:00",
+        "max_concurrent": 6,
+        "shud_threads": 1,
+    }
+    assert forecast == _JT_HLJ_RESOLVED
+
+
+def test_job_type_resolution_without_entry_or_without_job_type_is_default_plus_model():
+    profiles = _jt_profiles(_JT_FORCING_ENTRY)
+
+    assert resolve_model_resource_profile(profiles, "hlj_dg", job_type="run_shud_forecast_array") == _JT_HLJ_RESOLVED
+    assert resolve_model_resource_profile(profiles, "hlj_dg", job_type="analysis_produce_forcing") == _JT_HLJ_RESOLVED
+    assert resolve_model_resource_profile(profiles, "hlj_dg", job_type=None) == _JT_HLJ_RESOLVED
+    assert resolve_model_resource_profile(profiles, "hlj_dg") == _JT_HLJ_RESOLVED
+    assert resolve_model_resource_profile(profiles, "model_001", job_type="") == _JT_DEFAULT
+
+
+def test_job_type_resolution_deployment_overlay_is_applied_last():
+    # In-memory only: the loader would refuse `partition` in an entry.
+    profiles = _jt_profiles(
+        {"produce_forcing_array": {"partition": "other", "cpus_per_task": 1, "shud_threads": 1}}
+    )
+
+    without_overlay = resolve_model_resource_profile(profiles, "hlj_dg", job_type="produce_forcing_array")
+    with_overlay = resolve_model_resource_profile(
+        profiles,
+        "hlj_dg",
+        job_type="produce_forcing_array",
+        partition_override="CPU",
+        exclude_nodes="w2",
+    )
+
+    assert without_overlay["partition"] == "other"
+    assert with_overlay["partition"] == "CPU"
+    assert with_overlay["exclude_nodes"] == "w2"
+    assert with_overlay["cpus_per_task"] == 1
+
+
+@pytest.mark.parametrize(
+    "job_type_overrides",
+    [
+        {"produce_forcing_array": "cpus_per_task=1"},
+        {"produce_forcing_array": ["cpus_per_task", 1]},
+        {"produce_forcing_array": None},
+        ["produce_forcing_array"],
+    ],
+)
+def test_job_type_resolution_ignores_non_mapping_in_memory_entries(job_type_overrides):
+    profiles = _jt_profiles(job_type_overrides)
+
+    assert resolve_model_resource_profile(profiles, "hlj_dg", job_type="produce_forcing_array") == _JT_HLJ_RESOLVED
+
+
+_JT_LOADER_PREFIX = """
+resource_profiles:
+  default:
+    partition: compute
+    nodes: 1
+    ntasks: 1
+    cpus_per_task: 4
+    memory_gb: 8
+    walltime: "14:00:00"
+    max_concurrent: 32
+    shud_threads: 4
+  overrides:
+    hlj_dg:
+      cpus_per_task: 12
+      shud_threads: 12
+"""
+
+
+@pytest.mark.parametrize("tail", ["", "  job_type_overrides:\n", "  job_type_overrides: null\n"])
+def test_job_type_overrides_absent_or_null_loads_as_empty_mapping(tmp_path, tail):
+    profiles = load_resource_profiles(_write_profiles(tmp_path, _JT_LOADER_PREFIX + tail))
+
+    assert profiles["job_type_overrides"] == {}
+    assert resolve_model_resource_profile(profiles, "hlj_dg", job_type="produce_forcing_array")["cpus_per_task"] == 12
+
+
+def test_job_type_overrides_valid_entry_loads(tmp_path):
+    tail = (
+        "  job_type_overrides:\n"
+        "    produce_forcing_array:\n"
+        "      cpus_per_task: 1\n"
+        "      shud_threads: 1\n"
+        "    parse_output_array:\n"
+        "      memory_gb: 2\n"
+    )
+
+    profiles = load_resource_profiles(_write_profiles(tmp_path, _JT_LOADER_PREFIX + tail))
+
+    assert profiles["job_type_overrides"] == {
+        "produce_forcing_array": {"cpus_per_task": 1, "shud_threads": 1},
+        "parse_output_array": {"memory_gb": 2},
+    }
+
+
+# (yaml tail, key names the message must name, a value token the error must not leak)
+_JT_REFUSED_FILES = {
+    "not_a_mapping": ("  job_type_overrides: [produce_forcing_array]\n", ["job_type_overrides"], None),
+    "entry_not_a_mapping": (
+        "  job_type_overrides:\n    produce_forcing_array: cores_one_xyz\n",
+        ["produce_forcing_array"],
+        "cores_one_xyz",
+    ),
+    "max_concurrent": (
+        "  job_type_overrides:\n    produce_forcing_array:\n"
+        "      cpus_per_task: 1\n      shud_threads: 1\n      max_concurrent: 8731\n",
+        ["produce_forcing_array", "max_concurrent"],
+        "8731",
+    ),
+    "walltime": (
+        '  job_type_overrides:\n    produce_forcing_array:\n      walltime: "93:17:41"\n',
+        ["produce_forcing_array", "walltime"],
+        "93:17:41",
+    ),
+    "partition": (
+        "  job_type_overrides:\n    produce_forcing_array:\n      partition: zzpart_secretish\n",
+        ["produce_forcing_array", "partition"],
+        "zzpart_secretish",
+    ),
+    "account": (
+        "  job_type_overrides:\n    produce_forcing_array:\n      account: acct_secretish\n",
+        ["produce_forcing_array", "account"],
+        "acct_secretish",
+    ),
+    "exclude_nodes": (
+        "  job_type_overrides:\n    produce_forcing_array:\n      exclude_nodes: nodeq77\n",
+        ["produce_forcing_array", "exclude_nodes"],
+        "nodeq77",
+    ),
+    "cpus_without_threads": (
+        "  job_type_overrides:\n    produce_forcing_array:\n      cpus_per_task: 1\n",
+        ["produce_forcing_array", "cpus_per_task", "shud_threads"],
+        None,
+    ),
+    "threads_without_cpus": (
+        "  job_type_overrides:\n    produce_forcing_array:\n      shud_threads: 1\n      memory_gb: 2\n",
+        ["produce_forcing_array", "cpus_per_task", "shud_threads"],
+        None,
+    ),
+    "zero_cpus": (
+        "  job_type_overrides:\n    produce_forcing_array:\n      cpus_per_task: 0\n      shud_threads: 1\n",
+        ["produce_forcing_array", "cpus_per_task"],
+        None,
+    ),
+    "negative_threads": (
+        "  job_type_overrides:\n    produce_forcing_array:\n      cpus_per_task: 1\n      shud_threads: -37\n",
+        ["produce_forcing_array", "shud_threads"],
+        "-37",
+    ),
+    "zero_memory": (
+        "  job_type_overrides:\n    produce_forcing_array:\n      memory_gb: 0\n",
+        ["produce_forcing_array", "memory_gb"],
+        None,
+    ),
+    "float_cpus": (
+        "  job_type_overrides:\n    produce_forcing_array:\n      cpus_per_task: 1.5\n      shud_threads: 1\n",
+        ["produce_forcing_array", "cpus_per_task"],
+        "1.5",
+    ),
+    "bool_threads": (
+        "  job_type_overrides:\n    produce_forcing_array:\n      cpus_per_task: 1\n      shud_threads: true\n",
+        ["produce_forcing_array", "shud_threads"],
+        None,
+    ),
+    "string_memory": (
+        "  job_type_overrides:\n    produce_forcing_array:\n      memory_gb: abcxyz\n",
+        ["produce_forcing_array", "memory_gb"],
+        "abcxyz",
+    ),
+    "unsafe_job_type_name": (
+        '  job_type_overrides:\n    "forcing;rm -rf":\n      max_concurrent: 2\n',
+        ["[redacted]", "max_concurrent"],
+        "forcing;rm -rf",
+    ),
+    "over_limit_cpus": (
+        "  job_type_overrides:\n    produce_forcing_array:\n      cpus_per_task: 9999\n      shud_threads: 1\n",
+        ["produce_forcing_array", "cpus_per_task"],
+        "9999",
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_JT_REFUSED_FILES))
+def test_job_type_overrides_malformed_file_is_refused_at_load(tmp_path, case):
+    tail, named_keys, leaked_value = _JT_REFUSED_FILES[case]
+    path = _write_profiles(tmp_path, _JT_LOADER_PREFIX + tail)
+
+    with pytest.raises(ConfigurationError) as exc_info:
+        load_resource_profiles(path)
+
+    message = str(exc_info.value)
+    for key in named_keys:
+        assert key in message, (case, key, message)
+    if leaked_value is not None:
+        assert leaked_value not in message
+        assert leaked_value not in repr(exc_info.value.details)
+
+
+# The repository's shipped profile file: the one entry it carries and what every
+# job type resolves to for every model the file knows plus one it does not.
+_SHIPPED_PROFILES_PATH = Path(__file__).resolve().parents[1] / "config" / "resource_profiles.yaml"
+_HLJ_DIRECT_GRID_MODELS = ("dg_3b091cccc163690de93cddd9c4c32472", "dg_8a34ed2ba8f8dd22f2716405569628a9")
+
+
+def test_shipped_profiles_give_forcing_one_core_and_one_thread_and_leave_other_job_types_alone():
+    raw = yaml.safe_load(_SHIPPED_PROFILES_PATH.read_text(encoding="utf-8"))["resource_profiles"]
+    profiles = load_resource_profiles(_SHIPPED_PROFILES_PATH)
+
+    assert raw["job_type_overrides"] == {"produce_forcing_array": {"cpus_per_task": 1, "shud_threads": 1}}
+    assert (raw["default"]["cpus_per_task"], raw["default"]["shud_threads"]) == (4, 4)
+    models = [*raw["overrides"], "unlisted_model_3344"]
+    assert set(_HLJ_DIRECT_GRID_MODELS) <= set(models)
+    assert "produce_forcing_array" in DEFAULT_JOB_TYPE_TEMPLATES
+
+    for model_id in models:
+        default_plus_model = {**raw["default"], **raw["overrides"].get(model_id, {})}
+        for job_type in DEFAULT_JOB_TYPE_TEMPLATES:
+            resolved = resolve_model_resource_profile(profiles, model_id, job_type=job_type)
+            if job_type == "produce_forcing_array":
+                expected = {**default_plus_model, "cpus_per_task": 1, "shud_threads": 1}
+            else:
+                expected = default_plus_model
+            assert resolved == expected, (model_id, job_type)
+
+    for model_id in _HLJ_DIRECT_GRID_MODELS:
+        forecast = resolve_model_resource_profile(profiles, model_id, job_type="run_shud_forecast_array")
+        forcing = resolve_model_resource_profile(profiles, model_id, job_type="produce_forcing_array")
+        assert (forecast["cpus_per_task"], forecast["shud_threads"]) == (12, 12)
+        assert (forcing["cpus_per_task"], forcing["shud_threads"]) == (1, 1)
+        assert forcing["memory_gb"] == forecast["memory_gb"] == 8
+        assert forcing["walltime"] == forecast["walltime"] == "14:00:00"
