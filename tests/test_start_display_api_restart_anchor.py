@@ -24,6 +24,7 @@ import pytest
 from tests.git_fixture_env import run_fixture_git
 from tests.test_two_node_docker_runtime import (
     REPO_ROOT,
+    _assert_detached_fallback_log_in_temp_repo,
     _prepare_start_display_api_harness,
     _run_start_display_api_harness,
     _write_executable,
@@ -74,7 +75,6 @@ def _display_env(temp_repo: Path) -> list[str]:
         "DATABASE_URL=postgresql://nhms_display_ro:secret@db.internal.example:5432/nhms",
         "NHMS_ENABLE_LIVE_POSTGIS_MVT=true",
         f"OBJECT_STORE_ROOT={object_store_root}",
-        f"NHMS_DISPLAY_LOG_PATH={temp_repo / 'display-api.log'}",
     ]
 
 
@@ -144,6 +144,7 @@ def test_legacy_restart_stops_this_checkouts_uvicorn_and_spares_another_checkout
         _assert_restart_spared_the_foreign_checkout(completed, own, [foreign], record_dir)
         assert (record_dir / "setsid.argv").is_file()
         assert "detached fallback relaunched" in completed.stdout
+        _assert_detached_fallback_log_in_temp_repo(completed, temp_repo)
 
 
 def test_systemd_restart_stops_the_unit_then_sweeps_only_this_checkouts_orphans(tmp_path: Path) -> None:
@@ -209,6 +210,7 @@ def test_a_metacharacter_repo_root_matches_only_its_own_checkout(tmp_path: Path)
         _assert_restart_spared_the_foreign_checkout(completed, own, [sibling, foreign], record_dir)
         pattern = (record_dir / "pgrep.argv").read_text(encoding="utf-8").splitlines()[2]
         assert pattern == f"^{parent}/a\\+b\\.c/\\.venv/bin/python -m uvicorn apps\\.api\\.main:app"
+        _assert_detached_fallback_log_in_temp_repo(completed, temp_repo)
 
 
 def test_no_prior_uvicorn_of_this_checkout_leaves_every_other_process_alone(tmp_path: Path) -> None:
@@ -227,6 +229,7 @@ def test_no_prior_uvicorn_of_this_checkout_leaves_every_other_process_alone(tmp_
         assert completed.returncode == 0, completed.stdout + completed.stderr
         assert "no prior uvicorn process found" in completed.stdout
         assert foreign.poll() is None
+        _assert_detached_fallback_log_in_temp_repo(completed, temp_repo)
 
 
 @pytest.mark.parametrize("path_fragment", ["[x]", "(x)", "x|y", "x{1}", "x?", "x^y", "x$y", "x*"])
