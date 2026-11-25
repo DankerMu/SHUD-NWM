@@ -22,7 +22,7 @@
 `apps/frontend/src/components/map/M11RiverForecastPanel.tsx` 以 compact 形态使用）SHALL 在同一时间轴上渲染
 GFS 与 IFS 两条 `q_down` 预报曲线：GFS 为实线 `#22d3ee`，IFS 为虚线 `#34d399`。
 曲线窗 MUST NOT 请求 analysis 曲线：forecast-series 请求带 `include_analysis=false`，scenario 不是所请求预报 scenario 的
-series 校验失败、不进入图表（见 `apps/frontend/src/lib/hydroMet/riverForecast.ts`）。compact 形态不渲染图表标题和 echarts 图例；
+series 使该源校验失败、不画曲线（见 `apps/frontend/src/lib/hydroMet/riverForecast.ts`）。compact 形态不渲染图表标题和 echarts 图例；
 图例是曲线窗内图表上方的一行源标记。
 
 #### Scenario: 双曲线配色与线型
