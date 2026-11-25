@@ -658,8 +658,10 @@ def test_the_tick_deadline_guard_defers_the_rest_of_the_tick_untouched(
         assert clock.reads == 3
         assert c2["mutation_state"] == "committed"
         assert receipt["deferred_contended_count"] == 1
-    # A guard deferral carries no fence wait: that is what tells it apart from
-    # an expired fence wait. Nothing it deferred counts toward the totals.
+    # A guard deferral says so in ``contended_on`` (#3380), which tells it apart
+    # from an expired fence wait; it carries no fence wait. Nothing it deferred
+    # counts toward the totals.
+    assert c3["contended_on"] == "tick_deadline"
     assert "fence_wait_elapsed_ms" not in c3
     assert c3["before_bytes"] == 1000 and c3["after_bytes"] is None
     assert receipt["per_table_totals"]["hydro.river_timeseries"]["chunks_compressed"] == len(attempted)
@@ -762,7 +764,7 @@ def _deferred_receipt() -> dict:
     return receipt
 
 
-def test_schema_2_2_example_and_deferred_receipt_validate() -> None:
+def test_schema_2_3_example_and_2_2_deferred_receipt_validate() -> None:
     assert _example()["schema_version"] == "2.3"
     jsonschema.validate(_example(), _load_schema())
     jsonschema.validate(_deferred_receipt(), _load_schema())

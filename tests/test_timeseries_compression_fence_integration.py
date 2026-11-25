@@ -267,8 +267,8 @@ def _fenced_compress(database_url: str, hypertable: str, chunk: _Chunk, *, fence
 
     The #3380 lock timeout is the largest value the runner's config accepts
     (one below the budget left after the fence wait), so the relation-lock
-    waits these #2713 interleavings rely on are bounded as before, by the
-    statement timeout.
+    waits these #2713 interleavings rely on are bounded by a lock timeout far
+    above any wait they reach.
     """
     return lambda: compression._default_compress_chunk(
         database_url,

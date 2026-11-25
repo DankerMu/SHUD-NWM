@@ -2919,6 +2919,18 @@ def test_a_2_2_receipt_keeps_validating() -> None:
     jsonschema.validate(committed, _load_schema())
 
 
+@pytest.mark.parametrize("dropped", ["budget", "head_sha"])
+def test_a_non_failed_2_2_receipt_still_requires_budget_and_head_sha(dropped: str) -> None:
+    """The 2.1/2.2 pins above read the example, which is 2.3 since #3380; keep 2.2 pinned on a real 2.2 receipt."""
+    receipt = _fence_deferral_2_2()
+    jsonschema.validate(receipt, _load_schema())  # the baseline is valid
+    receipt.pop(dropped)
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(receipt, _load_schema())
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.Draft7Validator(_load_schema()).validate(receipt)
+
+
 @pytest.mark.parametrize(
     ("version", "leak"),
     [

@@ -497,7 +497,8 @@ def test_env_example_declares_the_lock_timeout_once_with_its_default(tmp_path: P
     import re
 
     text = _COMPRESSION_ENV_EXAMPLE.read_text(encoding="utf-8")
-    assert re.findall(rf"(?m)^{_LOCK_TIMEOUT_KEY}=(\d+)$", text) == ["5000"]
+    declared = re.findall(rf"(?m)^{_LOCK_TIMEOUT_KEY}=(\d+)$", text)
+    assert declared == ["5000"]
     config = compression.config_from_args(
         argparse.Namespace(enforce=False, receipt_path=None, lock_path=None),
         {
@@ -505,9 +506,10 @@ def test_env_example_declares_the_lock_timeout_once_with_its_default(tmp_path: P
             "NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS": "172800",
             "NODE27_TIMESERIES_COMPRESSION_RECEIPT_PATH": str(tmp_path / "receipt.json"),
             "NODE27_TIMESERIES_COMPRESSION_LOCK_PATH": str(tmp_path / "runner.lock"),
-            _LOCK_TIMEOUT_KEY: "5000",
+            _LOCK_TIMEOUT_KEY: declared[0],
         },
     )
+    # The template's declared value is one the runner accepts, and is the 5000 ms in force.
     assert config.lock_timeout_ms == 5000
 
 
