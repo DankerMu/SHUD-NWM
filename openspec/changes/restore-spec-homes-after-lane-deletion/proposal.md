@@ -9,30 +9,37 @@ spec text in the process, or kept text that describes the deleted producer
 
 - **The live monitor.** `services/orchestrator/monitoring.py` raises five
   alerts and links three runbooks; `tests/test_live_monitoring.py` covers
-  two of the five. No requirement names it since "Monitoring and alerts
-  cover closure risks" was removed.
+  three of the five (`slurm_monitor_unavailable` and
+  `scheduler_evidence_missing` are not exercised). No requirement names it
+  since "Monitoring and alerts cover closure risks" was removed.
 - **Non-finite SHUD output.** The output parser refuses `NaN` / `inf` flow
   values with `NON_FINITE_FLOW` and a test proves it; the scenario lived in
   the retired `staging-end-to-end-closure` capability. `output-parsing`
   covers only non-numeric values and column-count mismatch.
 - **Deferred auth.** The scenario "Deferred auth is a release blocker" asks
   for "a release-blocker artifact" that only a deleted lane produced. What
-  the backend does is answer each affected request with 503
-  `RELEASE_BLOCKED`.
+  the backend does is answer each affected HTTP request with 503
+  `RELEASE_BLOCKED` (the same response `rbac-policy-enforcement` already
+  describes as "Release blocked dependency 503"). The CLI path reaches the
+  same policy decision but raises its own error, without a 503; the
+  scenario is scoped to HTTP.
 
 Two notes about environment files are wrong or misleading:
 
 - `infra/env/node27-download.example` says "the download chain opens no
   database connection today". The download entry point requires
-  `DATABASE_URL`, and the GFS adapter is built with a PostgreSQL met store
-  and upserts `met.forecast_cycle`.
+  `DATABASE_URL`, and the GFS and IFS adapters are both built with a
+  PostgreSQL met store: they write `met.data_source` and read and write
+  `met.forecast_cycle`.
 - On the compute host, `compute.host.env` (read by the gateway and the
   compute API) and `compute.replay.env` still carry
-  `NHMS_SCHEDULER_CYCLE_LAG_HOURS=16` and lookback values from before the
-  scheduler's own env file moved to 10 / 32. No scheduler unit reads those
-  two files (the scheduler timer's unit reads
-  `compute.scheduler-dbfree.env`), so the values have no effect; they
-  mislead a reader.
+  `NHMS_SCHEDULER_CYCLE_LAG_HOURS=16` and `NHMS_SCHEDULER_LOOKBACK_HOURS`
+  of 48 / 288, from before the scheduler's own env file moved to 10 / 32.
+  Only the orchestrator CLI, the journal retention and the state-index
+  scripts read those two keys, and none of them loads those two files, so
+  the values have no effect; they mislead a reader. (The gateway does read
+  other `NHMS_SCHEDULER_*` keys from `compute.host.env`; only the lag and
+  lookback keys are inert.)
 
 One more sentence of the same kind as those cut in the first PR remains in
 `docs/runbooks/slurm-gateway-preflight.md` ("Final readiness still requires
@@ -44,17 +51,19 @@ accepted Slurm accounting receipts ...").
   alerts, their payload and their runbooks); the scenario about deferred
   auth is replaced by what the backend does.
 - `output-parsing`: one requirement added (non-finite values).
-- Tests: the monitor's three untested alerts, the mutual exclusions and the
-  "every linked runbook exists" check; a pin for the 503 `RELEASE_BLOCKED`
-  response if no test asserts it yet. No production code changes are
+- Tests: the monitor's five alerts row by row (two are untested today),
+  the mutual exclusions and the "every linked runbook exists" check; the
+  503 `RELEASE_BLOCKED` response details on the gateway side, where only
+  the status and code are asserted today; a non-finite value after valid
+  rows. No production code changes are
   expected; if a test shows the code does not do what the spec text says,
   the implementer stops and reports instead of changing behaviour.
 - `infra/env/node27-download.example`: the comment says what the chain
   does with the database.
-- `infra/env/README.md`: a note that scheduler keys in `compute.host.env`
-  and `compute.replay.env` are inert, which file the scheduler reads, and
-  that the stale keys should be dropped at the next edit of those host
-  files.
+- `infra/env/README.md`: a note that the scheduler's lag and lookback keys
+  in `compute.host.env` and `compute.replay.env` are inert, which file the
+  scheduler reads them from, and that those two keys should be dropped at
+  the next edit of those host files.
 - `docs/runbooks/slurm-gateway-preflight.md`: the stale sentence is cut.
 
 ## Decisions
@@ -70,6 +79,11 @@ accepted Slurm accounting receipts ...").
 - **D3 The host env files are not edited by this change.** They are
   untracked files on the production host; the stale keys are inert. The
   README records the fact and the follow-up.
+- **D4 The download template's comment follows the code.** The issue asked
+  which of the two is the intent. The chain has written `met.data_source`
+  and `met.forecast_cycle` through that role since it was provisioned, the
+  role holds DML on `met` for exactly that, and the display side reads
+  those rows; the comment is what is wrong.
 
 ## What does not change
 

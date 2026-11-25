@@ -10,11 +10,11 @@ that exists in the repository.
 
 | `alert` | Raised when | `severity` | `threshold` | `runbook` |
 |---|---|---|---|---|
-| `failed_cycles` | failed cycles exceed `NHMS_MONITORING_MAX_FAILED_CYCLES` | critical | yes | `docs/runbooks/failed-basin-retry.md` |
+| `failed_cycles` | failed cycles inside the monitor's lookback window (`NHMS_MONITORING_LOOKBACK_HOURS`; at most 50 are counted) exceed `NHMS_MONITORING_MAX_FAILED_CYCLES` | critical | yes | `docs/runbooks/failed-basin-retry.md` |
 | `slurm_monitor_unavailable` | the Slurm queue could not be read | warning | no | `docs/runbooks/slurm-backlog.md` |
 | `slurm_queue_backlog` | active Slurm jobs exceed `NHMS_MONITORING_MAX_ACTIVE_SLURM_JOBS` | warning | yes | `docs/runbooks/slurm-backlog.md` |
-| `scheduler_evidence_missing` | the scheduler evidence summary is not `ok` | critical | no | `docs/runbooks/source-latency.md` |
-| `scheduler_stale` | the latest scheduler evidence is older than `NHMS_MONITORING_MAX_STALE_MINUTES` | warning | yes | `docs/runbooks/source-latency.md` |
+| `scheduler_evidence_missing` | no scheduler evidence file exists in the evidence directory | critical | no | `docs/runbooks/source-latency.md` |
+| `scheduler_stale` | the newest scheduler evidence file is older than `NHMS_MONITORING_MAX_STALE_MINUTES` (whatever that file says) | warning | yes | `docs/runbooks/source-latency.md` |
 
 `slurm_monitor_unavailable` and `slurm_queue_backlog` are mutually exclusive, and so are
 `scheduler_evidence_missing` and `scheduler_stale`.
@@ -60,7 +60,7 @@ The system SHALL enforce or explicitly gate backend-side authorization for produ
 
 #### Scenario: Deferred auth is a release blocker
 
-- **WHEN** live identity-provider auth is configured but no accepted live proof of backend auth exists, and a user attempts a production-impacting action
-- **THEN** the backend answers that request with HTTP 503 and code `RELEASE_BLOCKED`
+- **WHEN** live identity-provider auth is configured (`AUTH_BACKEND` is `live`, `live_idp`, `oidc` or `saml`, or `NHMS_AUTH_MODE` is `live` or `live_idp`) and an HTTP request to a protected API or Slurm-gateway route carries no accepted live proof of backend auth and is not authenticated by the Slurm scheduler service credential
+- **THEN** the backend answers that request with HTTP 503 and code `RELEASE_BLOCKED` before the route handler runs
 - **AND** the response details carry the redacted policy decision, the audit record and the `removal_criteria` that lift the block
 - **AND** the action does not mutate anything

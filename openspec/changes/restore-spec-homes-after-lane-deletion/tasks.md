@@ -21,32 +21,39 @@ reads which file.
 - [ ] 2.1 `tests/test_live_monitoring.py`: one parametrised test over the
   five rows of the requirement's table that drives the alert builder with
   summaries satisfying exactly that row and asserts the alert's `alert`,
-  `severity`, `runbook`, and that `threshold` is present or absent as the
-  table says; a quiet-system case with no alert; the two mutual exclusions
+  `severity`, `runbook`, that `observed` is present, and that `threshold`
+  is present or absent as the table says; a quiet-system case with no
+  alert; the two mutual exclusions
   (an unreadable queue with a large last-known job count raises only
   `slurm_monitor_unavailable`; a scheduler summary that is not `ok` raises
   only `scheduler_evidence_missing` even with an old age); every `runbook`
   path of the five alerts is an existing file under the repository root.
   If the requirement's table disagrees with the code in any cell, stop and
   report the cell (the spec is corrected, not the code).
-- [ ] 2.2 The 503 `RELEASE_BLOCKED` response: find the test that asserts
-  it (status 503, code, `removal_criteria` in the details, and no
-  mutation). If each of those four facts is asserted somewhere, list the
-  tests; add only what is missing, in the file that owns the neighbouring
-  cases.
-- [ ] 2.3 The non-finite scenario: confirm the existing parser test covers
-  `nan`, `inf` and `-inf`, the error code, the failed-run record and "no
-  row written"; add only what is missing.
+- [ ] 2.2 The 503 `RELEASE_BLOCKED` response over HTTP: list, per surface
+  (API middleware, API dependency, Slurm gateway routes), the tests that
+  assert status 503, the code, the policy decision, the audit record and
+  `removal_criteria` in the details, and that the handler did not run. Add
+  only what is missing, in the file that owns the neighbouring cases (the
+  gateway side asserts only status and code today).
+- [ ] 2.3 The non-finite scenario: the existing parser test covers `NaN`,
+  `Inf` and `-Infinity` on the only data row; add a case with a non-finite
+  value after a valid row and assert that no row at all is written, and an
+  overflowing literal (`1e400`) if the code refuses it with the same code
+  (if it does not, report and the spec drops that clause).
 
 ## 3. Environment notes
 
 - [ ] 3.1 `infra/env/node27-download.example`: trace what the download
   chain does with `DATABASE_URL` (the entry script, the adapters it builds
-  for each source, which tables they read or write) and rewrite the comment
-  above `DATABASE_URL` to say exactly that. Keys and values unchanged. Any
-  test that pins the comment text is updated and reported.
-- [ ] 3.2 `infra/env/README.md` (orchestrator): the note on inert scheduler
-  keys in `compute.host.env` / `compute.replay.env`.
+  for each source, which tables they read or write) and rewrite only the
+  "Measured scope" sentences of the comment above `DATABASE_URL` to say
+  exactly that. The lines before them, including the warning about the
+  archived PostgreSQL on port 55433 that a test pins, stay verbatim. Keys
+  and values unchanged; no existing test is edited.
+- [ ] 3.2 `infra/env/README.md` (orchestrator): the note on the inert
+  scheduler lag / lookback keys in `compute.host.env` /
+  `compute.replay.env`.
 - [ ] 3.3 `docs/runbooks/slurm-gateway-preflight.md` (orchestrator): the
   "Final readiness ..." sentence is cut.
 
