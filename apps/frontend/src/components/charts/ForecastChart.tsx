@@ -4,7 +4,7 @@ import ReactEChartsCore from 'echarts-for-react/lib/core'
 import { echarts } from '@/components/charts/echartsCore'
 import { useChartFollowsContainer } from '@/components/charts/useChartFollowsContainer'
 import { useChartZoomObserver, type ChartZoomWindow } from '@/components/charts/useChartZoomObserver'
-import { FORECAST_CHART_POINT_BUDGET, forecastPointBudgetMessage } from '@/lib/forecastRenderingBudget'
+import { FORECAST_CHART_POINT_BUDGET } from '@/lib/forecastRenderingBudget'
 import { formatUnitForDisplay } from '@/lib/format'
 import type { ForecastData } from '@/lib/forecastData'
 
@@ -84,24 +84,6 @@ function tooltipTimeLabel(value: number) {
   return `${year}-${month}-${day} ${hour}:${minute}`
 }
 
-function issueTimeMarkLineData(issueTimeMs: number, issueTimeLabel: string, dark: boolean) {
-  return {
-    name: '起报时间',
-    xAxis: issueTimeMs,
-    lineStyle: { color: dark ? '#94a3b8' : '#64748b', type: 'dashed', width: 1.5 },
-    label: {
-      formatter: '起报时间',
-      color: dark ? '#e2e8f0' : '#1f2937',
-      backgroundColor: dark ? 'rgba(15, 23, 42, 0.85)' : '#ffffff',
-      padding: [2, 4],
-    },
-    tooltip: {
-      renderMode: 'richText',
-      formatter: () => `起报时间 ${issueTimeLabel}\n左侧为真实场 analysis，右侧为预报`,
-    },
-  }
-}
-
 function ifsSixDayMarkLineData(endpointMs: number, dark: boolean) {
   return {
     name: 'IFS 6d',
@@ -179,21 +161,6 @@ export function ForecastChart({
   onZoomWindowChange,
   onTooltipVisibleChange,
 }: ForecastChartProps) {
-  if (data?.pointBudgetStatus?.overBudget) {
-    return (
-      <div
-        className={
-          appearance === 'dark'
-            ? 'grid min-h-72 place-items-center rounded-lg border border-amber-400/30 bg-amber-400/10 p-4 text-center text-sm text-amber-100'
-            : 'grid min-h-72 place-items-center rounded-md border border-amber-300 bg-amber-50 p-4 text-center text-sm text-amber-950'
-        }
-        role="status"
-      >
-        {forecastPointBudgetMessage(data.pointBudgetStatus)}
-      </div>
-    )
-  }
-
   return (
     <ForecastChartInner
       data={data}
@@ -255,10 +222,6 @@ function ForecastChartInner({
   )
 
   const option = useMemo(() => {
-    const issueTimeMs = data?.issueTime ? Date.parse(data.issueTime) : NaN
-    const showIssueDivider =
-      Number.isFinite(issueTimeMs) && normalizedSeries.some((series) => series.isAnalysis)
-
     return {
       color: normalizedSeries.map((series) => series.color),
       dataZoom: zoomable ? [{ ...(touchPan ? TOUCH_ZOOM : WHEEL_ZOOM) }] : undefined,
@@ -310,7 +273,7 @@ function ForecastChartInner({
           }
           : {}),
       },
-      series: normalizedSeries.map((series, index) => ({
+      series: normalizedSeries.map((series) => ({
         type: 'line',
         name: series.label,
         smooth: true,
@@ -342,9 +305,6 @@ function ForecastChartInner({
           }
           : {}),
         markLine: buildMarkLine([
-          ...(index === 0 && showIssueDivider
-            ? [issueTimeMarkLineData(issueTimeMs, data?.issueTime ?? 'latest', dark)]
-            : []),
           ...(series.isIfs && series.sixDayEndpointMs !== null
             ? [ifsSixDayMarkLineData(series.sixDayEndpointMs, dark)]
             : []),

@@ -1,7 +1,6 @@
 import { client } from '@/api/client'
 import { unwrapApiData } from '@/api/response'
 import type { components } from '@/api/types'
-import { createForecastPointBudgetGuard } from '@/lib/forecastRenderingBudget'
 import { normalizeHydroMetCycle, type HydroMetSource } from '@/lib/hydroMet/queryState'
 import {
   HYDRO_MET_STATION_SERIES_MESSAGE_STRING_LIMIT,
@@ -101,18 +100,6 @@ const HOUR_MS = 60 * 60 * 1000
 
 export function hydroMetRiverScenarioForSource(source: HydroMetSource) {
   return HYDRO_MET_RIVER_FORECAST_SCENARIOS[source]
-}
-
-export function riverForecastRequestKey(product: HydroMetRiverForecastProductIdentity, segmentId: string) {
-  return [
-    product.basin_version_id,
-    product.river_network_version_id,
-    product.run_id,
-    product.model_id,
-    product.source_id,
-    normalizeHydroMetCycle(product.cycle_time) ?? product.cycle_time,
-    segmentId,
-  ].join('|')
 }
 
 export async function loadHydroMetRiverForecast({
@@ -328,10 +315,7 @@ function normalizeRiverForecastSeries(
 
   if (!scenarioId) return null
 
-  const pointBudgetGuard = createForecastPointBudgetGuard(HYDRO_MET_RIVER_FORECAST_LIMIT)
-  pointBudgetGuard.setSourceSeriesCount(1)
-  pointBudgetGuard.setSourcePointCount(pointsValue.length)
-  const retainedPoints = pointBudgetGuard.take(pointsValue)
+  const retainedPoints = pointsValue.slice(0, HYDRO_MET_RIVER_FORECAST_LIMIT)
   const pointMessages: string[] = []
   const points: HydroMetRiverForecastPoint[] = []
   let invalidPointCount = 0

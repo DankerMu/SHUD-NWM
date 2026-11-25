@@ -36,9 +36,8 @@ function forecastData(): ForecastData {
       {
         scenario: 'forecast_gfs_deterministic',
         source: 'GFS',
-        isAnalysis: false,
         label: 'GFS 预报',
-        color: '#ef7d22',
+        color: '#22d3ee',
         cycleTime: '2026-05-03T00:00:00Z',
         availableLeadHours: 168,
         points: [

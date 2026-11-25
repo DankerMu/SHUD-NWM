@@ -1,8 +1,8 @@
 import { client } from '@/api/client'
 import { getApiErrorMessage, unwrapApiData } from '@/api/response'
 import type { components } from '@/api/types'
-import { normalizeHydroMetCycle, type HydroMetSource, type HydroMetStrictIdentity } from '@/lib/hydroMet/queryState'
-import { normalizeHydroMetStation, sanitizeHydroMetMessage } from '@/lib/hydroMet/runtime'
+import type { HydroMetSource } from '@/lib/hydroMet/queryState'
+import { normalizeHydroMetStation } from '@/lib/hydroMet/runtime'
 
 export const HYDRO_MET_STATION_LIMIT = 500
 
@@ -10,55 +10,15 @@ export type QhhLatestProduct = components['schemas']['QhhLatestProduct']
 export type HydroMetStation = components['schemas']['MetStation']
 export type HydroMetStationPage = components['schemas']['MetStationPage']
 
-export type HydroMetBootstrapStatus =
-  | 'ready'
-  | 'latest-unavailable'
-  | 'latest-incomplete'
-  | 'cycle-unavailable'
-  | 'strict-identity-mismatch'
-
 export interface HydroMetBootstrapRequest {
   source: HydroMetSource
   cycle: string | null
   basinId?: string | null
-  strictIdentity?: HydroMetStrictIdentity | null
-  stationLimit?: number
-}
-
-export interface HydroMetBootstrapResult {
-  status: HydroMetBootstrapStatus
-  source: HydroMetSource
-  cycle: string | null
-  product: QhhLatestProduct | null
-  stations: HydroMetStation[]
-  stationPage: HydroMetStationPage | null
-  latestReasons: string[]
-  stationError: string | null
 }
 
 const HYDRO_MET_LATEST_PRODUCT_IDENTITY_CACHE_TTL_MS = 120_000
 
 const latestProductIdentityCache = new Map<string, { expiresAt: number; promise: Promise<QhhLatestProduct> }>()
-
-async function getLatestProduct(request: HydroMetBootstrapRequest) {
-  const basinId = request.basinId?.trim() ? { basin_id: request.basinId.trim() } : {}
-  const query = request.strictIdentity
-    ? {
-      source: request.strictIdentity.source,
-      cycle_time: request.strictIdentity.cycleTime,
-      run_id: request.strictIdentity.runId,
-      model_id: request.strictIdentity.modelId,
-      ...basinId,
-    }
-    : { source: request.source, ...basinId }
-  const { data, error } = await client.GET('/api/v1/mvp/qhh/latest-product', {
-    params: { query },
-  })
-  if (error) throw new Error(getApiErrorMessage(error, 'latest-product 不可用'))
-  const product = unwrapApiData<QhhLatestProduct>(data, 'latest-product 不可用')
-  if (!product || typeof product !== 'object') throw new Error('latest-product 不可用')
-  return product
-}
 
 /**
  * 弹窗专用轻量 latest-product 解析（identity_only=true）。
@@ -167,161 +127,4 @@ export async function fetchHydroMetStationsByIdentity(identity: HydroMetStationI
   const page = unwrapApiData<HydroMetStationPage>(data, '站点 inventory 加载失败')
   if (!page || !Array.isArray(page.items)) throw new Error('站点 inventory 响应不完整')
   return { ...page, items: page.items.map((station) => normalizeHydroMetStation(station)) }
-}
-
-/**
- * Station inventory query. All identity (model_id/basin_version_id) is derived from the
- * latest-product so server-side search/variable filtering never breaks strict identity.
- */
-export async function fetchHydroMetStations(product: QhhLatestProduct, query: HydroMetStationQuery = {}) {
-  return fetchHydroMetStationsByIdentity(
-    { modelId: product.model_id, basinVersionId: product.basin_version_id },
-    query,
-  )
-}
-
-function isNonEmptyString(value: unknown): value is string {
-  return typeof value === 'string' && value.trim().length > 0
-}
-
-function isRecordValue(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
-/**
- * Per-filter availability from the station page `filters.available` block. The backend reports
- * each advanced filter honestly so the UI can hide controls instead of erroring. Defaults to
- * unavailable for qc_status / variables when the block is missing, and search defaults available.
- */
-export function hydroMetStationFilterAvailability(page: HydroMetStationPage | null) {
-  const filters = isRecordValue(page?.filters) ? page.filters : null
-  const available = filters && isRecordValue(filters.available) ? filters.available : null
-  const flag = (key: string, fallback: boolean) =>
-    available && typeof available[key] === 'boolean' ? (available[key] as boolean) : fallback
-  return {
-    search: flag('search', true),
-    variables: flag('variables', false),
-    qcStatus: flag('qc_status', false),
-  }
-}
-
-function productAvailabilityReasons(product: QhhLatestProduct) {
-  const reasons = product.availability?.unavailable_reasons ?? []
-  return reasons.map((reason) => `${reason.code}: ${sanitizeHydroMetMessage(reason.message)}`)
-}
-
-function validateLatestProduct(product: QhhLatestProduct, request: HydroMetBootstrapRequest): {
-  status: HydroMetBootstrapStatus
-  reasons: string[]
-} {
-  const reasons: string[] = []
-  const productCycle = normalizeHydroMetCycle(product.cycle_time)
-  const requiredIdentity: Array<keyof Pick<
-    QhhLatestProduct,
-    'model_id' | 'basin_version_id' | 'river_network_version_id' | 'run_id' | 'forcing_version_id' | 'cycle_time'
-  >> = ['model_id', 'basin_version_id', 'river_network_version_id', 'run_id', 'forcing_version_id', 'cycle_time']
-
-  for (const field of requiredIdentity) {
-    if (!isNonEmptyString(product[field])) reasons.push(`${field} 缺失`)
-  }
-  if (!productCycle) reasons.push('cycle_time 无法解析')
-  if (product.source_id !== request.source) reasons.push(`source_id=${product.source_id} 与请求 source=${request.source} 不一致`)
-  if (!Number.isFinite(product.station_count) || product.station_count <= 0) reasons.push('station_count 不可展示')
-  if (!Number.isFinite(product.segment_count) || product.segment_count <= 0) reasons.push('segment_count 不可展示')
-
-  if (product.status !== 'ready' || product.availability?.ready === false) {
-    return {
-      status: 'latest-unavailable',
-      reasons: productAvailabilityReasons(product).concat(reasons),
-    }
-  }
-
-  if (reasons.length > 0) {
-    return { status: 'latest-incomplete', reasons }
-  }
-
-  if (request.cycle && productCycle && request.cycle !== productCycle) {
-    return {
-      status: 'cycle-unavailable',
-      reasons: [
-        `URL cycle=${request.cycle} 与 latest-product cycle=${productCycle} 不一致，已停止加载下游候选，避免混用产品。`,
-      ],
-    }
-  }
-
-  if (request.strictIdentity) {
-    const identityReasons: string[] = []
-    if (product.source_id !== request.strictIdentity.source) {
-      identityReasons.push(`source_id=${product.source_id} 与 URL source=${request.strictIdentity.source} 不一致`)
-    }
-    if (productCycle !== request.strictIdentity.cycleTime) {
-      identityReasons.push(`cycle_time=${productCycle ?? 'unavailable'} 与 URL cycle_time=${request.strictIdentity.cycleTime} 不一致`)
-    }
-    if (product.run_id !== request.strictIdentity.runId) {
-      identityReasons.push(`run_id=${product.run_id} 与 URL run_id=${request.strictIdentity.runId} 不一致`)
-    }
-    if (product.model_id !== request.strictIdentity.modelId) {
-      identityReasons.push(`model_id=${product.model_id} 与 URL model_id=${request.strictIdentity.modelId} 不一致`)
-    }
-    if (identityReasons.length > 0) {
-      return { status: 'strict-identity-mismatch', reasons: identityReasons }
-    }
-  }
-
-  return { status: 'ready', reasons: [] }
-}
-
-function baseResult(
-  request: HydroMetBootstrapRequest,
-  product: QhhLatestProduct | null,
-  status: HydroMetBootstrapStatus,
-  latestReasons: string[],
-): HydroMetBootstrapResult {
-  return {
-    status,
-    source: request.source,
-    cycle: request.cycle,
-    product,
-    stations: [],
-    stationPage: null,
-    latestReasons,
-    stationError: null,
-  }
-}
-
-function settledError(result: PromiseSettledResult<unknown>, fallback: string) {
-  return result.status === 'rejected' ? sanitizeHydroMetMessage(getApiErrorMessage(result.reason, fallback), fallback) : null
-}
-
-export async function loadHydroMetBootstrap(request: HydroMetBootstrapRequest): Promise<HydroMetBootstrapResult> {
-  const stationLimit = request.stationLimit ?? HYDRO_MET_STATION_LIMIT
-  let product: QhhLatestProduct
-
-  try {
-    product = await getLatestProduct(request)
-  } catch (error) {
-    return baseResult(request, null, 'latest-unavailable', [
-      sanitizeHydroMetMessage(getApiErrorMessage(error, 'latest-product 不可用'), 'latest-product 不可用'),
-    ])
-  }
-
-  const validation = validateLatestProduct(product, request)
-  if (validation.status !== 'ready') {
-    return baseResult(request, product, validation.status, validation.reasons)
-  }
-
-  const [stationResult] = await Promise.allSettled([fetchHydroMetStations(product, { limit: stationLimit })])
-
-  const stationPage = stationResult.status === 'fulfilled' ? stationResult.value : null
-
-  return {
-    status: 'ready',
-    source: request.source,
-    cycle: request.cycle,
-    product,
-    stations: stationPage?.items ?? [],
-    stationPage,
-    latestReasons: [],
-    stationError: settledError(stationResult, '站点 inventory 加载失败'),
-  }
 }

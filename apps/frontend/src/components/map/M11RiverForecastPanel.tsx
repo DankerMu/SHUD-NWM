@@ -114,7 +114,6 @@ async function loadSource(
         series: {
           scenario: validation.scenarioId,
           source: validation.sourceId,
-          isAnalysis: false,
           label: source,
           color: SOURCE_COLOR[source],
           cycleTime: validation.cycleTime,

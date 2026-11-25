@@ -185,7 +185,7 @@ def test_frontend_ifs_chart_contract_handles_multi_source_metadata() -> None:
     assert "available_lead_hours" in river_forecast
     assert "source_id" in river_forecast
     assert "data?.series ?? []" in forecast_chart
-    assert "#2ca02c" in forecast_data
+    assert "#34d399" in forecast_data
     assert "#2ca02c" in forecast_chart
     assert "IFS_SIX_DAY_LEAD_HOURS = 144" in forecast_chart
     assert "IFS 6d" in forecast_chart

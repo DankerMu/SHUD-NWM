@@ -16,7 +16,7 @@ import {
   HYDRO_MET_STATION_LIMIT,
   _clearHydroMetLatestProductIdentityCache,
   fetchHydroMetLatestProduct,
-  loadHydroMetBootstrap,
+  fetchHydroMetStationsByIdentity,
   prefetchHydroMetLatestProducts,
   type QhhLatestProduct,
 } from '@/stores/hydroMetBootstrap'
@@ -26,12 +26,10 @@ import {
   parseHydroMetQueryState,
   serializeHydroMetQueryState,
 } from '@/lib/hydroMet/queryState'
-import { sanitizeHydroMetMessage } from '@/lib/hydroMet/runtime'
 import {
   HYDRO_MET_RIVER_FORECAST_VARIABLE,
   hydroMetRiverScenarioForSource,
   loadHydroMetRiverForecast,
-  riverForecastRequestKey,
   validateHydroMetRiverForecastForChart,
 } from '@/lib/hydroMet/riverForecast'
 
@@ -257,28 +255,22 @@ describe('hydro-met query state', () => {
   })
 })
 
-describe('loadHydroMetBootstrap', () => {
+describe('fetchHydroMetStationsByIdentity', () => {
   beforeEach(() => {
-    vi.clearAllMocks()
-    _clearHydroMetLatestProductIdentityCache()
+    vi.mocked(client.GET).mockReset()
   })
 
-  it('loads latest product and station inventory from latest-product IDs, and nothing else', async () => {
-    vi.mocked(client.GET).mockImplementation(async (path: string) => {
-      if (path === '/api/v1/mvp/qhh/latest-product') return { data: success(latestProduct()), error: undefined } as never
-      if (path === '/api/v1/met/stations') return { data: success(stationPage), error: undefined } as never
-      return { data: success({}), error: undefined } as never
-    })
+  function productIdentity(product: QhhLatestProduct) {
+    return { modelId: product.model_id, basinVersionId: product.basin_version_id }
+  }
 
-    const result = await loadHydroMetBootstrap({ source: 'GFS', cycle: null })
+  it('queries the station inventory by the product identity, and nothing else', async () => {
+    vi.mocked(client.GET).mockResolvedValue({ data: success(stationPage), error: undefined } as never)
 
-    expect(result.status).toBe('ready')
-    expect(result.stations).toHaveLength(1)
-    // #2866: the river-segment list is retired; bootstrap issues exactly these two reads.
-    expect(apiGetCalls().map(([path]) => path)).toEqual(['/api/v1/mvp/qhh/latest-product', '/api/v1/met/stations'])
-    expect(client.GET).toHaveBeenCalledWith('/api/v1/mvp/qhh/latest-product', {
-      params: { query: { source: 'GFS' } },
-    })
+    const page = await fetchHydroMetStationsByIdentity(productIdentity(latestProduct()))
+
+    expect(page.items).toHaveLength(1)
+    expect(apiGetCalls().map(([path]) => path)).toEqual(['/api/v1/met/stations'])
     expect(client.GET).toHaveBeenCalledWith('/api/v1/met/stations', {
       params: { query: { model_id: 'basins_qhh_shud', basin_version_id: 'basins_qhh_vbasins', limit: HYDRO_MET_STATION_LIMIT, offset: 0 } },
     })
@@ -288,246 +280,37 @@ describe('loadHydroMetBootstrap', () => {
     expect(serializedCalls).not.toContain('forcing_version_id')
   })
 
-  it('loads strict latest product with source, cycle_time, run_id, and model_id', async () => {
-    const calls: Array<{ path: string; query?: Record<string, unknown> }> = []
-    vi.mocked(client.GET).mockImplementation(async (path: string, options?: { params?: { query?: Record<string, unknown> } }) => {
-      calls.push({ path, query: options?.params?.query })
-      if (path === '/api/v1/mvp/qhh/latest-product') return { data: success(latestProduct()), error: undefined } as never
-      if (path === '/api/v1/met/stations') return { data: success(stationPage), error: undefined } as never
-      throw new Error(`Unexpected GET ${path}`)
+  it('derives the station query from the returned product identity, not hand input (#314)', async () => {
+    vi.mocked(client.GET).mockResolvedValue({ data: success(stationPage), error: undefined } as never)
+    const product = latestProduct({
+      basin_id: 'basins_heihe',
+      model_id: 'basins_heihe_shud',
+      basin_version_id: 'basins_heihe_vbasins',
+      river_network_version_id: 'basins_heihe_rivnet_vbasins',
     })
 
-    const result = await loadHydroMetBootstrap({
-      source: 'GFS',
-      cycle: '2026-05-21T00:00:00.000Z',
-      strictIdentity: {
-        source: 'GFS',
-        cycleTime: '2026-05-21T00:00:00.000Z',
-        runId: 'qhh_gfs_2026052100_smoke',
-        modelId: 'basins_qhh_shud',
-      },
-    })
+    await fetchHydroMetStationsByIdentity(productIdentity(product))
 
-    expect(result.status).toBe('ready')
-    expect(calls[0]).toEqual({
-      path: '/api/v1/mvp/qhh/latest-product',
-      query: {
-        source: 'GFS',
-        cycle_time: '2026-05-21T00:00:00.000Z',
-        run_id: 'qhh_gfs_2026052100_smoke',
-        model_id: 'basins_qhh_shud',
-      },
-    })
-  })
-
-  it('threads basinId into latest-product query and derives downstream from the returned product (#314)', async () => {
-    const calls: Array<{ path: string; query?: Record<string, unknown> }> = []
-    vi.mocked(client.GET).mockImplementation(async (path: string, options?: { params?: { query?: Record<string, unknown> } }) => {
-      calls.push({ path, query: options?.params?.query })
-      if (path === '/api/v1/mvp/qhh/latest-product') {
-        return {
-          data: success(
-            latestProduct({
-              basin_id: 'basins_heihe',
-              model_id: 'basins_heihe_shud',
-              basin_version_id: 'basins_heihe_vbasins',
-              river_network_version_id: 'basins_heihe_rivnet_vbasins',
-            }),
-          ),
-          error: undefined,
-        } as never
-      }
-      if (path === '/api/v1/met/stations') return { data: success(stationPage), error: undefined } as never
-      throw new Error(`Unexpected GET ${path}`)
-    })
-
-    const result = await loadHydroMetBootstrap({ source: 'GFS', cycle: null, basinId: 'basins_heihe' })
-
-    expect(result.status).toBe('ready')
-    expect(calls[0]).toEqual({
-      path: '/api/v1/mvp/qhh/latest-product',
-      query: { source: 'GFS', basin_id: 'basins_heihe' },
-    })
-    // Downstream params are derived from the returned product's identity, not hand-input.
     expect(client.GET).toHaveBeenCalledWith('/api/v1/met/stations', {
       params: { query: { model_id: 'basins_heihe_shud', basin_version_id: 'basins_heihe_vbasins', limit: HYDRO_MET_STATION_LIMIT, offset: 0 } },
     })
   })
 
-  it('combines basinId with strict identity in the latest-product query (#314)', async () => {
-    const calls: Array<{ path: string; query?: Record<string, unknown> }> = []
-    vi.mocked(client.GET).mockImplementation(async (path: string, options?: { params?: { query?: Record<string, unknown> } }) => {
-      calls.push({ path, query: options?.params?.query })
-      if (path === '/api/v1/mvp/qhh/latest-product') return { data: success(latestProduct()), error: undefined } as never
-      if (path === '/api/v1/met/stations') return { data: success(stationPage), error: undefined } as never
-      throw new Error(`Unexpected GET ${path}`)
-    })
-
-    await loadHydroMetBootstrap({
-      source: 'GFS',
-      cycle: '2026-05-21T00:00:00.000Z',
-      basinId: 'basins_qhh',
-      strictIdentity: {
-        source: 'GFS',
-        cycleTime: '2026-05-21T00:00:00.000Z',
-        runId: 'qhh_gfs_2026052100_smoke',
-        modelId: 'basins_qhh_shud',
-      },
-    })
-
-    expect(calls[0]).toEqual({
-      path: '/api/v1/mvp/qhh/latest-product',
-      query: {
-        source: 'GFS',
-        cycle_time: '2026-05-21T00:00:00.000Z',
-        run_id: 'qhh_gfs_2026052100_smoke',
-        model_id: 'basins_qhh_shud',
-        basin_id: 'basins_qhh',
-      },
-    })
-  })
-
-  it('omits basin_id when no basin is selected, preserving backend-default behaviour (#314)', async () => {
-    const calls: Array<{ path: string; query?: Record<string, unknown> }> = []
-    vi.mocked(client.GET).mockImplementation(async (path: string, options?: { params?: { query?: Record<string, unknown> } }) => {
-      calls.push({ path, query: options?.params?.query })
-      if (path === '/api/v1/mvp/qhh/latest-product') return { data: success(latestProduct()), error: undefined } as never
-      if (path === '/api/v1/met/stations') return { data: success(stationPage), error: undefined } as never
-      throw new Error(`Unexpected GET ${path}`)
-    })
-
-    await loadHydroMetBootstrap({ source: 'GFS', cycle: null, basinId: null })
-
-    expect(calls[0]).toEqual({ path: '/api/v1/mvp/qhh/latest-product', query: { source: 'GFS' } })
-    expect(JSON.stringify(calls[0])).not.toContain('basin_id')
-  })
-
-  it('blocks downstream bootstrap when strict latest-product identity mismatches', async () => {
-    vi.mocked(client.GET).mockResolvedValueOnce({
-      data: success(latestProduct({ run_id: 'other-run' })),
-      error: undefined,
-    } as never)
-
-    const result = await loadHydroMetBootstrap({
-      source: 'GFS',
-      cycle: '2026-05-21T00:00:00.000Z',
-      strictIdentity: {
-        source: 'GFS',
-        cycleTime: '2026-05-21T00:00:00.000Z',
-        runId: 'qhh_gfs_2026052100_smoke',
-        modelId: 'basins_qhh_shud',
-      },
-    })
-
-    expect(result.status).toBe('strict-identity-mismatch')
-    expect(result.latestReasons.join(' ')).toContain('run_id=other-run')
-    expect(apiGetCalls().map(([path]) => path)).toEqual(['/api/v1/mvp/qhh/latest-product'])
-  })
-
   it('normalizes runtime-shaped station inventory coordinates', async () => {
-    vi.mocked(client.GET).mockImplementation(async (path: string) => {
-      if (path === '/api/v1/mvp/qhh/latest-product') return { data: success(latestProduct()), error: undefined } as never
-      if (path === '/api/v1/met/stations') return { data: success(runtimeStationPage), error: undefined } as never
-      return { data: success({}), error: undefined } as never
-    })
+    vi.mocked(client.GET).mockResolvedValue({ data: success(runtimeStationPage), error: undefined } as never)
 
-    const result = await loadHydroMetBootstrap({ source: 'GFS', cycle: null })
+    const page = await fetchHydroMetStationsByIdentity(productIdentity(latestProduct()))
 
-    expect(result.status).toBe('ready')
-    expect(result.stations[0]).toMatchObject({
+    expect(page.items[0]).toMatchObject({
       station_id: 'qhh_forc_runtime_001',
       geom: { type: 'Point', coordinates: [104.25, 31.5] },
     })
   })
 
-  it('does not load downstream candidates when requested cycle differs from latest product', async () => {
-    vi.mocked(client.GET).mockResolvedValue({ data: success(latestProduct()), error: undefined } as never)
+  it('rejects with the backend message when the station inventory request fails', async () => {
+    vi.mocked(client.GET).mockResolvedValue({ data: undefined, error: { error: { message: 'station db timeout' } } } as never)
 
-    const result = await loadHydroMetBootstrap({ source: 'GFS', cycle: '2026-05-20T00:00:00.000Z' })
-
-    expect(result.status).toBe('cycle-unavailable')
-    expect(result.latestReasons.join(' ')).toContain('避免混用产品')
-    expect(apiGetCalls().map(([path]) => path)).toEqual(['/api/v1/mvp/qhh/latest-product'])
-  })
-
-  it('reports latest unavailable and incomplete products before the station request', async () => {
-    vi.mocked(client.GET).mockResolvedValueOnce({
-      data: success(latestProduct({
-        status: 'unavailable',
-        availability: {
-          ready: false,
-          unavailable_reasons: [{ code: 'NO_FORCING', message: 'forcing version missing' }],
-          quality_flags: [],
-          quality_notes: [],
-        },
-      })),
-      error: undefined,
-    } as never)
-
-    const unavailable = await loadHydroMetBootstrap({ source: 'GFS', cycle: null })
-
-    expect(unavailable.status).toBe('latest-unavailable')
-    expect(unavailable.latestReasons.join(' ')).toContain('NO_FORCING')
-    expect(apiGetCalls().map(([path]) => path)).toEqual(['/api/v1/mvp/qhh/latest-product'])
-
-    vi.clearAllMocks()
-    vi.mocked(client.GET).mockResolvedValueOnce({
-      data: success(latestProduct({ river_network_version_id: '', segment_count: 0 })),
-      error: undefined,
-    } as never)
-
-    const incomplete = await loadHydroMetBootstrap({ source: 'GFS', cycle: null })
-
-    expect(incomplete.status).toBe('latest-incomplete')
-    expect(incomplete.latestReasons.join(' ')).toContain('river_network_version_id 缺失')
-    expect(incomplete.latestReasons.join(' ')).toContain('segment_count 不可展示')
-    expect(apiGetCalls().map(([path]) => path)).toEqual(['/api/v1/mvp/qhh/latest-product'])
-  })
-
-  it('keeps a station inventory failure from failing the whole bootstrap', async () => {
-    vi.mocked(client.GET).mockImplementation(async (path: string) => {
-      if (path === '/api/v1/mvp/qhh/latest-product') return { data: success(latestProduct()), error: undefined } as never
-      if (path === '/api/v1/met/stations') return { data: undefined, error: { error: { message: 'station db timeout' } } } as never
-      return { data: success({}), error: undefined } as never
-    })
-
-    const result = await loadHydroMetBootstrap({ source: 'GFS', cycle: null })
-
-    expect(result.status).toBe('ready')
-    expect(result.stationError).toBe('station db timeout')
-    expect(result.stations).toEqual([])
-  })
-
-  it('redacts hydro-met UI-bound backend messages while keeping error labels', async () => {
-    const unsafeMessage =
-      'ERR_QHH failed opening s3://key:secret@bucket/private?token=abc#frag from file:///volume/data/nwm/Basins/qhh?sig=x#frag and /volume/data/nwm/Basins/qhh plus C:\\nwm\\Basins\\qhh'
-    vi.mocked(client.GET).mockResolvedValueOnce({
-      data: success(latestProduct({
-        status: 'unavailable',
-        availability: {
-          ready: false,
-          unavailable_reasons: [{ code: 'NO_READY_PRODUCT', message: unsafeMessage }],
-          quality_flags: [],
-          quality_notes: [],
-        },
-      })),
-      error: undefined,
-    } as never)
-
-    const result = await loadHydroMetBootstrap({ source: 'GFS', cycle: null })
-    const rendered = result.latestReasons.join(' ')
-
-    expect(rendered).toContain('NO_READY_PRODUCT')
-    expect(rendered).toContain('ERR_QHH')
-    expect(rendered).toContain('s3://bucket/private')
-    expect(rendered).not.toContain('key:secret')
-    expect(rendered).not.toContain('token=abc')
-    expect(rendered).not.toContain('#frag')
-    expect(rendered).not.toContain('file://')
-    expect(rendered).not.toContain('/volume/data/nwm/Basins/qhh')
-    expect(rendered).not.toContain('C:\\nwm\\Basins\\qhh')
-
-    expect(sanitizeHydroMetMessage(unsafeMessage)).toContain('s3://bucket/private')
+    await expect(fetchHydroMetStationsByIdentity(productIdentity(latestProduct()))).rejects.toThrowError(/^station db timeout$/)
   })
 })
 
@@ -654,6 +437,39 @@ describe('fetchHydroMetLatestProduct', () => {
     expect(second).toBe(first)
     expect(second.model_id).toBe('basins_qhh_shud_v1')
     expect(client.GET).toHaveBeenCalledTimes(1)
+  })
+
+  it('shares one in-flight GET between concurrent same-key requests', async () => {
+    vi.mocked(client.GET).mockReset()
+    const product = latestProduct({ model_id: 'basins_qhh_shud_shared' })
+    let resolveGet: (value: unknown) => void = () => {}
+    vi.mocked(client.GET).mockImplementation(
+      () => new Promise((resolve) => { resolveGet = resolve }) as never,
+    )
+
+    const first = fetchHydroMetLatestProduct({ source: 'GFS', cycle: null, basinId: 'basins_qhh' })
+    const second = fetchHydroMetLatestProduct({ source: 'GFS', cycle: null, basinId: 'basins_qhh' })
+    expect(client.GET).toHaveBeenCalledTimes(1)
+
+    resolveGet({ data: success(product), error: undefined })
+    const [firstProduct, secondProduct] = await Promise.all([first, second])
+
+    expect(client.GET).toHaveBeenCalledTimes(1)
+    expect(firstProduct.model_id).toBe('basins_qhh_shud_shared')
+    expect(secondProduct).toBe(firstProduct)
+  })
+
+  it('drops a rejected request from the cache so the next same-key call issues a new GET', async () => {
+    vi.mocked(client.GET).mockReset()
+    vi.mocked(client.GET)
+      .mockResolvedValueOnce({ data: undefined, error: { error: { message: 'latest-product timeout' } } } as never)
+      .mockResolvedValueOnce({ data: success(latestProduct({ model_id: 'basins_qhh_shud_retry' })), error: undefined } as never)
+
+    await expect(fetchHydroMetLatestProduct({ source: 'GFS', cycle: null, basinId: 'basins_qhh' })).rejects.toThrow('latest-product timeout')
+    const retried = await fetchHydroMetLatestProduct({ source: 'GFS', cycle: null, basinId: 'basins_qhh' })
+
+    expect(client.GET).toHaveBeenCalledTimes(2)
+    expect(retried.model_id).toBe('basins_qhh_shud_retry')
   })
 
   it('prefetches only GFS and IFS latest-product identities for a basin and cycle', async () => {
@@ -984,12 +800,5 @@ describe('loadHydroMetRiverForecast', () => {
       ok: false,
       messages: expect.arrayContaining([expect.stringContaining('超出 JavaScript Date 可表示范围')]),
     })
-  })
-
-  it('builds request keys from product and segment identity', () => {
-    const product = latestProduct()
-    expect(riverForecastRequestKey(product, 'seg-001')).toBe(
-      'basins_qhh_vbasins|basins_qhh_rivnet_vbasins|qhh_gfs_2026052100_smoke|basins_qhh_shud|GFS|2026-05-21T00:00:00.000Z|seg-001',
-    )
   })
 })
