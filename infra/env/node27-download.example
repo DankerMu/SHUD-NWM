@@ -21,9 +21,14 @@ OBJECT_STORE_ROOT=/home/ghdc/nwm/object-store
 OBJECT_STORE_PREFIX=s3://nhms
 WORKSPACE_ROOT=/home/nwm/node27-download-work
 
-# Optional explicit cycle. Leave empty for production automation: the runner
-# selects the first missing raw cycle after the existing contiguous raw chain,
-# bounded by the latest allowed UTC business cycle older than the delay.
+# Optional explicit cycle. Leave empty for production automation: a cycle
+# counts as downloaded when its raw files are complete for every selected
+# source (a manifest alone does not count). Up to the latest allowed UTC
+# business cycle older than the delay, the runner serves the latest allowed
+# cycle first when it is incomplete, then the oldest incomplete cycle from the
+# start of the raw chain. To get past a cycle the upstream no longer serves,
+# set NODE27_DOWNLOAD_CONTINUITY_START_TIME to a later cycle; it ignores the
+# lookback window, so unset it again once that cycle has left the window.
 NODE27_DOWNLOAD_CYCLE_TIME=
 NODE27_DOWNLOAD_CYCLE_DELAY_HOURS=8
 NODE27_DOWNLOAD_CONTINUITY_LOOKBACK_DAYS=14
