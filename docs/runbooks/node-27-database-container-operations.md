@@ -174,6 +174,8 @@ current commands. Archive and issue closeout are being completed in this PR.
 - **`ssl = off`**。口令走 SCRAM 不会明文暴露，但查询与结果集明文过网；收到回环后风险大降。
 - autovacuum 在统计不再被反复清零之后是否恢复正常，需要等有机 churn 把计数器累积到阈值之上
   才能验证，见 #1770。（2026-09-13 只读探针已见输出恢复；持续检查见 §7。）
+- **测试库建在生产 postmaster 上**。node-27 真实 DB pytest 逐测试建删 `nhms_it_<uuid>` 库，
+  与 worker 启动竞态时会让 autovacuum launcher 永久停转（§7.1）；移出生产实例由 #3376 跟踪。
 
 ## 7. autovacuum / autoanalyze 输出新鲜度检查（#1769）
 
@@ -204,3 +206,51 @@ current commands. Archive and issue closeout are being completed in this PR.
   `TABLE_ZERO_STATISTICS` info 出现，这是预期处置：18 行表的估计误差无关紧要，
   churn 过 50 后 autoanalyze 会把它们移出该类，届时若没移出由 stale 规则捕获。
   不为它们加 `reloptions`（需要迁移，会破坏 I8 "待执行集合恰为 000059" 的门）。
+
+### 7.1 `AUTOVACUUM_OUTPUT_STALLED` 的两种形态与处置（#3234）
+
+这条 critical 至今出现过四次（#1769、#1770、#2696、#3234），背后是两个不同的机制。先分辨，再处置。
+
+| 形态 | 判别 | 处置 |
+|---|---|---|
+| 崩溃恢复清零了计数器 | `pg_postmaster_start_time()` 晚于最后一次 autovacuum，且那次重启不是按 §1 的停机契约做的 | 等有机 churn 重新累积；必要时手工 `ANALYZE` 关键表。预防靠 §1 |
+| launcher 被已删除库的残留统计项卡住 | postmaster 没有重启；launcher 进程在、`wait_event=AutoVacuumMain`；没有任何 worker；`max(last_autovacuum)` 停在某一时刻不再前移 | 杀掉 launcher（见下） |
+
+**第二种形态的成因。** PostgreSQL 15 的 worker 启动时先向统计子系统登记（不存在就新建该库的统计项），
+后连库。若该库恰好在 launcher 选中它之后被 `DROP DATABASE`，已删除库的统计项会被重新建出来，
+worker 随后以 `database "…" does not exist` / `It seems to have just been dropped or renamed.` 退出。
+launcher 的轮转名单对"仍有统计项"的库一律保留，于是这个已删除的库永久留在名单上；
+它轮到队尾后，launcher 每 `autovacuum_naptime / 名单长度` 空转一次，不再向任何已有的库派 worker。
+停转期间只有新建的库（不在名单上）还会被派到 worker，所以共享目录可能仍在被处理，容易误判为"在跑"。
+触发源是在同一个 postmaster 上频繁建删库，即 node-27 真实 DB pytest 的 `nhms_it_<uuid>` 库；
+根治见 #3376。
+
+**识别（只读）。**
+
+```sql
+SELECT pg_postmaster_start_time();
+SELECT pid, backend_start, wait_event FROM pg_stat_activity WHERE backend_type = 'autovacuum launcher';
+SELECT max(last_autovacuum), max(last_autoanalyze) FROM pg_stat_user_tables;
+-- 已删除库的残留统计项；扫的是 OID 空间，约 200 万个 OID 耗时数秒
+SELECT g AS dropped_database_oid
+FROM generate_series(1, (SELECT max(oid)::bigint FROM pg_class) + 200000) AS g
+WHERE pg_stat_have_stats('database', g::oid, 0)
+  AND NOT EXISTS (SELECT 1 FROM pg_database d WHERE d.oid = g::oid);
+```
+
+- 最后一条有任何一行，且前三条符合上表第二行，即为本形态。
+- 佐证：`docker logs nhms-db 2>&1 | grep -B1 'just been dropped'` 能看到对应时刻的 FATAL，
+  最早一条的时间就是停转时刻。
+- 残留统计项本身无害，只有留在**当前这个 launcher 进程**的名单上才会卡住它；没有清理它们的手段，也不需要清理。
+
+**处置（superuser，不是只读操作，需 operator 批准）。**
+
+```sql
+SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE backend_type = 'autovacuum launcher';
+```
+
+- postmaster 立即重生 launcher，新 launcher 的名单只从 `pg_database` 重建。约一分钟内应看到 worker 出现、
+  `max(last_autovacuum)` 前移；之后 autovacuum 按现有 cost 限速消化欠账。
+- 最脏的表可以顺手 `ANALYZE`（#2696 的做法），让规划器统计先恢复。
+- **不要**用 `docker restart` 来"顺便重启"（§1）。
+- 在 #3376 落地前，每次 node-27 真实 DB pytest 之后复核一次 `max(last_autovacuum)` 是否仍在前移。
