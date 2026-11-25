@@ -32,8 +32,9 @@
 
 The overview (`apps/frontend/src/pages/OverviewPage.tsx`, `apps/frontend/src/components/map/m11MapRuntime.tsx`) SHALL report
 missing or failed data in notices floating over the map, and SHALL keep rendering the map while a notice is shown. No
-retry control is offered. One floating notice is shown at a time; a status notice of the met-station layer takes
-precedence over the empty-inventory notice.
+retry control is offered. Of the page's floating notices (`M11FloatingNotice`) one is shown at a time, and a status notice
+of the met-station layer takes precedence over the empty-inventory notice; the map status notices are separate and can
+show at the same time.
 
 #### Scenario: No basin inventory
 

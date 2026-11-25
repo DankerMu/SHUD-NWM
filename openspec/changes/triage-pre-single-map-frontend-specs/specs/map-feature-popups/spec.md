@@ -45,7 +45,7 @@ a MapLibre geographic `Popup` container; "popup" below names that curve window.
 
 #### Scenario: 两个源都失败时不画曲线
 
-- **WHEN** 两个源都缺身份字段、horizon/point 预算不符或请求失败
+- **WHEN** 两个源都校验失败（`ok:false`，例如缺身份字段）或请求失败
 - **THEN** popup 显示空态（`m11-river-panel-empty`），逐条列出两个源的原因，不绘制任何 q_down 曲线
 - **AND** 窗口标题仍为河段显示名
 

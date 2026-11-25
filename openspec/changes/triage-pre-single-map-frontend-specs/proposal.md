@@ -112,5 +112,15 @@ behaviour.
 - Findings reported, not specified (D3): when no issue time is selected,
   GFS and IFS each resolve their own latest cycle, which may differ, and
   the selector shows one value; no test covers it.
+- The old river requirement listed "horizon/point 预算不符" among the
+  `ok:false` causes. The validator does not refuse those: a short horizon
+  is annotated and drawn, and more than 480 points are capped and drawn;
+  the rewritten scenario names validation failure and request failure only.
+- `ForecastChart` itself would draw an analysis series if handed one; that
+  none reaches it is guaranteed by the request and the validator, which is
+  how the rewritten requirement states it.
+- The chart takes its unit from the first source that succeeded; a
+  different unit on the other source would be ignored. Reported, not
+  specified.
 - `forecast-migration` ("same center as legacy") is pre-single-map text of
   the same kind; not in the issue, reported as a finding.
