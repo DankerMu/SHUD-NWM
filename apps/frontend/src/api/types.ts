@@ -2419,6 +2419,27 @@ export interface components {
                 };
             };
         };
+        /** @description The run id has no pipeline job and no hydro run record. */
+        RunNotFound: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": {
+                    request_id: string;
+                    /** @enum {string} */
+                    status: "error";
+                    error: {
+                        /** @enum {string} */
+                        code: "RUN_NOT_FOUND";
+                        message: string;
+                        details?: {
+                            [key: string]: unknown;
+                        } | null;
+                    };
+                };
+            };
+        };
         /** @description Queue depth is unavailable from a display_readonly API node; the compute_control node exposes the live queue state. */
         ControlPlaneQueueUnavailable: {
             headers: {
@@ -3613,6 +3634,7 @@ export interface operations {
                     };
                 };
             };
+            404: components["responses"]["RunNotFound"];
             409: components["responses"]["ControlPlaneManualActionRequired"];
             /** @description Validation Error */
             422: {

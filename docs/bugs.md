@@ -358,9 +358,15 @@ job/log receipt.
 ### BUG-20260527-011: Operator cancel of a missing run returned 200 with an empty result
 
 ```yaml
-status: open
+status: resolved
 owner_area: compute_control
 github_issue: https://github.com/DankerMu/SHUD-NWM/issues/3245
+resolved_by: >-
+  #3245 made `POST /api/v1/runs/{run_id}/cancel` answer HTTP 404
+  `RUN_NOT_FOUND` (details `{"run_id": ...}`) when the run id has no
+  `pipeline_job` row of any status and no `hydro.hydro_run` row; nothing is
+  written and the Slurm gateway is not called. The 404 is declared in
+  openapi/nhms.v1.yaml and pinned by tests/test_retry_cancel_consistency.py.
 evidence:
   - artifacts/mvp-e2e/qhh-mvp-e2e-20260527T004907Z/api/neg_cancel_missing_operator.json
   - artifacts/mvp-e2e/qhh-mvp-e2e-20260527T004907Z/api/neg_cancel_missing_viewer.json
@@ -380,17 +386,18 @@ retest_command: |-
   ' "$tmp"
 ```
 
-The compute-control cancel route still starts from active jobs for a run. The
-fixed state is that operator cancel for a missing run returns a stable non-200
-error body, not HTTP 200 with empty `cancelled_jobs`. The display-readonly route
-correctly fails closed as manual action, but the operator missing-run semantics
-are not yet fixed by that display safety work. In #3226 the 200 path was
-confirmed in code (`apps/api/routes/pipeline.py` `cancel_run` returns `_ok`
-when no job exists), but it is reachable only on a DB-backed compute API:
-production node-22 runs its compute API without `DATABASE_URL`, so an
-authorized cancel there fails at `get_pipeline_store` with 500
-`DATABASE_URL_MISSING`, and node-27 answers the manual-action 409. #3245 owns
-the decision (retire the route like retry, or return 404).
+Operator cancel for a run id that names nothing now returns the stable error
+envelope with HTTP 404 `RUN_NOT_FOUND`, not HTTP 200 with empty
+`cancelled_jobs`. "Names nothing" means no `pipeline_job` row of any status and
+no `hydro.hydro_run` row; an unreadable `hydro.hydro_run` table counts as no
+row. A run that exists keeps its behaviour: one whose jobs are all terminal
+still gets the idempotent 200, and a `hydro.hydro_run` row without jobs is
+still cancelled. Refusals decided before the route body runs still come first:
+401 without authentication, 403 without the cancel role, and the
+manual-action 409 on a display-readonly API (node-27). A compute API without
+`DATABASE_URL` still fails at `get_pipeline_store` with 500
+`DATABASE_URL_MISSING` before the existence check. #3245 chose 404 over
+retiring the route like retry. The retest command accepts 404.
 
 ### BUG-20260527-012: Default Playwright E2E specs were mocked regression, not live E2E
 

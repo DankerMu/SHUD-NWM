@@ -1758,6 +1758,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+        '404':
+          $ref: '#/components/responses/RunNotFound'
         '409':
           $ref: '#/components/responses/ControlPlaneManualActionRequired'
       security:
@@ -6848,6 +6850,40 @@ components:
                     type: string
                     enum:
                     - CONTROL_PLANE_MANUAL_ACTION_REQUIRED
+                  message:
+                    type: string
+                  details:
+                    type:
+                    - object
+                    - 'null'
+                    additionalProperties: true
+    RunNotFound:
+      description: The run id has no pipeline job and no hydro run record.
+      content:
+        application/json:
+          schema:
+            type: object
+            required:
+            - request_id
+            - status
+            - error
+            properties:
+              request_id:
+                type: string
+              status:
+                type: string
+                enum:
+                - error
+              error:
+                type: object
+                required:
+                - code
+                - message
+                properties:
+                  code:
+                    type: string
+                    enum:
+                    - RUN_NOT_FOUND
                   message:
                     type: string
                   details:
