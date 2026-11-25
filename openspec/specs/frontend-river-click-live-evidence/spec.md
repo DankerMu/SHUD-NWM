@@ -340,6 +340,15 @@ count - each pinned to that network's discharge-layer segment id and checked
 against live `/api/v1` first, and SHALL accept the gate only when all three bind
 as PASS.
 
+A pin nobody can click SHALL be replaced, not failed. Its receipt shows failure code
+`HOOK_SELECTION_FAILED` with message exactly `hook HOOK_POINT_OCCLUDED`, `warmup_count` 0 and
+`accepted_count` 0: the hook found the anchor covered by a control, or found that the product click at
+that point resolves to another feature (as where two networks carry a segment on the same reach); the
+receipt does not tell the two apart. The runbook SHALL keep that receipt and pin the same role's next
+network by segment count that no role has used, at most twice per role, and the gate SHALL still
+require one PASS receipt per role. Any other FAIL or BLOCKED, and any failure after the warmup click
+was accepted, SHALL be NO-GO without replacement.
+
 #### Scenario: Mocked or sibling evidence cannot satisfy live readiness
 
 - **WHEN** pure helpers, hook components, mocked browser tests, screenshots, `/monitoring`, or `/ops` pass
@@ -354,6 +363,22 @@ as PASS.
 
 - **WHEN** the node-27 runbook runs the merged live profile for each of the three current pins with an absent private receipt path
 - **THEN** it accepts the click gate only from the three current commands' schema-1.1 mode-0600 PASS receipts with `click_dispatch=trusted_pointer_event`, matching origins, feature/products, counts, nearest-rank method, and P95 below 2000 ms
+
+#### Scenario: A pin nobody can click is replaced
+
+- **WHEN** a role's run ends with `HOOK_SELECTION_FAILED`, message `hook HOOK_POINT_OCCLUDED`, `warmup_count` 0 and `accepted_count` 0
+- **THEN** the receipt is kept with the gate's evidence and the role is pinned to its next unused network by segment count
+- **AND** the gate still requires a PASS receipt for that role
+
+#### Scenario: Replacement is exhausted
+
+- **WHEN** a role's second replacement ends with the same signature, or no unused network is left for it
+- **THEN** the gate is NO-GO
+
+#### Scenario: A failure after the warmup is not a pin problem
+
+- **WHEN** a run fails with `hook HOOK_POINT_OCCLUDED`, or with any other failure, after its warmup click was accepted
+- **THEN** the gate is NO-GO and the pin is not replaced
 
 ### Requirement: A separate gated hook SHALL locate one rendered station
 

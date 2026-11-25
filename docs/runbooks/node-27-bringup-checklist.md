@@ -576,7 +576,7 @@ click 只能人工截图、无法纳入 C4 自动 receipt：
     `failure.code` `HOOK_SELECTION_FAILED`、message 恰为 `hook HOOK_POINT_OCCLUDED`、`warmup_count 0`、`accepted_count 0`；
     receipt 不区分是哪一项。
     第二项的常见成因是嵌套 / 重叠流域：一张河网的 `…_000001` 河段整段与另一张河网的河段重合，
-    该处的点击按图层顺序取第一个要素。2026-11-25 node-27 实测（#3390）：`basins_byh_shud_shud_riv_000001`
+    两条河段在同一个图层里，该处的点击取渲染顺序里的第一条。2026-11-25 node-27 实测（#3390）：`basins_byh_shud_shud_riv_000001`
     的锚点在画布上、未被任何控件盖住，沿线每一处真实点击打开的都是 `basins_cj_main_…` 的河段。
     这个签名说明的是 **pin 点不到**，不是点击耗时的结论。
     - **换 pin**：保留该 receipt，在同一角色内换下一张网，取自 `networks_by_size.tsv`（按段数升序）：
