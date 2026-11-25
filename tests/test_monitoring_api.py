@@ -2360,6 +2360,61 @@ def test_release_blocked_auth_does_not_mutate(monkeypatch: Any) -> None:
         assert store.get_job("job_release_blocked").status == "running"
 
 
+def test_release_blocked_cancel_carries_audit_and_removal_criteria_before_the_handler(monkeypatch: Any) -> None:
+    """Deferred auth on the API dependency surface (``require_action``) over HTTP."""
+    monkeypatch.setenv("AUTH_BACKEND", "oidc")
+    monkeypatch.delenv("NHMS_AUTH_MODE", raising=False)
+    monkeypatch.delenv("NHMS_TRUSTED_LIVE_PROOF_MODE", raising=False)
+    monkeypatch.delenv("NHMS_INTERNAL_LIVE_PROOF_TOKEN", raising=False)
+    run_id = "run_release_blocked_details"
+    request_id = "req-release-blocked-cancel-details"
+    with _store() as store:
+        gateway = _MockGateway()
+        _create_job(store, job_id="job_release_blocked_details", run_id=run_id, status="running")
+        # The cancel handler's first statement reads the run's jobs; recording
+        # that read shows whether the handler ran at all.
+        handler_reads: list[str] = []
+        real_query_jobs_by_run = store.query_jobs_by_run
+
+        def recording_query_jobs_by_run(queried_run_id: str) -> Any:
+            handler_reads.append(queried_run_id)
+            return real_query_jobs_by_run(queried_run_id)
+
+        monkeypatch.setattr(store, "query_jobs_by_run", recording_query_jobs_by_run)
+        with _client(store, gateway, allow_dev_role_header=True) as client:
+            response = client.post(
+                f"/api/v1/runs/{run_id}/cancel",
+                headers={"X-User-Role": "operator", "X-Request-ID": request_id},
+            )
+
+            body = response.json()
+            assert response.status_code == 503, response.text
+            assert body["error"]["code"] == "RELEASE_BLOCKED"
+            details = body["error"]["details"]
+            assert set(details) == {"policy_decision", "audit_record", "removal_criteria"}
+            decision = details["policy_decision"]
+            assert decision["decision"] == "release_blocked"
+            assert decision["reason_code"] == "RELEASE_BLOCKED"
+            assert decision["action_id"] == "pipeline.cancel_run"
+            assert decision["target_id"] == run_id
+            audit = details["audit_record"]
+            assert audit["request_id"] == request_id
+            assert audit["decision"] == "release_blocked"
+            assert audit["action_id"] == "pipeline.cancel_run"
+            assert audit["target"] == {"type": "pipeline_run", "id": run_id}
+            assert details["removal_criteria"] == "Configure and prove live backend identity-provider role mapping."
+            assert handler_reads == []
+            assert gateway.cancelled == []
+            assert store.get_job("job_release_blocked_details").status == "running"
+
+            # Discrimination: with live auth off the same request reaches the
+            # handler, so the empty record above is the 503 stopping it.
+            monkeypatch.delenv("AUTH_BACKEND")
+            allowed = client.post(f"/api/v1/runs/{run_id}/cancel", headers={"X-User-Role": "operator"})
+            assert allowed.status_code == 200, allowed.text
+            assert handler_reads == [run_id]
+
+
 def test_live_auth_requested_with_configured_proof_but_missing_proof_release_blocks(monkeypatch: Any) -> None:
     monkeypatch.setenv("AUTH_BACKEND", "oidc")
     monkeypatch.setenv("NHMS_TRUSTED_LIVE_PROOF_MODE", "test_internal")
