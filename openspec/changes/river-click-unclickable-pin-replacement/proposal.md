@@ -17,8 +17,8 @@ and at six more points along the segment, opens a `basins_cj_main`
 segment every time; 15 of the segment's 46 coordinates coincide exactly
 with one of them. Two networks carry a segment on the same reach and the
 click resolves to the first in layer order, so nobody can click this pin.
-Which network should own such a reach is a product decision (filed as
-#3390).
+Which network should own such a reach is a product decision, filed as issue
+3390 (`#3390`).
 
 The gate measures how fast a click opens the curve. A pin that cannot be
 clicked says nothing about that, yet today it makes the gate NO-GO, and
