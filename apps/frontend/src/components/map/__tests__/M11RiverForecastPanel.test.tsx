@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -115,6 +115,21 @@ async function openIssueTimeSelect(user: ReturnType<typeof userEvent.setup>, tes
   const content = await screen.findByTestId(`${testId}-content`)
   expect(content).toHaveClass('bg-slate-950/95')
   return { trigger, content }
+}
+
+interface RenderedOption {
+  legend?: unknown
+  title?: unknown
+  series: Array<{ name: string; lineStyle: { color: string; type: string } }>
+}
+
+function renderedOption() {
+  return JSON.parse(screen.getByTestId('mock-forecast-echarts').textContent || '{}') as RenderedOption
+}
+
+/** 图表上方源标记行里某个源的标记（`<span>`，首个子元素是该源颜色的色块）。 */
+function sourceMarker(source: HydroMetSource) {
+  return screen.getByText(source, { selector: 'span' })
 }
 
 const originalViewport = { width: window.innerWidth, height: window.innerHeight }
@@ -466,6 +481,113 @@ describe('M11RiverForecastPanel', () => {
       expect(fetchHydroMetLatestProduct).toHaveBeenCalledWith(expect.objectContaining({ source: 'IFS', cycle: latestCycle }))
       expect(client.GET).toHaveBeenCalledTimes(2)
     })
+  })
+
+  it('draws GFS as a solid #22d3ee line and IFS as a dashed #34d399 line', async () => {
+    mockForecastBySource()
+    render(<M11RiverForecastPanel basinId="basins_qhh" segment={segment} />)
+
+    await screen.findByTestId('m11-river-panel-chart')
+    const option = renderedOption()
+    expect(option.series.map((series) => series.name)).toEqual(['GFS', 'IFS'])
+    expect(option.series.find((series) => series.name === 'GFS')?.lineStyle).toMatchObject({ color: '#22d3ee', type: 'solid' })
+    expect(option.series.find((series) => series.name === 'IFS')?.lineStyle).toMatchObject({ color: '#34d399', type: 'dashed' })
+  })
+
+  it('shows the legend as a row of GFS and IFS source markers above the chart, with no echarts legend or title', async () => {
+    mockForecastBySource()
+    render(<M11RiverForecastPanel basinId="basins_qhh" segment={segment} />)
+
+    const chart = await screen.findByTestId('m11-river-panel-chart')
+    for (const [source, color] of [['GFS', 'rgb(34, 211, 238)'], ['IFS', 'rgb(52, 211, 153)']] as const) {
+      const marker = sourceMarker(source)
+      expect(marker).not.toHaveClass('line-through')
+      expect(marker.firstElementChild).toHaveStyle({ backgroundColor: color })
+      // 标记行在图表区之前（上方）。
+      expect(marker.compareDocumentPosition(chart) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    }
+    const option = renderedOption()
+    expect(option).not.toHaveProperty('legend')
+    expect(option).not.toHaveProperty('title')
+  })
+
+  it.each([
+    { arm: 'fails validation (ok:false)', mockIfs: () => mockForecastBySource({ ifsSegmentId: 'seg-OTHER' }) },
+    {
+      arm: 'fails its request',
+      mockIfs: () =>
+        vi.mocked(client.GET).mockImplementation((async (_path: string, init: { params: { query: { scenarios: string } } }) =>
+          init.params.query.scenarios.includes('ifs')
+            ? { data: undefined, error: { message: 'forecast-series failed' } }
+            : { data: success(forecastFor('GFS')), error: undefined }) as never),
+    },
+  ])('draws only GFS and strikes the IFS marker through when IFS $arm', async ({ mockIfs }) => {
+    mockIfs()
+    render(<M11RiverForecastPanel basinId="basins_qhh" segment={segment} />)
+
+    await screen.findByTestId('m11-river-panel-chart')
+    expect(renderedOption().series.map((series) => series.name)).toEqual(['GFS'])
+    expect(sourceMarker('IFS')).toHaveClass('line-through')
+    expect(sourceMarker('GFS')).not.toHaveClass('line-through')
+    const partial = screen.getByTestId('m11-river-panel-partial')
+    expect(partial.textContent).toMatch(/^IFS：\S/)
+    expect(partial).not.toHaveTextContent('GFS')
+  })
+
+  it('lists both reasons in the empty state, draws no curve and keeps the segment display name as the title when both sources fail', async () => {
+    vi.mocked(client.GET).mockResolvedValue({ data: undefined, error: { message: 'forecast-series failed' } } as never)
+    render(<M11RiverForecastPanel basinId="basins_qhh" segment={segment} />)
+
+    const empty = await screen.findByTestId('m11-river-panel-empty')
+    const reasons = Array.from(empty.querySelectorAll('li')).map((item) => item.textContent ?? '')
+    expect(reasons).toHaveLength(2)
+    expect(reasons[0]).toMatch(/^GFS：\S/)
+    expect(reasons[1]).toMatch(/^IFS：\S/)
+    expect(screen.queryByTestId('mock-forecast-echarts')).not.toBeInTheDocument()
+    expect(within(screen.getByTestId('m11-river-forecast-panel')).getByText('Main Stem 009')).toBeInTheDocument()
+  })
+
+  it('refuses only the source whose latest-product returns another cycle than the selected one', async () => {
+    const user = userEvent.setup()
+    const latestCycle = '2026-05-21T00:00:00Z'
+    const olderCycle = '2026-05-20T12:00:00Z'
+    // GFS 如实回显所请求的时次；IFS 总是回最新一轮。
+    vi.mocked(fetchHydroMetLatestProduct).mockImplementation(
+      (async ({ source, cycle }: { source: HydroMetSource; cycle: string | null }) =>
+        product(source, {
+          available_issue_times: [latestCycle, olderCycle],
+          cycle_time: source === 'GFS' ? cycle ?? latestCycle : latestCycle,
+        })) as never,
+    )
+    // forecast-series 回显所请求的 issue_time（GFS 选旧时次后仍能通过校验）。
+    vi.mocked(client.GET).mockImplementation((async (
+      _path: string,
+      init: { params: { query: { scenarios: string; issue_time: string } } },
+    ) => {
+      const body = forecastFor(init.params.query.scenarios.includes('ifs') ? 'IFS' : 'GFS')
+      const issueTime = init.params.query.issue_time
+      return {
+        data: success({ ...body, issue_time: issueTime, series: body.series.map((item) => ({ ...item, cycle_time: issueTime })) }),
+        error: undefined,
+      }
+    }) as never)
+    render(<M11RiverForecastPanel basinId="basins_qhh" segment={segment} />)
+
+    await screen.findByTestId('m11-river-panel-chart')
+    await openIssueTimeSelect(user, 'm11-river-panel-cycle')
+    vi.mocked(client.GET).mockClear()
+    await user.click(screen.getByRole('option', { name: formatIssueTime(olderCycle) }))
+
+    await waitFor(() =>
+      expect(screen.getByTestId('m11-river-panel-partial')).toHaveTextContent(`IFS：起报 ${formatIssueTime(olderCycle)} 已不可用`),
+    )
+    expect(screen.getByTestId('m11-river-panel-partial').textContent).toBe(`IFS：起报 ${formatIssueTime(olderCycle)} 已不可用`)
+    expect(renderedOption().series.map((series) => series.name)).toEqual(['GFS'])
+    // 不以返回的另一个时次代替：IFS 的 forecast-series 根本不请求。
+    const scenarios = vi.mocked(client.GET).mock.calls.map(
+      (call) => (call[1] as unknown as { params: { query: { scenarios: string } } }).params.query.scenarios,
+    )
+    expect(scenarios).toEqual(['forecast_gfs_deterministic'])
   })
 
   it('shows honest empty state and resolves no product when basinId=null', () => {

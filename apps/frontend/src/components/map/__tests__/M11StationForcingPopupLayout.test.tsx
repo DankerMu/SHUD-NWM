@@ -50,7 +50,7 @@ describe('M11StationForcingPopup', () => {
   it('waits honestly without station-series requests when no concrete GFS/IFS source is available', () => {
     render(<M11StationForcingPopup basinId="basins_qhh" initialSource={null} station={station} />)
 
-    expect(screen.getByTestId('m11-station-popup-no-product')).toHaveTextContent('等待 GFS/IFS 源解析')
+    expect(screen.getByTestId('m11-station-popup-no-product')).toHaveTextContent('等待 GFS/IFS 源解析后加载 station-series')
     expect(fetchHydroMetLatestProduct).not.toHaveBeenCalled()
     expect(vi.mocked(client.GET)).not.toHaveBeenCalled()
   })
