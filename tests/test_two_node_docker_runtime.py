@@ -1476,7 +1476,6 @@ def test_start_display_api_sources_display_api_port_and_ignores_legacy_alias(tmp
         f"OBJECT_STORE_ROOT={object_store_root}",
         "NHMS_DISPLAY_API_PORT=18080",
         "NHMS_DISPLAY_PORT=19090",
-        f"NHMS_DISPLAY_LOG_PATH={temp_repo / 'display-api.log'}",
     ]
     fake_bin, record_dir = _prepare_start_display_api_harness(
         temp_repo,
@@ -1502,6 +1501,12 @@ def test_start_display_api_sources_display_api_port_and_ignores_legacy_alias(tmp
     assert "19090" not in launch_args
     assert "target=127.0.0.1:18080" in completed.stdout
     assert ":19090" not in completed.stdout + completed.stderr
+    # The health probe and the models smoke check use the sourced port too.
+    curl_args = (record_dir / "curl.argv").read_text(encoding="utf-8").splitlines()
+    assert "http://127.0.0.1:18080/health" in curl_args
+    assert "http://127.0.0.1:18080/api/v1/models?limit=1" in curl_args
+    assert not any("19090" in arg for arg in curl_args)
+    _assert_detached_fallback_log_in_temp_repo(completed, temp_repo)
 
 
 def test_start_display_api_defaults_display_api_port_when_unset(tmp_path: Path) -> None:
@@ -1527,6 +1532,9 @@ def test_start_display_api_defaults_display_api_port_when_unset(tmp_path: Path) 
     assert launch_args[launch_args.index("--port") + 1] == "8080"
     assert launch_args[launch_args.index("--workers") + 1] == "2"
     assert "target=127.0.0.1:8080" in completed.stdout
+    # The detached fallback redirect opened the harness log, not a host file.
+    assert (temp_repo / "display-api.log").is_file()
+    _assert_detached_fallback_log_in_temp_repo(completed, temp_repo)
 
 
 @pytest.mark.parametrize("invalid_workers", ["0", "5", "many"])
@@ -1639,13 +1647,25 @@ def test_start_display_api_ignores_sourced_host_and_log_path(tmp_path: Path) -> 
     completed = _run_start_display_api_harness(temp_repo, fake_bin, record_dir)
 
     assert completed.returncode == 0, completed.stdout + completed.stderr
+    # The log path comes from the process environment (the harness default), never
+    # from display.env.
+    assert f"target=127.0.0.1:18080  log={temp_repo / 'display-api.log'} workers=" in completed.stdout
+    assert "/missing/dir/display.log" not in completed.stdout + completed.stderr
+    _assert_detached_fallback_log_in_temp_repo(completed, temp_repo)
     launch_text = (record_dir / "setsid.argv").read_text(encoding="utf-8")
     launch_args = launch_text.splitlines()
     assert "--host" in launch_args
     assert launch_args[launch_args.index("--host") + 1] == "127.0.0.1"
     assert "0.0.0.0" not in launch_text
-    assert "target=127.0.0.1:18080  log=/tmp/display-api.log" in completed.stdout
-    assert "/missing/dir/display.log" not in completed.stdout + completed.stderr
+
+
+def test_start_display_api_log_path_default_is_read_before_display_env_is_sourced() -> None:
+    """Checked on the script text: running it unset would append to the host's log."""
+    script_lines = (REPO_ROOT / "scripts/ops/start-display-api.sh").read_text(encoding="utf-8").splitlines()
+    log_path_line = script_lines.index('LOG_PATH="${NHMS_DISPLAY_LOG_PATH:-/tmp/display-api.log}"')
+    source_line = script_lines.index('. "$ENV_FILE"')
+    assert log_path_line < source_line
+    assert [line for line in script_lines if line.lstrip().startswith("LOG_PATH=")] == [script_lines[log_path_line]]
 
 
 def test_start_display_api_invalid_object_store_exits_before_stop_or_relaunch(tmp_path: Path) -> None:
@@ -1656,7 +1676,6 @@ def test_start_display_api_invalid_object_store_exits_before_stop_or_relaunch(tm
         "NHMS_ENABLE_LIVE_POSTGIS_MVT=true",
         f"OBJECT_STORE_ROOT={invalid_object_store_root}",
         "NHMS_DISPLAY_API_PORT=18080",
-        f"NHMS_DISPLAY_LOG_PATH={temp_repo / 'display-api.log'}",
     ]
     fake_bin, record_dir = _prepare_start_display_api_harness(
         temp_repo,
@@ -5177,9 +5196,13 @@ def _run_start_display_api_harness(
         path_parts.append(os.environ["PATH"])
     temp_dir = temp_repo / "tmp"
     temp_dir.mkdir()
+    # The script reads NHMS_DISPLAY_LOG_PATH from the process environment before it
+    # sources display.env, so only this keeps the detached fallback's append redirect
+    # off the host's /tmp/display-api.log.
     clean_env = {
         "HARNESS_RECORD_DIR": str(record_dir),
         "HOME": str(temp_repo),
+        "NHMS_DISPLAY_LOG_PATH": str(temp_repo / "display-api.log"),
         "PATH": os.pathsep.join(path_parts),
         "TMPDIR": str(temp_dir),
     }
@@ -5193,6 +5216,18 @@ def _run_start_display_api_harness(
         capture_output=True,
         text=True,
     )
+
+
+def _assert_detached_fallback_log_in_temp_repo(
+    completed: subprocess.CompletedProcess[str],
+    temp_repo: Path,
+) -> None:
+    """The detached fallback's append redirect opened a file inside ``temp_repo``."""
+    match = re.search(r"detached fallback relaunched pid=\d+ \(log: (.+)\)$", completed.stdout, re.MULTILINE)
+    assert match is not None, completed.stdout + completed.stderr
+    log_path = Path(match.group(1))
+    assert log_path.is_relative_to(temp_repo), log_path
+    assert log_path.is_file()
 
 
 def _write_executable(path: Path, content: str) -> None:
