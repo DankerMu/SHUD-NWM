@@ -1,7 +1,7 @@
 # facade-shrink Specification
 
 ## Purpose
-TBD - created by archiving change facade-shrink-scheduler-chain. Update Purpose after archive.
+Let scheduler preflight live outside `services/orchestrator/scheduler.py` without changing its behaviour or the names callers reach through the scheduler facade.
 
 ## Requirements
 
@@ -18,16 +18,3 @@ implementation to live outside `services/orchestrator/scheduler.py`.
 - **THEN** the old private names remain importable from the facade
 - **AND** focused scheduler preflight tests pass without blocker/check shape
   drift.
-
-### Requirement: Compatibility guard remains authoritative
-
-The system SHALL require inventory coverage for every retained scheduler or
-chain facade alias introduced during facade shrink work.
-
-#### Scenario: New facade alias has inventory coverage
-
-- **GIVEN** a facade private name forwards to a new owner module
-- **WHEN** the entropy compatibility-facade guard scans the repository
-- **THEN** the matching compatibility inventory records the owner, retention
-  reason, removal condition, and verification command
-- **AND** the guard reports zero signals.

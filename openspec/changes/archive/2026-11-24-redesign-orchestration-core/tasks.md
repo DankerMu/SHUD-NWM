@@ -2767,7 +2767,8 @@ Slice triage (J0, #3275, tasks 13.1-13.3):
 
 - [x] 14.1 Move C18 (Appendix B) into `services/orchestrator/file_journal_retention.py` as a mixin that the class composes. The retention dataclasses stay importable from the facade. Update the cluster map. J0, `tests/test_file_journal_late_lookup_seams.py` and `tests/test_scheduler_journal_retention_archive.py` stay unchanged and green.
   - J1-J5 carry-over from J0 (#3275): set 1 renders a `_UNSET` default as `=facade._UNSET`, and set 4 requires every pinned 4(a) name (e.g. `FileJournalRetentionCycle*`, `OperatorBindReceipt`, `PERMANENT_FAILURE_SOURCE_STATUSES`) to keep resolving on the facade. When a slice moves such a name, or the last class-body use of `_UNSET`, out of the facade, the facade keeps the re-import with `# noqa: F401`. Adding it to `__all__` is not an option: `tests/test_file_orchestration_journal_facade.py` requires every `__all__` name to have a consumer. Facade-only imports (`COHORT_MEMBERSHIP_*`, `journal_read_lane`) may be dropped under F401 without touching set 4, whose live side counts only sibling imports already pinned as 4(a).
-- [ ] 14.2 Verification: CI, then node-22 batch per D5.
+- [x] 14.2 Verification: CI, then node-22 batch per D5.
+  - Evidence: CI green at merge; #3338 is in group 3 (deploy of `2e701e1d2` on w3, 2026-11-24T12:18:57Z; idle pass `scheduler_2026112412_7947a4a993bd`, root preflight `ready`; submitting pass `scheduler_2026112422_477019b84333`, 132 submitted, 0 failed), posted on #3276.
 
 Suggested fixture level: expanded - moves persisted-state writer code.
 Minimal mergeable slice: atomic - one cluster, pure move.
@@ -2822,7 +2823,8 @@ Slice triage (J1, #3276, tasks 14.1-14.2):
 
 - [x] 15.1 Move C17 into `file_journal_events.py`. A mixin with public methods carries `@_install_public_read_attribution`. J0 stays unchanged.
 - [x] 15.2 Move C15 into `file_journal_release.py`. J0 stays unchanged.
-- [ ] 15.3 Verification: CI, then node-22 batch per D5.
+- [x] 15.3 Verification: CI, then node-22 batch per D5.
+  - Evidence: CI green at merge; #3339 and #3340 are in group 3 (deploy of `2e701e1d2` on w3, 2026-11-24T12:18:57Z; idle pass `scheduler_2026112412_7947a4a993bd`, root preflight `ready`; submitting pass `scheduler_2026112422_477019b84333`, 132 submitted, 0 failed), posted on #3277 and #3278.
 
 Suggested fixture level: expanded - moves persisted-state writer code.
 Minimal mergeable slice: 15.1 alone; 15.2 is its own PR.
@@ -2962,7 +2964,8 @@ Slice triage (J2b, #3278, tasks 15.2, 15.3):
 - [x] 16.1 Move C12 into `file_journal_reclaim.py`.
 - [x] 16.2 Move C14 into `file_journal_operator.py`. The receipt dataclasses stay importable from the facade.
 - [x] 16.3 Move C16 into `file_journal_cohort.py`, with `project_forecast_cohort_tasks` moved whole.
-- [ ] 16.4 Verification: CI, then node-22 batch per D5. J0 stays unchanged after each PR.
+- [x] 16.4 Verification: CI, then node-22 batch per D5. J0 stays unchanged after each PR.
+  - Evidence: CI green at merge; #3341, #3342 and #3346 are in group 3 (deploy of `2e701e1d2` on w3, 2026-11-24T12:18:57Z; idle pass `scheduler_2026112412_7947a4a993bd`, root preflight `ready`; submitting pass `scheduler_2026112422_477019b84333`, 132 submitted, 0 failed), posted on #3279, #3280 and #3281.
 
 Suggested fixture level: expanded - moves persisted-state writer code.
 Minimal mergeable slice: 16.1 alone; 16.2 and 16.3 are their own PRs.
@@ -3274,7 +3277,8 @@ D5 backlog deploy (owner decision 2026-11-23, recorded here because it deviates 
 ## 17. J4 — Submit-lifecycle mixin
 
 - [x] 17.1 Move C13, including `permit_*_retry`, into `file_journal_submit.py`. The back-edges from C11 and C14 resolve through `self`. J0 stays unchanged.
-- [ ] 17.2 Verification: CI, then node-22 batch per D5.
+- [x] 17.2 Verification: CI, then node-22 batch per D5.
+  - Evidence: CI green at merge; #3348 is in group 3 (deploy of `2e701e1d2` on w3, 2026-11-24T12:18:57Z; idle pass `scheduler_2026112412_7947a4a993bd`, root preflight `ready`; submitting pass `scheduler_2026112422_477019b84333`, 132 submitted, 0 failed), posted on #3282.
 
 Suggested fixture level: expanded - moves persisted-state writer code.
 Minimal mergeable slice: atomic - one cluster, pure move.
@@ -3382,7 +3386,8 @@ Slice triage (J4, #3282, tasks 17.1, 17.2):
 ## 18. J5 — Reconcile-inventory mixin
 
 - [x] 18.1 Move C7 into `file_journal_reconcile_inventory.py`, keeping the underscore names that `file_orchestration_migration.py` and `journal_scope_census.py` call. J0 stays unchanged.
-- [ ] 18.2 Verification: CI, then node-22 batch per D5.
+- [x] 18.2 Verification: CI, then node-22 batch per D5.
+  - Evidence: CI green at merge; #3351 is in group 3 (deploy of `2e701e1d2` on w3, 2026-11-24T12:18:57Z; idle pass `scheduler_2026112412_7947a4a993bd`, root preflight `ready`; submitting pass `scheduler_2026112422_477019b84333`, 132 submitted, 0 failed), posted on #3283.
 
 Suggested fixture level: expanded - moves persisted-state writer code.
 Minimal mergeable slice: atomic - one cluster, pure move.
@@ -3484,7 +3489,7 @@ Slice triage (J5, #3283, tasks 18.1, 18.2):
 ## 19. Archive
 
 - [x] 19.0 J-series carry-overs (#3350): the origin rule in the late-lookup lint, behavioural seam tests for the repository mixins, the `_cycle_write_owner` guard over the siblings, the status-set identity pin on siblings (#3347), comment fixes in three siblings, and the spec delta for the extraction requirement.
-- [ ] 19.1 In the final push of whichever slice merges last:
+- [x] 19.1 In the final push of whichever slice merges last:
   - tick every task;
   - give each touched capability spec a real Purpose paragraph where it says TBD;
   - rewrite the `file-orchestration-journal` Purpose (`:4-5`) so it no longer says "contract-tested against the database semantics" (R3-2; Purpose text is outside the delta format);

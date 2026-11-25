@@ -167,7 +167,7 @@ The Orchestrator SHALL NOT automatically retry jobs that failed with non-transie
 #### Scenario: auto_retry_skipped payload rides the permanently_failed event
 
 - **WHEN** the guard blocks automatic retry for a non-transient or unknown error code and marks the job permanently failed
-- **THEN** the `auto_retry_skipped` payload is merged into the existing `permanently_failed` pipeline event's `details_json` (no separate event type), constructed by a single shared helper consumed by both the DB plane and the file-journal plane so the reason literals have exactly one source
+- **THEN** the `auto_retry_skipped` payload is merged into the existing `permanently_failed` pipeline event's `details_json` (no separate event type), constructed by a single shared helper consumed by the file-journal plane (the only retry plane after the SQL retry service was deleted) so the reason literals have exactly one source
 
 #### Scenario: the auto_retry_skipped key appears iff a recorded error code is classification-blocked
 
@@ -347,9 +347,9 @@ When the candidate ladder would emit `retry_strict_warm_start_terminal_init_stat
 
 Every explicit stage-scoped attempt read SHALL derive only from rows whose authoritative stage resolves to the requested stage, plus the existing identity-narrowed carried floor for canonical downstream stages. It SHALL NOT max the result against the candidate-level flat `retry_count`: that flat aggregate remains a window-local stage-less compatibility/evidence value, and an unrelated stage's persisted count SHALL NOT charge the requested stage's budget. A stage-less read SHALL retain its flat-first behavior and SHALL NOT consume carried stage floors.
 
-The stage-scoped attempt SHALL bind in the production geometry where the reserved master row carries no retry count and attempts are recorded only as retry-suffixed pipeline job rows — including the reverse geometry where the maximum-attempt retry-suffixed row is older than `job_limit` fresher rows of other stages. Both file-journal and DB-backed candidate-state paths SHALL provide the shared projection with the complete job population admitted by their candidate/cycle query before the projection applies `job_limit`; the projection SHALL derive each canonical downstream stage's maximum effective retry attempt through the same authoritative-stage-field and `effective_retry_attempt` chain the budget consumers use (including the `job_type` fallback for stage-less rows and the persisted-`retry_count` half for rows without a `_retry_<n>` suffix), never job-id substring parsing and never a locally forked stage-alias table, and carry these upper bounds across truncation.
+The stage-scoped attempt SHALL bind in the production geometry where the reserved master row carries no retry count and attempts are recorded only as retry-suffixed pipeline job rows — including the reverse geometry where the maximum-attempt retry-suffixed row is older than `job_limit` fresher rows of other stages. The file-journal candidate-state path SHALL provide the shared projection with the complete job population admitted by its candidate/cycle query before the projection applies `job_limit`; the projection SHALL derive each canonical downstream stage's maximum effective retry attempt through the same authoritative-stage-field and `effective_retry_attempt` chain the budget consumers use (including the `job_type` fallback for stage-less rows and the persisted-`retry_count` half for rows without a `_retry_<n>` suffix), never job-id substring parsing and never a locally forked stage-alias table, and carry these upper bounds across truncation.
 
-The carried upper bounds SHALL record their contributing rows' candidate-identity metadata, and candidate-identity/scope filtering SHALL narrow the carried upper bounds with the row population: a stage's upper bound survives a filtered state only while at least one of its contributing rows passes the same authority/scope predicates that filter the rows — an upper bound whose every contributor is judged non-authoritative for the candidate SHALL NOT reach that candidate's failure-policy, budget, or mint derivations. The truncated row selection itself SHALL remain the pure-freshness top-`job_limit` selection, element for element identical to the pre-change projection in every geometry — the carried upper bounds SHALL add no rows, evict no rows, and change no state key derived from the returned row population. The projection SHALL report `pipeline_jobs_total` as the true number of admitted job rows before `job_limit`, and `state_truncated` SHALL reflect that true total. The DB-backed and file-journal paths SHALL therefore produce the same stage-scoped attempts for the same admitted row geometry while returning no more than `job_limit` pipeline-job rows.
+The carried upper bounds SHALL record their contributing rows' candidate-identity metadata, and candidate-identity/scope filtering SHALL narrow the carried upper bounds with the row population: a stage's upper bound survives a filtered state only while at least one of its contributing rows passes the same authority/scope predicates that filter the rows — an upper bound whose every contributor is judged non-authoritative for the candidate SHALL NOT reach that candidate's failure-policy, budget, or mint derivations. The truncated row selection itself SHALL remain the pure-freshness top-`job_limit` selection, element for element identical to the pre-change projection in every geometry — the carried upper bounds SHALL add no rows, evict no rows, and change no state key derived from the returned row population. The projection SHALL report `pipeline_jobs_total` as the true number of admitted job rows before `job_limit`, and `state_truncated` SHALL reflect that true total. The file-journal path SHALL therefore produce stage-scoped attempts from the complete admitted row geometry while returning no more than `job_limit` pipeline-job rows.
 
 #### Scenario: Budget exhaustion demotes the retry to a stable blocked decision
 
@@ -374,7 +374,7 @@ The carried upper bounds SHALL record their contributing rows' candidate-identit
 #### Scenario: The budget binds in the reverse truncation geometry
 
 - **WHEN** the `*_forecast_retry_N` row carrying the stage's maximum attempt is older than `job_limit` fresher rows of other stages and `N` has reached the retry limit
-- **THEN** both the file-journal and DB-backed projections still yield stage-scoped attempt `N`, and the demotion to `blocked_strict_warm_start_init_state_mismatch` triggers instead of an unbudgeted retry
+- **THEN** the file-journal projection still yields stage-scoped attempt `N`, and the demotion to `blocked_strict_warm_start_init_state_mismatch` triggers instead of an unbudgeted retry
 
 #### Scenario: Projection row selection is unchanged in every geometry
 
@@ -383,14 +383,14 @@ The carried upper bounds SHALL record their contributing rows' candidate-identit
 
 #### Scenario: DB projection reports true population without breaking the hard returned-row bound
 
-- **WHEN** the DB-backed candidate query admits more than `job_limit` job rows
+- **WHEN** the file-journal candidate query admits more than `job_limit` job rows
 - **THEN** `pipeline_jobs_total` equals the full admitted count, `state_truncated` is true, and the returned `pipeline_jobs` list contains exactly the pure-freshness top `job_limit` rows
-- **AND** no SQL-local stage alias table or retry-suffix parser decides which attempts survive
+- **AND** no path-local stage alias table or retry-suffix parser decides which attempts survive
 
 #### Scenario: Friendly DB geometry remains byte-identical
 
 - **WHEN** every stage's maximum-attempt contributor already lies inside the newest `job_limit` rows
-- **THEN** the DB-backed projected row list and all row-derived state keys are element-for-element identical to the prior pure-freshness result
+- **THEN** the file-journal projected row list (job ids, in order) is element-for-element identical to the prior pure-freshness result
 
 #### Scenario: Zero-attempt stages carry no upper bound
 
@@ -486,7 +486,7 @@ records the cycle failure being repaired, and counting it would
 make the only-failure-left arm unreachable; the module enforces
 this exclusion itself with a row-identity predicate — an id-less
 synthesized row (every legitimate production row carries a job id
-on both read paths) is never a live-failure source, closing the
+on the journal read path) is never a live-failure source, closing the
 top-level `pipeline_status` leak on job-row-less synthesized and
 compacted states, while the production projections' shape
 guarantee — a surviving marker proves real job rows exist beside
@@ -569,16 +569,18 @@ already mandates for the cross-pass failure policy. Marker-shaped events remain 
 blocker scanning regardless of attribution (a foreign marker must
 never be treated as an active blocker suppressing the candidate's
 own manual retry), and candidate-state event-row visibility on the
-journal/DB read paths is unchanged for cycle-granularity markers and
+journal read path is unchanged for cycle-granularity markers and
 model-less cycle-scope rows — those cycle-wide events stay visible in
 every candidate's raw state for diagnostics. Candidate-state
-membership for pipeline job rows on the journal (db-free) read path
-SHALL align with the DB read path's candidate-state predicate: a row
+membership for pipeline job rows on the journal read path (the only
+candidate-state read path; the DB read path was deleted with
+`PsycopgOrchestratorRepository` in R3, #3260) SHALL follow this
+predicate: a row
 whose run id is the candidate's own run id belongs to the candidate;
 a row whose run id carries the cycle-scope run grammar belongs to the
 candidate only when its `model_id` is empty (the model-less cohort
 contract — such rows stay visible to every candidate in the cycle,
-including the journal-only widening to rows whose run id extends the
+including the widening to rows whose run id extends the
 cycle run id with a suffix, which this rule leaves in place) or names
 the candidate itself; a row naming a foreign `model_id` is excluded
 from the candidate's job rows, and a `pipeline_job`-entity event
@@ -592,8 +594,7 @@ foreign model's manual retry marker can neither report
 cycle-level gates draw different lines: the duplicate-submission
 gates (the active-pipeline and active-slurm-jobs scans) keep their
 wider unconditional cycle-run ROW VISIBILITY unchanged — their
-active-job scans and the DB read path's counterparts deliberately
-share that width — but visibility is not terminal-completion
+active-job scans deliberately keep that width — but visibility is not terminal-completion
 authority. The active-pipeline gate's hydro-active suppression
 answers a candidate-scoped question ("has THIS candidate already
 completed, making its ACTIVE hydro placeholder stale?") and SHALL
@@ -602,21 +603,14 @@ the candidate's ACTIVE hydro arm. Its local terminal-completion
 conjunction excludes a row whose `model_id` is non-empty and names
 another model while its run id is exactly the cycle run id; the
 candidate's own completion rows and model-less cycle-scope cohort
-completion rows retain suppression authority. This aligns the
-journal active verdict's direction with the DB active-pipeline gate,
-whose source/cycle/model-qualified ACTIVE hydro arm is combined with
-its active-job arm by a plain `UNION ALL` and has no terminal-
-completion suppression clause. The completed-pipeline gate likewise
+completion rows retain suppression authority. The completed-pipeline gate likewise
 answers a candidate-scoped question ("has THIS candidate
 completed") and SHALL NOT count the same foreign-model row as the
 candidate's completion: completion is proven only by the
 candidate's own rows (its own run id or its own `model_id`), by
 model-less cycle-scope cohort completion rows (which stay
 cycle-wide — every candidate completes through them), or by the
-candidate's own completed hydro run. This aligns the journal
-completion verdict's direction with the DB completed-pipeline gate,
-which reads `hydro.hydro_run` under a source/cycle/model three-key
-restriction and never sees another model's job rows. Both
+candidate's own completed hydro run. Both
 candidate-scoped exclusions live in their gate-local terminal-
 completion conjunctions, not in the shared row-match predicate that
 feeds the duplicate-submission scans. On the
@@ -647,12 +641,8 @@ drive the retry decision it was written to request.
 - **AND** the candidate's own row with `run_id` equal to the cycle
   run id and the candidate's own `model_id` remains visible, and a
   marker targeting it keeps its adoption and pinning semantics
-- **AND** the DB read path gives the same candidate-state membership
-  verdict for these rows — the foreign-model named row is excluded
-  there by the `model_id IS NULL` guard on its cycle-run clause and
-  the candidate's own named row is included by its model clause —
-  while the suffix-extended model-less row remains a journal-only
-  widening that this change leaves in place
+- **AND** the suffix-extended model-less row stays visible, a widening
+  of the cycle-scope run grammar that this change leaves in place
 - **AND** with the foreign-model row and its marker in place, the
   cycle-level duplicate-submission gates (active-pipeline,
   active-slurm-jobs) answer exactly as before the exclusion — the
@@ -692,11 +682,6 @@ drive the retry decision it was written to request.
 - **AND** on the same fixture the active-pipeline and
   active-slurm-jobs answers are byte-for-byte unchanged, proving
   the shared row-match predicate was not narrowed
-- **AND** the DB read path already answers `False` for the foreign
-  shape — its completed-pipeline gate reads `hydro.hydro_run` under
-  the source/cycle/model three-key restriction — so the journal and
-  DB verdicts now agree in direction for this shape instead of
-  diverging
 
 #### Scenario: Foreign-model completion cannot suppress the candidate's active hydro run
 
@@ -712,10 +697,6 @@ drive the retry decision it was written to request.
   every listed hydro-status and terminal-stage combination — the
   foreign completion is visible to the wide row scan but cannot
   suppress this candidate's ACTIVE hydro arm
-- **AND** the DB active-pipeline gate answers `True` in the same
-  direction because its source/cycle/model-qualified ACTIVE hydro
-  arm is a plain union member and has no terminal-completion
-  suppression clause
 - **AND** replacing the foreign row with either the candidate's own
   terminal-completion row (its own `fcst_...` run id or its own
   `model_id` on the exact cycle run id) or a model-less cycle-scope
@@ -1040,9 +1021,9 @@ drive the retry decision it was written to request.
   model, fails closed and never pins
 - **AND** the verdicts hold for stacked-suffix entity ids
   (`..._retry_1` and `..._retry_1_retry_2_retry_3` alike)
-- **AND** a marker without the record — legacy markers, and every
-  marker written by the SQL retry service — keeps the delivered
-  backstop verdicts bit for bit
+- **AND** a marker without the record — a legacy marker, including
+  every marker the deleted SQL retry service wrote — keeps the
+  delivered backstop verdicts bit for bit
 - **AND** the identity-filter event sanitizer preserves the
   `target_*` details on retry events end to end: a marker written
   by `record_manual_repair`, projected into the candidate state and
@@ -2846,3 +2827,72 @@ same runtime repository and backend selectors as initial scheduler submissions.
   cross-prefix evidence MUST fail with a stable reason before target directory
   creation, destination lock acquisition, or target mutation, including when
   source and target roots are the same.
+
+### Requirement: Retry and attempt accounting SHALL have one owner
+
+`services/orchestrator/retry_identity.py` SHALL be the single owner of retry
+and attempt accounting. It owns:
+
+- retry job id formatting;
+- next-attempt minting on the stage-scoped, floored, inline, current-master,
+  non-master and manual paths;
+- stage attempt reads over already-read rows;
+- the cohort restart stage;
+- the default retry-limit constant;
+- the manual-retryable and upstream-refresh-retryable status sets.
+
+Other modules SHALL delegate to the owner. The operator overrides
+`NHMS_SCHEDULER_RETRY_LIMIT` and `SLURM_GATEWAY_MAX_RETRIES` SHALL keep their
+current readers and precedence. The owner's functions SHALL take plain data.
+The only IO seam SHALL be an injected occupancy predicate for the floored
+mint. Moving a computation into the owner SHALL NOT change its result for any
+input.
+
+#### Scenario: Historical retry cases are pinned in one table
+
+- **WHEN** the owner's table-driven test runs
+- **THEN** plain-data rows cover:
+  - the prefix-switch and cohort-digest budget cases (#2404);
+  - the sibling-model, inline-stacking and occupied-id cases (#2404, #1201);
+  - mixed-floor cohorts (#2542);
+  - stacked and malformed suffixes (#2254);
+  - explicit context precedence (#2393);
+  - suffix-over-count when the recorded count is absent;
+  - the cohort restart stage (#2394, #2416);
+  - the default limit with each env override.
+- **AND** an index row names the existing integration test for each of these
+  cases and asserts that the test exists:
+  - the sibling and own model-set forcing resume (#1845);
+  - the nested partial retry, spent budget and concurrent-pass cases (#1845);
+  - the manual-claim gate without an active decision (#1201);
+  - the selected-snapshot retry identity (#1356).
+- **AND** each plain-data row's expected value equals what the pre-move code
+  returns for the same input.
+
+#### Scenario: Divergent paths are pinned as they are
+
+- **WHEN** the table includes any of these paths:
+  - the non-master automatic retry, which derives the next attempt from the
+    caller snapshot's `retry_count` alone;
+  - the inline-retry formula's `failure_number - 1` term;
+  - the two `rsplit("_retry_", 1)` increments in the forecast cycle;
+  - the difference between the chain's hard-coded retryable status sets and
+    `retry.py`'s sets.
+- **THEN** those rows assert today's results, divergences included
+- **AND** changing any of them requires a separate behaviour-change issue that
+  edits the row and this requirement.
+
+#### Scenario: A call site computes an attempt locally
+
+- **WHEN** a module outside `retry_identity.py` builds a job id from the
+  `_retry_` literal or `RETRY_JOB_ID_MARKER` in an f-string, concatenation,
+  `%` or `.format`, or `join`, or splits on that marker, or adds an integer literal to
+  the result of any `retry_identity` function, of any call whose name contains
+  `attempt` (the scheduler-state readers such as `_state_retry_attempt` and
+  `_fallback_previous_attempt`), or of a split on that marker
+- **THEN** an AST guard test fails and names the module and line
+- **AND** calls to the owner's parsers, regex matches and `in` membership tests on
+  the marker that do not mint a new id or attempt are allowed.
+- **AND** the guard is a syntactic check: every form T2 removed is caught, and
+  any shape it is later found to miss is recorded in the guard and closed by
+  tightening it, never by an allowlist entry.

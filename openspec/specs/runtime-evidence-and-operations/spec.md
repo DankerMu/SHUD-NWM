@@ -184,8 +184,8 @@ received root values (in both the allowed-roots walk and the per-root
 storage check) without ever letting the expansion escape the preflight as
 an exception. This is a defence-in-depth guarantee at the helper level:
 today's configuration layer cannot deliver a leading-tilde value to these
-helpers (the db-backed arm fails earlier during configuration construction
-and the db-free arm anchors the value at the working directory first), so
+helpers (configuration construction, which is always the DB-free
+construction, anchors the value at the working directory first), so
 the requirement hardens the preflight against future callers and against
 changes in that layer rather than closing a currently live escape.
 Specifically: when the home directory cannot be determined (an unknown `~user`
@@ -282,12 +282,13 @@ it SHALL include re-classifying the already-blocked under-a-loop case from
 `unsafe` to the errno-derived value.
 
 For the **config construction** helpers, which have no rejection channel and
-must return a path, the db-free arm SHALL be normalized identically to the
-already-converted database-backed arm (strict `os.path.realpath`, falling back
-to the non-strict form on any `OSError` — and on `OSError` only, because the
+must return a path, the construction SHALL normalize through strict
+`os.path.realpath`, falling back to the non-strict form on any `OSError` — and
+on `OSError` only, because the
 fallback call would raise `ValueError` again for an unrepresentable path
-string and turn a pre-existing escape into an escape from inside the handler).
-That `ValueError` escape is therefore retained here exactly as it stands
+string and turn a pre-existing escape into an escape from inside the handler.
+This is the only construction arm; the database-backed arm it was aligned with
+was deleted (#3311). That `ValueError` escape is therefore retained here exactly as it stands
 today, neither introduced nor removed. Classification remains the
 storage preflight's responsibility rather than construction's, so this arm
 SHALL NOT introduce an errno split or a rejection of its own. This makes the
@@ -577,8 +578,8 @@ The bounded fallback SHALL keep a capped projection of `source_cycles` entries w
 #### Scenario: A self-loop lock root yields the same code and keys on 3.11 and 3.14
 
 - **GIVEN** a `ProductionSchedulerConfig` whose `lock_root` is a symlink pointing at itself
-- **WHEN** the lock/evidence root preflight runs on CPython 3.11 and on CPython 3.14
-- **THEN** both runs report `blocked` with blocker code `SCHEDULER_ROOT_LOCK_ROOT_SYMLINK` and the same `checks.lock_root` key set, including `symlink`, `allow_create` and `under_workspace`
+- **WHEN** the scheduler runtime-root preflight (`_scheduler_runtime_root_preflight`) runs on CPython 3.11 and on CPython 3.14
+- **THEN** both runs report `blocked` with blocker code `SCHEDULER_ROOT_LOCK_ROOT_SYMLINK` and the same `checks.lock_root` key set, including `symlink`, `allow_create` and `under_workspace` (#3311 observed-behaviour row 21)
 
 #### Scenario: A full scheduler pass with a loop lock root writes its blocked evidence on 3.11 and 3.14
 
