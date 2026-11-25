@@ -24,6 +24,7 @@ test: ``_safe_error_message`` (``retry.py``) and ``_public_path_or_uri_placehold
 
 from __future__ import annotations
 
+import functools
 import re
 from collections.abc import Mapping, Sequence
 from datetime import datetime
@@ -35,6 +36,26 @@ from services.orchestrator.scheduler_state_common import _format_utc
 
 # A value that opens with a URI scheme (``<scheme>://``).
 _SCHEME_ANCHORED_URI_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
+
+# #3236: completion scoring renders the same strings for every model of a cycle,
+# so the text sanitiser, the string branch of the scalar sanitiser and the
+# sensitive-key test remember their answer per input string.  All three are
+# functions of that one string (no environment, no mutable module state), so a
+# remembered answer is the computed one.  Only exact ``str`` inputs no longer
+# than the length limit are remembered; every other input is computed each time.
+#
+# Memory: an entry holds the input and the output.  The output is normally
+# about as long as the input but can be several times longer (every token of
+# ``/ / /`` becomes ``[local-path]``: about 6.5 output characters per input
+# character), and a character takes up to four bytes.  Typical full text cache
+# (ASCII, output about as long as input): 8192 x 1024 x 2 bytes = 16 MiB, plus
+# per-object overhead.  Worst case per text cache:
+# MAX_ENTRIES x MAX_LENGTH x (1 + output/input ratio) x 4 bytes.  The key cache
+# holds names only (its answer is a bool): at most 4096 x 256 x 4 bytes = 4 MiB.
+_TEXT_CACHE_MAX_ENTRIES = 8192
+_TEXT_CACHE_MAX_LENGTH = 1024
+_KEY_CACHE_MAX_ENTRIES = 4096
+_KEY_CACHE_MAX_LENGTH = 256
 
 
 def _public_evidence(value: Any) -> Any:
@@ -57,7 +78,7 @@ def _sanitize_public_evidence(value: Any) -> Any:
 
 def _sanitize_public_field(key: str, value: Any) -> Any:
     lowered = key.lower()
-    if is_sensitive_key(key):
+    if _is_sensitive_key(key):
         return "[redacted]" if value not in (None, "") else value
     if lowered == "message" or lowered.endswith("_message"):
         return _public_message(value)
@@ -77,7 +98,29 @@ def _sanitize_public_field(key: str, value: Any) -> Any:
     return _sanitize_public_evidence(value)
 
 
+def _is_sensitive_key(key: str) -> bool:
+    if type(key) is str and len(key) <= _KEY_CACHE_MAX_LENGTH:
+        return _sensitive_key_cache(key)
+    return is_sensitive_key(key)
+
+
+@functools.lru_cache(maxsize=_KEY_CACHE_MAX_ENTRIES)
+def _sensitive_key_cache(key: str) -> bool:
+    return is_sensitive_key(key)
+
+
 def _sanitize_public_scalar(value: Any) -> Any:
+    if type(value) is str and len(value) <= _TEXT_CACHE_MAX_LENGTH:
+        return _public_scalar_cache(value)
+    return _sanitize_public_scalar_uncached(value)
+
+
+@functools.lru_cache(maxsize=_TEXT_CACHE_MAX_ENTRIES)
+def _public_scalar_cache(value: str) -> Any:
+    return _sanitize_public_scalar_uncached(value)
+
+
+def _sanitize_public_scalar_uncached(value: Any) -> Any:
     if not isinstance(value, str):
         return value
     sanitized = _sanitize_public_path_or_uri_scalar(value)
@@ -134,8 +177,27 @@ def _public_message(value: Any) -> Any:
 
 
 def _sanitize_public_text(value: str) -> str:
+    if type(value) is str and len(value) <= _TEXT_CACHE_MAX_LENGTH:
+        return _public_text_cache(value)
+    return _sanitize_public_text_uncached(value)
+
+
+@functools.lru_cache(maxsize=_TEXT_CACHE_MAX_ENTRIES)
+def _public_text_cache(value: str) -> str:
+    return _sanitize_public_text_uncached(value)
+
+
+def _sanitize_public_text_uncached(value: str) -> str:
     redacted = _safe_error_message(value)
     return _sanitize_public_text_tokens(redacted)
+
+
+def _clear_sanitiser_caches() -> None:
+    """Forget every remembered sanitiser answer (for tests)."""
+
+    _public_text_cache.cache_clear()
+    _public_scalar_cache.cache_clear()
+    _sensitive_key_cache.cache_clear()
 
 
 def _sanitize_public_text_tokens(value: str) -> str:

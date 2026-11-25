@@ -11,6 +11,7 @@ from packages.common.source_identity import normalize_source_id
 from services.orchestrator import scheduler_discovery_evidence as _evidence
 from services.orchestrator import scheduler_generation as _scheduler_generation
 from services.orchestrator import scheduler_lineage as _scheduler_lineage
+from services.orchestrator import source_cycle_raw_manifest as _source_cycle_raw_manifest
 from services.orchestrator.scheduler_discovery_evidence import (  # noqa: F401
     SOURCE_DISCOVERY_SENSITIVE_KEY_RE,
     SOURCE_DISCOVERY_SENSITIVE_TEXT_RE,
@@ -317,6 +318,10 @@ def lineage_scoped_out_evidence(
     ]
 
 
+# #3236: one cycle's scoring is one readiness scope (used as a decorator, the
+# scope is opened afresh on every call and covers the whole body): the
+# per-model candidate states share one raw-manifest readiness computation.
+@_source_cycle_raw_manifest.nfs_raw_manifest_readiness_scope()
 def _cycle_completion_verdict(
     context: SchedulerDiscoveryContext,
     discovery: CycleDiscovery,
