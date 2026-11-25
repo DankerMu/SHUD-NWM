@@ -5799,6 +5799,24 @@ def _capture_sbatch(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
     return submissions
 
 
+# Production submits a stage's job type under the stage's own name (forcing ->
+# produce_forcing_array, forecast -> run_shud_forecast_array, analysis_run ->
+# run_shud_analysis), so a resolver keyed by the stage name instead of the job
+# type must not pass these tests.
+_PRODUCTION_STAGE_BY_JOB_TYPE = {stage.job_type: stage.stage for stage in (*M3_STAGES, *ANALYSIS_STAGES)}
+
+
+def _production_stage_manifest(tmp_path: Path, job_type: str, model_id: str) -> dict[str, object]:
+    stage_name = _PRODUCTION_STAGE_BY_JOB_TYPE[job_type]
+    assert stage_name != job_type
+    return {
+        **_production_manifest(tmp_path, job_type),
+        "model_id": model_id,
+        "stage": stage_name,
+        "stage_name": stage_name,
+    }
+
+
 def _submit_job_type_array(
     gateway: RealSlurmGateway, tmp_path: Path, job_type: str, model_id: str
 ) -> SlurmJobRecord:
@@ -5810,9 +5828,9 @@ def _submit_job_type_array(
     return gateway.submit_job_array(
         job_type=job_type,
         cycle_id="cycle_001",
-        stage_name=job_type,
+        stage_name=_PRODUCTION_STAGE_BY_JOB_TYPE[job_type],
         tasks=tasks,
-        manifest={**_production_manifest(tmp_path, job_type), "model_id": model_id},
+        manifest=_production_stage_manifest(tmp_path, job_type, model_id),
     )
 
 
@@ -5867,7 +5885,7 @@ def test_job_type_override_applies_on_single_submit_render(
             run_id="run_001",
             model_id=model_id,
             job_type="run_shud_analysis",
-            manifest={**_production_manifest(tmp_path, "run_shud_analysis"), "model_id": model_id},
+            manifest=_production_stage_manifest(tmp_path, "run_shud_analysis", model_id),
         )
     )
 

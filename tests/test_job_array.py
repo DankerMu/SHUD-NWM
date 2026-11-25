@@ -754,6 +754,21 @@ def test_job_type_resolution_ignores_non_mapping_in_memory_entries(job_type_over
     assert resolve_model_resource_profile(profiles, "hlj_dg", job_type="produce_forcing_array") == _JT_HLJ_RESOLVED
 
 
+@pytest.mark.parametrize(
+    ("entry_key", "job_type"),
+    [
+        ("save_state_snapshot_array", "save_state_snapshot"),
+        ("convert_canonical", "analysis_convert_canonical"),
+    ],
+)
+def test_job_type_resolution_matches_entry_key_exactly(entry_key, job_type):
+    profiles = _jt_profiles({entry_key: {"cpus_per_task": 1, "shud_threads": 1}})
+
+    assert resolve_model_resource_profile(profiles, "hlj_dg", job_type=job_type) == _JT_HLJ_RESOLVED
+    assert resolve_model_resource_profile(profiles, "model_001", job_type=job_type) == _JT_DEFAULT
+    assert resolve_model_resource_profile(profiles, "hlj_dg", job_type=entry_key)["cpus_per_task"] == 1
+
+
 _JT_LOADER_PREFIX = """
 resource_profiles:
   default:
@@ -876,6 +891,13 @@ _JT_REFUSED_FILES = {
         '  job_type_overrides:\n    "forcing;rm -rf":\n      max_concurrent: 2\n',
         ["[redacted]", "max_concurrent"],
         "forcing;rm -rf",
+    ),
+    # The spec's literal scenario: no shud_threads either, and the closed key set
+    # (not the cores/threads pair) is what must be reported.
+    "spec_max_concurrent_without_threads": (
+        "  job_type_overrides:\n    produce_forcing_array:\n      cpus_per_task: 1\n      max_concurrent: 8\n",
+        ["produce_forcing_array", "max_concurrent"],
+        None,
     ),
     "over_limit_cpus": (
         "  job_type_overrides:\n    produce_forcing_array:\n      cpus_per_task: 9999\n      shud_threads: 1\n",
