@@ -537,7 +537,10 @@ def test_the_root_given_as_first_argument_replaces_the_scripts_own_checkout(harn
     [
         pytest.param(HEAD_MOVED - 1, False, id="head-moved-after-start"),
         pytest.param(HEAD_MOVED, False, id="head-moved-in-the-same-second"),
-        pytest.param(HEAD_MOVED + 1, True, id="started-one-second-after-head-moved"),
+        # `now - etimes` can be one second late: start 100.9, HEAD move 100.95, run at
+        # 201.1 derives 101. One second after the move is therefore not proof.
+        pytest.param(HEAD_MOVED + 1, False, id="started-one-second-after-head-moved"),
+        pytest.param(HEAD_MOVED + 2, True, id="started-two-seconds-after-head-moved"),
     ],
 )
 def test_a_process_older_than_the_checkout_does_not_pass(harness: Harness, started: int, passes: bool) -> None:
@@ -567,7 +570,8 @@ def test_a_head_move_after_the_process_started_does_not_pass(harness: Harness) -
     [
         pytest.param(PROCESS_STARTED + 1, False, id="env-modified-after-start"),
         pytest.param(PROCESS_STARTED, False, id="env-modified-in-the-same-second"),
-        pytest.param(PROCESS_STARTED - 1, True, id="started-one-second-after-env-modified"),
+        pytest.param(PROCESS_STARTED - 1, False, id="started-one-second-after-env-modified"),
+        pytest.param(PROCESS_STARTED - 2, True, id="started-two-seconds-after-env-modified"),
     ],
 )
 def test_a_process_older_than_its_env_file_does_not_pass(

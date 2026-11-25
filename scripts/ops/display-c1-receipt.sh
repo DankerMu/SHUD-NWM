@@ -34,9 +34,13 @@ REPO_ROOT=$(CDPATH='' cd -- "$root_arg" 2>/dev/null && pwd)
 [ -n "$REPO_ROOT" ] || REPO_ROOT=$root_arg
 ENV_FILE="$REPO_ROOT/infra/env/display.env"
 
-# The observation clock is read once, before the process's elapsed time, so the
-# derived start time can only be early, never late (a tick between the two reads
-# makes the staleness check stricter, not looser).
+# The start time is derived as now - etimes, both floored to whole seconds, so it
+# can be one second late (start 100.9, now 201.1: 201 - 100 = 101 although the
+# process started in second 100) as well as early. Reading the clock once, before
+# the elapsed time, only rules out a tick between the two reads making it later.
+# A claim that the process started after an event therefore needs the derived start
+# to exceed the event's second by more than this margin.
+START_ROUNDING_MARGIN=1
 now=$(date +%s 2>/dev/null)
 case "$now" in '' | *[!0-9]*) now= ;; esac
 
@@ -211,9 +215,9 @@ elif [ -z "$head_moved" ]; then
     reason="checkout reflog unreadable"
 elif [ -z "$env_modified" ]; then
     reason="env file modification time unreadable"
-elif [ "$process_started" -le "$head_moved" ]; then
+elif [ "$((process_started - START_ROUNDING_MARGIN))" -le "$head_moved" ]; then
     reason="main process started at or before the checkout's HEAD last moved"
-elif [ "$process_started" -le "$env_modified" ]; then
+elif [ "$((process_started - START_ROUNDING_MARGIN))" -le "$env_modified" ]; then
     reason="main process started at or before infra/env/display.env was last modified"
 fi
 add_claim process_loaded_head "$reason"
