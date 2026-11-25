@@ -23,6 +23,12 @@ SYSTEMD_DOWNLOAD_SERVICE = REPO_ROOT / "infra" / "systemd" / "nhms-node27-downlo
 SYSTEMD_DOWNLOAD_TIMER = REPO_ROOT / "infra" / "systemd" / "nhms-node27-download@.timer"
 
 
+@pytest.fixture(autouse=True)
+def _no_ambient_summary_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``main`` falls back to this key for its summary file; a shell value must not receive test summaries."""
+    monkeypatch.delenv("NODE27_DOWNLOAD_SUMMARY_PATH", raising=False)
+
+
 def _prepare_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[Path, Path, Path, Path]:
     object_store_root = tmp_path / "object-store"
     workspace_root = tmp_path / "workspace"
@@ -1280,6 +1286,38 @@ def test_blocked_multi_source_pass_releases_the_locks_it_took(
     _assert_lock_blocked(rc, summary)
     assert gfs_lock_free
     assert calls == []
+
+
+@pytest.mark.parametrize("held", ["gfs", "ifs"])
+def test_pass_without_source_is_blocked_by_either_lock(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str], held: str
+) -> None:
+    _prepare_env(monkeypatch, tmp_path)
+    monkeypatch.delenv("NHMS_NODE27_DOWNLOAD_SOURCES", raising=False)
+    calls: list[str] = []
+    monkeypatch.setattr(downloader, "run_source_download", _recording_download(calls))
+
+    with _held_lock(_source_lock_file(tmp_path, held)):
+        rc, summary, _rendered = _run_main(capsys, _lock_main_args(tmp_path))
+
+    _assert_lock_blocked(rc, summary)
+    assert calls == []
+
+
+def test_pass_without_source_runs_both_and_releases_both_locks(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _prepare_env(monkeypatch, tmp_path)
+    monkeypatch.delenv("NHMS_NODE27_DOWNLOAD_SOURCES", raising=False)
+    calls: list[str] = []
+    monkeypatch.setattr(downloader, "run_source_download", _recording_download(calls))
+
+    rc, summary, _rendered = _run_main(capsys, _lock_main_args(tmp_path))
+
+    assert (rc, summary["status"]) == (0, "completed")
+    assert calls == ["GFS", "IFS"]
+    assert _lock_is_free(_source_lock_file(tmp_path, "gfs"))
+    assert _lock_is_free(_source_lock_file(tmp_path, "ifs"))
 
 
 # The wrapper, run with bash against a temporary repository whose interpreter

@@ -42,6 +42,31 @@ tail -n 160 /home/nwm/node27-download-logs/download-ifs.log
 - 下载 summary 的 `cycle_time_selection` 为 `automatic`，cycle hour 在 `0,12`
   之内。
 
+从单一 unit（`nhms-node27-download.{service,timer}`，#3237 之前）切到按 source 的实例，
+顺序不能换：旧代码的 pass 锁的是 `NODE27_DOWNLOAD_LOCK_PATH` 本身，新代码锁的是它派生出的
+`.gfs` / `.ifs`，两者互不排斥，所以必须等旧 pass 结束再让新代码跑。
+
+```bash
+ssh -p 32099 nwm@210.77.77.27
+systemctl --user disable --now nhms-node27-download.timer
+# 等到 inactive 再继续；activating 表示还有 pass 在跑
+systemctl --user is-active nhms-node27-download.service
+cd /home/nwm/NWM && git status --porcelain && git pull --ff-only
+rm -f ~/.config/systemd/user/nhms-node27-download.service ~/.config/systemd/user/nhms-node27-download.timer
+install -m 644 'infra/systemd/nhms-node27-download@.service' 'infra/systemd/nhms-node27-download@.timer' ~/.config/systemd/user/
+# 在未跟踪的 infra/env/node27-download.env 里加一行 NODE27_DOWNLOAD_CYCLE_DELAY_HOURS_GFS=6（见模板）
+systemctl --user daemon-reload
+systemctl --user enable --now nhms-node27-download@GFS.timer nhms-node27-download@IFS.timer
+systemctl --user list-timers 'nhms-node27-download@*' --no-pager
+```
+
+- 旧 timer 留着不停的后果：它调用不带 source 的 wrapper，一个 pass 同时占两把锁、串行下两个
+  source，两个实例每次被挡都以 rc=2 结束。
+- 停用某个 source 的办法是停它的实例 timer。实例总是带 `--source` 运行，
+  `NHMS_NODE27_DOWNLOAD_SOURCES` 只影响不带 source 的手工 pass。
+- 手工 pass（`scripts/node27_download_once.sh [SOURCE]`）与同一 source 的实例 pass 互斥：
+  后到的一方以 `lock_blocked` 结束；不带 source 的手工 pass 需要两把锁都空闲。
+
 node-27 ingest 使用用户级 systemd timer 周期性启动 bounded autopipe pass：
 
 ```bash
