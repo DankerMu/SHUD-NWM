@@ -206,6 +206,8 @@ Slurm 计算节点不是第三个业务部署节点，但它是 22 计算控制�
 
 `infra/env/compute.env` 是已退役的 docker-e2e 产物，node-22 没有任何单元加载它；单元到环境文件的权威见 [`infra/env/README.md`](../../infra/env/README.md#node-22-unit--environmentfile-authority-1694)。
 
+下面这段是设计意图（见文首 banner），不是现行配置：现行 scheduler 是 DB-free 的，各单元实际加载的环境文件以上面的权威表为准。
+
 22 的环境文件需要配置 writer DB、workspace、object-store、published artifact 写入路径、scheduler
 lock/evidence/runtime/temp roots、非空 `NHMS_SCHEDULER_ALLOWED_ROOTS`、service role、
 source/model/basin filters、interval/max-pass bounds、Basins/model assets、Slurm Gateway 和资料源参数。
