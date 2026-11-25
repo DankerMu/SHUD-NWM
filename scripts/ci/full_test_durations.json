@@ -443,10 +443,6 @@
  "tests/test_timeseries_compression_fence_wire_site_invariant.py": 4.661,
  "tests/test_timeseries_compression_fence_writers.py": 0.617,
  "tests/test_timeseries_storage_schemas.py": 1.901,
- "tests/test_two_node_22_e2e.py": 0.0,
- "tests/test_two_node_docker_runbook_environment_invariant.py": 0.489,
- "tests/test_two_node_docker_runtime.py": 25.03,
- "tests/test_two_node_docker_source_trust.py": 0.686,
  "tests/test_variant_activation_cutover.py": 0.636,
  "tests/test_warm_start.py": 1.334,
  "tests/test_warm_start_chaining.py": 5.872

@@ -26064,11 +26064,10 @@ def test_orchestrator_config_parses_strict_forecast_warm_start_env(
 
 
 def test_compute_env_example_enables_strict_forecast_warm_start() -> None:
-    content = Path("infra/env/compute.example").read_text(encoding="utf-8")
+    # #3231: the scheduler's template; the compose-lane `compute.example` is deleted.
+    content = Path("infra/env/compute.scheduler-dbfree.env.example").read_text(encoding="utf-8")
 
-    assert "NHMS_REQUIRE_FORECAST_WARM_START=true" in content
-    assert "forbid cold starts" in content
-    assert "prefer a compatible warm state" in content
+    assert "NHMS_REQUIRE_FORECAST_WARM_START=true" in content.splitlines()
 
 
 @pytest.mark.parametrize(

@@ -1,19 +1,14 @@
-# 27-side readonly display example for infra/compose.display.yml.
-# Use with:
-#   docker compose --env-file infra/env/display.example -f infra/compose.display.yml config
+# Template of infra/env/display.env, the env file of the node-27 readonly display
+# API: infra/systemd/nhms-display-api.service sources it, and
+# scripts/ops/start-display-api.sh installs and restarts that unit.
 
-NHMS_APP_IMAGE=nhms-app
-NHMS_IMAGE_TAG=m22-placeholder
-NHMS_CONTAINER_UID=1000
-NHMS_CONTAINER_GID=1000
 NHMS_DISPLAY_API_PORT=8080
 NHMS_DISPLAY_WORKERS=2
 # node-27 production: two workers × (pool 8 + overflow 8) = 32 possible
 # display connections. The per-worker cold cap 8 leaves eight connections for
 # cache hits, catalog, and brief identity/cache work; same-key waiters hold no
 # checkout.
-# The active production path sources `display.env` wholesale; compose currently
-# enumerates its environment keys and does not consume pool tuning.
+# The active production path sources `display.env` wholesale.
 NHMS_DISPLAY_DB_POOL_SIZE=8
 NHMS_DISPLAY_DB_MAX_OVERFLOW=8
 NHMS_DISPLAY_MVT_COLD_LIMIT=8
@@ -21,7 +16,6 @@ NHMS_DISPLAY_MVT_COLD_LIMIT=8
 NHMS_SERVICE_ROLE=display_readonly
 NHMS_REQUIRE_SERVICE_ROLE=true
 NHMS_AUTH_MODE=production
-UV_CACHE_DIR=/tmp/nhms-uv-cache
 NHMS_DISPLAY_DISABLE_CONTROL_MUTATIONS=true
 NHMS_DISPLAY_ALLOW_LOCAL_FILE_LOGS=false
 
@@ -29,11 +23,10 @@ NHMS_DISPLAY_ALLOW_LOCAL_FILE_LOGS=false
 # catalog cache refresh (header `x-nhms-cache-warm: <token>`, compared with
 # hmac.compare_digest). Its only legitimate holder is the node-27 prewarm, so
 # infra/env/node27-ingest.env MUST carry the SAME value. The key below is
-# commented out on purpose: unset is the safe default, and this template is
-# installed verbatim by the bootstrap in infra/README.two-node-docker.md -- an
-# active placeholder here would ship a repo-public value as the real token to
-# every deployment that forgot to edit it, silently re-opening #2079 with no
-# warning and no validator finding. Unset means no header value forces a refresh
+# commented out on purpose: unset is the safe default, and an active
+# placeholder here would ship a repo-public value as the real token to every
+# display.env copied from this template without an edit, silently re-opening
+# #2079 with no warning. Unset means no header value forces a refresh
 # and only the in-process warmer (an ASGI scope mark) can, at the cost of a
 # <=45 s stale discovery window. Generate a real value with
 # `openssl rand -hex 32`; never deploy a placeholder, and never put the real
@@ -44,14 +37,9 @@ NHMS_DISPLAY_ALLOW_LOCAL_FILE_LOGS=false
 # leaves the host -- and a non-latin-1 token can never match on this side
 # anyway, because Starlette decodes header values as latin-1. Not validated at
 # runtime (#2079 design D3).
-# NOTE (known gap, #2079 design D5): infra/compose.display.yml enumerates its
-# `environment:` keys one by one and does NOT pass this one through. The current
-# deployment path is not compose -- it is `set -a; . display.env` from
+# The deployment path is `set -a; . display.env` from
 # infra/systemd/nhms-display-api.service / scripts/ops/start-display-api.sh,
-# which injects the whole file. A future compose deployment must add the
-# passthrough AND the key to DISPLAY_AUDITED_INTERPOLATION_ENV in
-# scripts/validate_two_node_docker_runtime.py, or the token will be declared
-# here, never reach the app, and prewarm will silently degrade.
+# which injects the whole file.
 # NHMS_DISPLAY_CACHE_WARM_TOKEN=
 
 # Enable readonly live PostGIS MVT overlays. This does not grant write/control
@@ -81,10 +69,9 @@ DATABASE_URL=postgresql://nhms_display_ro:change-me@db.internal.example:5432/nhm
 # Readonly display object-store root for disk-resident SHUD station forcing CSVs.
 OBJECT_STORE_ROOT=/home/ghdc/nwm/object-store
 
-# Host source is compose-only. 22 sees the same exported directory as
-# /ghdc/data/nwm/published; 27 reads it locally from /home/ghdc/nwm/published.
-NHMS_PUBLISHED_ARTIFACT_HOST_ROOT=/home/ghdc/nwm/published
-NHMS_PUBLISHED_ARTIFACT_ROOT=/var/lib/nhms/published
+# 22 sees the same exported directory as /ghdc/data/nwm/published; 27 reads it
+# locally from /home/ghdc/nwm/published.
+NHMS_PUBLISHED_ARTIFACT_ROOT=/home/ghdc/nwm/published
 NHMS_PUBLISHED_ARTIFACT_URI_PREFIX=published://
 NHMS_PUBLISHED_ARTIFACT_S3_BUCKET=nhms-prod
 NHMS_PUBLISHED_ARTIFACT_S3_PREFIX=published

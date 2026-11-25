@@ -56,7 +56,6 @@ REPORT_VISIBLE_IGNORED_ROOTS = (
 )
 REPORT_VISIBLE_IGNORED_FILES = frozenset(
     {
-        ".dockerignore",
         ".gitignore",
         "Makefile",
         "apps/frontend/src/api/types.ts",

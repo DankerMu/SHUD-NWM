@@ -1,7 +1,7 @@
 # node22-env-hygiene Specification
 
 ## Purpose
-Backup copies of node-22 env files have a declared home outside `infra/env/`, the retired compose lane is marked superseded where the runbook still names it, the live scheduler env drift is classified against the loader's real defaults, and scheduler work directories do not pollute `git status`.
+Backup copies of node-22 env files have a declared home outside `infra/env/`, the live scheduler env drift is classified against the loader's real defaults, and scheduler work directories do not pollute `git status`.
 
 ## Requirements
 
@@ -11,17 +11,6 @@ Backup copies of node-22 env files have a declared home outside `infra/env/`, th
 #### Scenario: Scheduler work files do not appear in status
 - **WHEN** `git check-ignore -q .nhms-work/scheduler/basins-file-registry-publish/basins-inventory.json` runs in a checkout
 - **THEN** it exits 0
-
-### Requirement: The compose-lane entry for node-22 SHALL be marked superseded with a complete section marker
-`docs/runbooks/two-node-deployment-overview.md` §5.2 SHALL contain, above the compose-lane list, one sentence stating that `infra/env/compute.env` is a retired docker-e2e artifact that no node-22 unit loads and that the unit-to-env authority is `infra/env/README.md`, followed by a complete DOC_STATUS section marker (`status: superseded`, `current_authority`, `superseded_by`, `status_since`, `archive_scope: section`, `retained_for`); the compose-lane list SHALL remain inside the marked section unchanged. A test SHALL parse the file with `_section_archive_status_marker_ranges` and assert exactly one complete `section` range whose span covers the compose-lane list.
-
-#### Scenario: Marker is complete and covers the list
-- **WHEN** `tests/test_node22_runbook_section_markers.py` runs
-- **THEN** it finds one complete section range in §5.2 covering the line that names `infra/env/compute.env` in the list
-
-#### Scenario: Governance docs gate still passes
-- **WHEN** `uv run pytest -q tests/test_entropy_audit_report_contract.py` runs
-- **THEN** it passes
 
 ### Requirement: The live scheduler env drift SHALL be classified against the loader's effective defaults
 `infra/env/README.md` SHALL contain, outside the required-key block, a table "compute.scheduler-dbfree.env live-drift classification (2026-10-16)" with one row per key the live node-22 file lacked at classification time (`NHMS_SCHEDULER_LEASE_GUARD_MODE`, `NHMS_SCHEDULER_RECONCILE_ABSENCE_SECONDS`, `NHMS_SCHEDULER_IDENTITY_BLOCKED_STREAK_LIMIT`, `NHMS_SCHEDULER_NO_PROGRESS_CIRCUIT_PASSES`, `NHMS_SCHEDULER_TIMING_LEVEL`, `NHMS_SCHEDULER_EVIDENCE_RETENTION_DAYS`, `NHMS_SCHEDULER_EVIDENCE_MAX_MB`) and columns key / status / effective value when unset / operator action, where status is `required`, `optional (effective default: <value>)` or `optional, example differs (example: <v>, default: <v>)`, and "effective value when unset" is what the scheduler config loader applies when only that key is absent. A row whose key has since been set live SHALL carry the bare assignment of the live value as its operator action, with the date recorded in a note under the table. Since #3146, `NHMS_SCHEDULER_LEASE_GUARD_MODE` is set live to `atomic` (the example value), and the legacy `NHMS_SCHEDULER_FILE_LOCK_GUARD_MODE` is no longer honoured: a legacy-only configuration fails closed. The required-key block SHALL be unchanged. `tests/test_node22_scheduler_env_drift_table.py` SHALL assert every table key exists in `compute.scheduler-dbfree.env.example` and that each stated effective default equals the loader's value with that key removed from the environment; keys classified `required` SHALL have an operator step in `docs/runbooks/node22-control-plane-manual-recovery.md`.

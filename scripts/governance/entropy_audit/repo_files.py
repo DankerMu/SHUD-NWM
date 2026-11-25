@@ -121,7 +121,7 @@ def _repo_relative_path_is_skipped(relative: Path) -> bool:
 def _has_scannable_text_name(path: Path) -> bool:
     return (
         path.suffix in TEXT_EXTENSIONS
-        or path.name in {"Makefile", ".gitignore", ".dockerignore", ".env"}
+        or path.name in {"Makefile", ".gitignore", ".env"}
         or path.name.startswith(".env.")
     )
 

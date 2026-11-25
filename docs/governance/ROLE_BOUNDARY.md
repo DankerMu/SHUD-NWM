@@ -83,8 +83,7 @@ Representative active paths:
   `workers/output_parser`, `workers/flood_frequency`, and
   `workers/model_registry`.
 - `services/tile_publisher` and `services/production_closure`.
-- `infra/compose.compute.yml`, `infra/env/compute.example`, `infra/sbatch`,
-  and compute-side systemd/runbook assets.
+- `infra/sbatch` and compute-side systemd/runbook assets.
 
 Legacy Slurm template note: the retired Slurm template placeholder directory
 was removed from the active tree by #363. Legacy template names and migration
@@ -120,15 +119,12 @@ Verification oracle:
 
 - `ServiceRole` and `RuntimeConfig` in `apps/api/runtime_mode.py`.
 - Full API route inventory in `apps/api/main.py`.
-- Compute env and compose identity in `infra/env/compute.example` and
-  `infra/compose.compute.yml`.
 - Recursive diagnostic-token scans of production Python sources under
   `services/orchestrator/**/*.py`.
 
 Current guard tests:
 
 - `tests/test_runtime_mode.py`
-- `tests/test_two_node_docker_runtime.py`
 - `tests/test_qhh_scripts_static.py`
 - `tests/test_retry_cancel_consistency.py`
 - `tests/test_monitoring_api.py`
@@ -151,9 +147,9 @@ Representative active paths:
   `NHMS_MVT_FILE_CACHE_DIR/precip/`. `basemap.py` is the GET-only Tianditu
   tile proxy described under allowed mutations below.
 - Frontend display assets under `apps/frontend`.
-- Display deployment inputs `infra/compose.display.yml`,
-  `infra/env/display.example`, `infra/systemd/nhms-display-compose.service`,
-  and display runbooks under `docs/runbooks`.
+- Display deployment inputs `infra/env/display.example`,
+  `infra/systemd/nhms-display-api.service`, and display runbooks under
+  `docs/runbooks`.
 
 Allowed mutations:
 
@@ -204,13 +200,11 @@ Verification oracle:
 - `display_boundary_blockers()` and `load_runtime_config()` in
   `apps/api/runtime_mode.py`.
 - Display route inventory from `apps/api/main.py:create_app()`.
-- Display env/compose static checks in `scripts/validate_two_node_docker_runtime.py`.
 - Display fail-closed error contracts in `apps/api/routes/pipeline.py`.
 
 Current guard tests:
 
 - `tests/test_runtime_mode.py`
-- `tests/test_two_node_docker_runtime.py`
 - `tests/test_retry_cancel_consistency.py`
 - `tests/test_monitoring_api.py`
 - `tests/test_role_boundary_static.py`

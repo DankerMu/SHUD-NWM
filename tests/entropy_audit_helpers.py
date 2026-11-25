@@ -512,7 +512,6 @@ def _complete_historical_baseline_front_matter(body: str = "") -> str:
 def _setup_agent_artifact_drift(root: Path) -> None:
     _write(root / "docs/governance/DOC_STATUS.md", "Governed docs placeholder.\n")
     _write(root / ".gitignore", "# intentionally incomplete\n")
-    _write(root / ".dockerignore", "# intentionally incomplete\n")
     _write(root / "artifacts/leaked.txt", "generated\n")
     _init_git(root)
     run_fixture_git(root, "add", "artifacts/leaked.txt")
@@ -559,7 +558,6 @@ def _setup_clean_hard_gate_fixture(root: Path) -> None:
         .codex/evidence/
         apps/frontend/artifacts/**
         Root `artifacts/`
-        .dockerignore
         """,
     )
     _write(
@@ -568,14 +566,6 @@ def _setup_clean_hard_gate_fixture(root: Path) -> None:
         .codex/
         artifacts/
         apps/frontend/artifacts/
-        """,
-    )
-    _write(
-        root / ".dockerignore",
-        """
-        .agents
-        .codex
-        apps/frontend/artifacts
         """,
     )
     _init_git(root)

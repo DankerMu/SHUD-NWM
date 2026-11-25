@@ -1,10 +1,10 @@
-# Two-node Docker environment examples
+# Environment templates of the systemd units
 
-These files are examples for the M22 two-node Docker skeleton. They are safe
-enough to render with `docker compose config`, but they are not final production
-credentials.
+The `*.example` files in this directory are the tracked templates of the env
+files that the NHMS systemd user units on node-22 and node-27 load. They are not
+final production credentials.
 
-Real local `compute.env`, `display.env`, and readonly validation
+Real local `display.env` and readonly validation
 `display-readonly-secrets.env` files contain production secret-bearing values.
 
 **Slurm gateway service token contract (#1684):** the shared scheduler
@@ -17,31 +17,22 @@ the service account). The value is never committed, logged, serialized, passed
 via argv, or published in OpenAPI/evidence; only the variable name is
 checked-in.
 Create them with owner-only permissions, for example
-`install -m 0600 infra/env/compute.example infra/env/compute.env` or
 `install -m 0600 /dev/null infra/env/display-readonly-secrets.env`, or under
 `umask 077`, and keep them untracked. Before sourcing any local secret-source
 file, use a fail-closed guard that checks the file exists, verifies `stat -c
 '%a' <file>` is `600`, prints `BLOCKED:`, and exits before `source` if the
 check fails. A failed mode check blocks validation rather than producing
-evidence from a readable secret file. Before any direct Docker Compose command
-with `compute.env`/`display.env`, or before systemd install/start/restart, run
-the checked-in source-trust preflight
-`scripts/validate_two_node_docker_source_trust.py`; it checks checkout path
-components, compose/unit/env sources, trusted owners, symlinks, group/world
-writes, and role env mode `0600` before Docker can consume those files.
+evidence from a readable secret file.
 
 Required canonical published artifact variables:
 
-- `NHMS_PUBLISHED_ARTIFACT_ROOT`: in-container published artifact root used by
-  the app.
+- `NHMS_PUBLISHED_ARTIFACT_ROOT`: published artifact root used by the app.
 - `NHMS_PUBLISHED_ARTIFACT_URI_PREFIX`: canonical URI prefix, normally
   `published://`.
 - `NHMS_PUBLISHED_ARTIFACT_S3_BUCKET`: optional allowlisted bucket for published
   artifact reads.
 - `NHMS_PUBLISHED_ARTIFACT_S3_PREFIX`: optional allowlisted prefix for published
   artifact reads.
-- `NHMS_PUBLISHED_ARTIFACT_HOST_ROOT`: compose-only host bind source when it
-  differs from the in-container root.
 
 Do not use unprefixed `PUBLISHED_ARTIFACT_ROOT` as an app runtime variable.
 
@@ -80,49 +71,19 @@ Notes:
   the wrong answer for both units. `systemctl --user show <unit> -p
   EnvironmentFiles` is the authority; the drop-in procedure is
   `docs/runbooks/current-production-ops.md` §3.2.2.
-- **`infra/env/compute.env` is the compose-lane instance of `compute.example`.**
-  Verified on node-22 read-only 2026-09-02, receipt
+- **`infra/env/compute.env`, where it is still present on the host, is a
+  leftover of the docker/compose lane retired by #3231**: no unit reads it and
+  it has no tracked template. Verified on node-22 read-only 2026-09-02, receipt
   `.workplans/pr-1956/node22-compute-env-receipt.log`: no user systemd unit
   lists it in `EnvironmentFiles` (receipt `:1-13`, the five deployed units in the
-  first five rows of the table above), and `docker ps` on the node-22 login
-  host (`xnode`) returned no container rows at all, so no running container
-  reads it (receipt `:98-100`).
+  first five rows of the table above).
   Values in it — including basin roots and scheduler model/basin filters — are
   **not** the production scheduler's configuration and must not be quoted as
   such.
-  The `DATABASE_URL` it still carries on node-22 is the same superseded
-  compose-lane value: no node-22 unit or container loads this file, so the key
-  reaches no running process and does not breach the DB-free gate. It is kept,
-  not scrubbed, by owner decision (#3164); do not copy it into any env file a
-  unit does load.
-
-  It is not unreferenced, though. Who else names it:
-
-  - `infra/systemd/nhms-compute-compose.service` (tracked, **not installed** on
-    node-22: `LoadState=not-found` in both the user and the system manager,
-    receipt `:101-106`) and `infra/README.two-node-docker.md` describe the
-    compose lane.
-  - `scripts/validate_two_node_docker_source_trust.py:190` treats it as the
-    compute role env for source-trust checks, and
-    `tests/test_two_node_docker_source_trust.py:350`/`:392`/`:406`,
-    `tests/test_two_node_docker_runtime.py:3725`, and
-    `tests/test_two_node_docker_runbook_environment_invariant.py:548` exercise
-    the instance / the `compute.example` → `compute.env` install step.
-  - The `compute.example` template itself is parsed by
-    `tests/test_two_node_docker_runtime.py` (55 call sites, including the
-    display forbidden-mount fixture). **When you edit a value here, the local
-    oracle is the grep-derived consumer set** — everything that names the
-    template, from `grep -rln "compute\.example" tests/ scripts/` on 2026-09-02:
-    `tests/test_two_node_docker_runtime.py`,
-    `tests/test_two_node_docker_runbook_environment_invariant.py`,
-    `tests/test_role_boundary_static.py`,
-    `tests/test_slurm_gateway_deployment_contract.py`, and
-    `tests/test_production_scheduler.py` (a since-deleted two-node e2e evidence
-    test, removed by #3221, also named it), plus
-    `scripts/validate_two_node_docker_runtime.py:5374`, which uses the template
-    as the default `--compute-env` for the static check.
-    `tests/test_two_node_docker_source_trust.py` is **not** in that set (it reads
-    `compute.env`, not the template).
+  The `DATABASE_URL` it still carries on node-22 is the same superseded value:
+  no node-22 unit loads this file, so the key reaches no running process and
+  does not breach the DB-free gate. It is kept, not scrubbed, by owner decision
+  (#3164); do not copy it into any env file a unit does load.
 - `compute.host.env` is untracked with no committed template. That gap is
   recorded, not fixed, by #1694.
 - The scheduler's lag and lookback keys (`NHMS_SCHEDULER_CYCLE_LAG_HOURS`,
@@ -162,21 +123,13 @@ for the production scheduler are whatever `compute.scheduler-dbfree.env` says
 
 Compute role, node 22:
 
-The bullets below are the **compose-lane role contract** — what
-`compute.example` / `compute.env` and `infra/compose.compute.yml` must express.
-They are not a claim about which file a live node-22 unit loads; for that, the
-unit → EnvironmentFile table above is the authority.
+Which file a live node-22 unit loads is stated by the unit → EnvironmentFile
+table above.
 
-- Required: `NHMS_SERVICE_ROLE=compute_control`,
-  `NHMS_REQUIRE_SERVICE_ROLE=true`, writer-capable `DATABASE_URL` for
-  `compute-api` and rollback only,
-  `WORKSPACE_ROOT`, `OBJECT_STORE_ROOT`,
-  `NHMS_OBJECT_STORE_COPYBACK_ROOT`, `NHMS_PUBLISHED_ARTIFACT_ROOT`, and
-  `NHMS_PUBLISHED_ARTIFACT_HOST_ROOT`. `OBJECT_STORE_ROOT` is the
-  compute-visible staging root; `NHMS_OBJECT_STORE_COPYBACK_ROOT` is the
-  shared object-store mirror used after publish.
-- The production `scheduler-once` service is DB-free: `infra/compose.compute.yml`
-  does not pass `DATABASE_URL` to it. It must set every scheduler backend
+- `OBJECT_STORE_ROOT` is the compute-visible staging root;
+  `NHMS_OBJECT_STORE_COPYBACK_ROOT` is the shared object-store mirror used
+  after publish.
+- The production scheduler is DB-free. It must set every scheduler backend
   selector to `file` and the registry/readiness/journal/state-index path
   variables. DB-free is the scheduler's only mode (#3255), so
   `NHMS_SCHEDULER_DB_FREE_REQUIRED` no longer switches it; the templates keep
@@ -185,7 +138,7 @@ unit → EnvironmentFile table above is the authority.
   the DB-free worker switches into the Slurm job env). On the
   live node-22 units those variables come from `compute.scheduler-dbfree.env`
   (tracked template `compute.scheduler-dbfree.env.example`), per the table
-  above; `compute.example` carries the same key names for the compose lane only.
+  above.
   The live file is untracked, so the template is *not* evidence for its
   contents. Read on node-22 2026-09-10 (`-rw-------` `frd_muziyao:huser`):
   `:13 OBJECT_STORE_ROOT=/scratch/frd_muziyao/nhms-prod/object-store`,
@@ -194,8 +147,8 @@ unit → EnvironmentFile table above is the authority.
   `docs/runbooks/current-production-ops.md` §5.3 depends on. Same scan: only
   `compute.host.env`, `compute.replay.env` and `compute.scheduler-dbfree.env`
   carry `NHMS_OBJECT_STORE_COPYBACK_ROOT`.
-  `DATABASE_URL` belongs to the compose lane's `compute-api` or to an explicit
-  archived rollback drill — and the live `nhms-compute-api.service` does not load
+  `DATABASE_URL` belongs to an explicit archived rollback drill — and the live
+  `nhms-compute-api.service` does not load
   `compute.env` at all; its only `EnvironmentFile` is the untracked
   `compute.host.env` (receipt `:9-10`). Node-22 `:55433` is stopped/archived and
   is not scheduler runtime env.
@@ -203,8 +156,7 @@ unit → EnvironmentFile table above is the authority.
   (`compute.scheduler-dbfree.env`, referenced by systemd `EnvironmentFile=`)
   has exactly one tracked source: `compute.scheduler-dbfree.env.example`.
   Its required key set is the union of two layers, both carried by that
-  single template — do not source `compute.example` into the scheduler env
-  (it carries `DATABASE_URL`, which violates the DB-free gate):
+  single template:
   - scheduler keys: lock/state/registry/journal/evidence/allow-list and
     business-scope variables (`NHMS_SCHEDULER_*`);
   - pipeline runtime roots: `WORKSPACE_ROOT`, `OBJECT_STORE_ROOT`,
@@ -416,12 +368,9 @@ SLURM_GATEWAY_BACKEND=slurm
   one of those approved roots. Lock and evidence roots must be under
   `WORKSPACE_ROOT`; explicit
   `--workspace-root`, `--lock-path`, and `--evidence-dir` are diagnostic
-  compatibility, not the compute scheduler-once proof path.
+  compatibility, not the scheduler's proof path.
 - Allowed only on compute: Slurm gateway settings, writable workspace,
   Basins/model asset paths, and `SHUD_EXECUTABLE`.
-- The compute compose has no published host port by default. Keep any future
-  control API or Slurm gateway listener on localhost or an internal control
-  network.
 
 Display role, node 27:
 
@@ -429,67 +378,23 @@ Display role, node 27:
   `NHMS_REQUIRE_SERVICE_ROLE=true`, `NHMS_AUTH_MODE=production`,
   `NHMS_DISPLAY_DISABLE_CONTROL_MUTATIONS=true`,
   `NHMS_DISPLAY_ALLOW_LOCAL_FILE_LOGS=false`, readonly `DATABASE_URL`, and a
-  readonly `OBJECT_STORE_ROOT`, plus readonly published artifact and
-  object-store mounts.
-- Forbidden env keys must match `infra/docker/entrypoint.sh` and
-  `scripts/validate_two_node_docker_runtime.py`: `SLURM_GATEWAY_URL`,
-  `SLURM_GATEWAY_BACKEND`, `SLURM_GATEWAY_TEMPLATE_DIR`,
+  readonly `OBJECT_STORE_ROOT`.
+- Keys the display role refuses at startup (owner: `apps/api/runtime_mode.py`):
+  `SLURM_GATEWAY_URL`, `SLURM_GATEWAY_BACKEND`, `SLURM_GATEWAY_TEMPLATE_DIR`,
   `SLURM_GATEWAY_WORKSPACE_DIR`, `WORKSPACE_ROOT`, `RUN_WORKSPACE_ROOT`,
   `SHARED_LOG_ROOT`, `NHMS_OBJECT_STORE_COPYBACK_ROOT`,
   `NHMS_SCHEDULER_LOCK_ROOT`, `NHMS_SCHEDULER_EVIDENCE_ROOT`,
   `NHMS_SCHEDULER_RUNTIME_ROOT`, `NHMS_SCHEDULER_TEMP_ROOT`,
   `NHMS_BASINS_ROOT`, `NHMS_MODEL_ASSET_ROOT`, `SHUD_EXECUTABLE`,
   `MUNGE_SOCKET`, `MUNGE_KEY`, and `DOCKER_HOST`.
-- Forbidden container/host surfaces: `/etc/slurm`, `/run/munge`,
-  `/var/run/munge`, `/etc/munge`, `munge.key`, `.nhms-runs`,
-  `/run/docker.sock`, `/var/run/docker.sock`, and 22 private `/scratch` mounts.
-- The display compose filesystem surface is a strict allowlist: exactly one
-  `type: bind` mount from `NHMS_PUBLISHED_ARTIFACT_HOST_ROOT` to
-  `NHMS_PUBLISHED_ARTIFACT_ROOT`, and one `type: bind` mount from
-  `OBJECT_STORE_ROOT` to `OBJECT_STORE_ROOT`, both marked read-only. Extra binds, named
-  volumes, relative bind sources, local named-volume bind devices, and tmpfs
-  entries below the published artifact root are validation failures. Display
-  `configs`, `secrets`, `deploy`, `devices`, `device_cgroup_rules`, and
-  `device_requests` are not allowed.
-- The display service must keep `read_only: true`, `cap_drop: [ALL]`, and
-  exactly `security_opt: [no-new-privileges:true]` as literal compose values.
-- Run static validation from the same shell used for compose rendering. For
-  each role, every compose interpolation variable must be declared in that
-  role's env file and must be part of the approved role contract. Ambient
-  process environment overrides for any approved compose interpolation variable
-  are static failures when the process value differs from the env-file value.
-  This covers mount roots, image/tag/user/port variables, `DATABASE_URL`,
-  `NHMS_AUTH_MODE`, published artifact metadata, object-store settings,
-  and role/safety flags. Display audited runtime env keys must be literal
-  values or interpolate through their same canonical env key; null imports and
-  alias variables such as `DISPLAY_DATABASE_URL` are rejected.
-
-Validation commands:
-
-```bash
-uv run python scripts/validate_two_node_docker_source_trust.py \
-  --checkout-root "$PWD" \
-  --trust-root "$(dirname "$PWD")" \
-  --evidence-root artifacts/two-node-e2e/source-trust \
-  --trusted-owner "$(id -un)" \
-  --role compute --role display
-uv run python scripts/validate_two_node_docker_runtime.py static
-uv run python scripts/validate_two_node_docker_runtime.py preflight
-docker compose --env-file infra/env/compute.example -f infra/compose.compute.yml config
-docker compose --env-file infra/env/display.example -f infra/compose.display.yml config
-```
-
-When `TMPDIR` is unset, preflight uses `artifacts/tmp` in this repository.
-If `TMPDIR` is set explicitly, it must point under this repository's
-`artifacts/` tree or under `/scratch/frd_muziyao` outside this checkout.
 
 All generated validation evidence must stay under `artifacts/` in this
 repository or under `/scratch/frd_muziyao` outside this checkout. Do not write
 reports or evidence into `infra/env/`; real local env files such as
 `compute.env`, `display.env`, `display-readonly-secrets.env`, and `local.env`
 are intentionally ignored while `*.example` and this README remain trackable.
-`infra/docker-compose.dev.yml` remains a local development dependency stack and
-must not be used as either production two-node compose file.
+`infra/docker-compose.dev.yml` remains a local development dependency stack,
+not a production deployment.
 
 Node-27 ingest role:
 

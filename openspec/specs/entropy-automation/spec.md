@@ -42,7 +42,7 @@ After baseline cleanup, selected stable invariants SHALL be eligible for hard-fa
 This requirement is owned by Governance-4D (#374), not Governance-4A (#371).
 
 #### Scenario: display env includes compute-only env
-- **WHEN** a display env or compose file contains compute-only env such as `WORKSPACE_ROOT`, `SHUD_EXECUTABLE`, or `SLURM_GATEWAY_URL`
+- **WHEN** a display env file contains compute-only env such as `WORKSPACE_ROOT`, `SHUD_EXECUTABLE`, or `SLURM_GATEWAY_URL`
 - **THEN** the hard-gate mode fails the check
 
 #### Scenario: live e2e uses broad API mock

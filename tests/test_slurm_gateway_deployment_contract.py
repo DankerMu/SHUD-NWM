@@ -247,10 +247,7 @@ def test_generic_unit_has_no_inline_credential_value() -> None:
 
 
 def test_env_examples_contain_no_credential_value() -> None:
-    for relative in (
-        "infra/env/compute.example",
-        "infra/env/compute.scheduler-dbfree.env.example",
-    ):
+    for relative in ("infra/env/compute.scheduler-dbfree.env.example",):
         text = _read(relative)
         for line in text.splitlines():
             stripped = line.strip()
@@ -968,7 +965,6 @@ def test_no_tracked_producer_file_contains_a_literal_token_value() -> None:
     """
     surfaces = (
         GATEWAY_UNIT,
-        "infra/env/compute.example",
         "infra/env/compute.scheduler-dbfree.env.example",
         "infra/env/README.md",
         # #1103: the whole production-ops tree, so a literal token written into

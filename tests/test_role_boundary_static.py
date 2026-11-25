@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import ast
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
+import pytest
 from fastapi.routing import APIRoute
 from starlette.routing import Mount
 
@@ -31,6 +33,8 @@ DISPLAY_RUNTIME_FORBIDDEN_ENV_KEYS = frozenset(
     }
 )
 DISPLAY_ENV_TEMPLATE = REPO_ROOT / "infra/env/display.example"
+ENV_README = REPO_ROOT / "infra/env/README.md"
+REFUSED_KEYS_BULLET = "- Keys the display role refuses at startup (owner: `apps/api/runtime_mode.py`):"
 
 QHH_DIAGNOSTIC_TOKENS = (
     "run_qhh_cycle",
@@ -104,7 +108,10 @@ def test_display_env_template_is_a_configuration_the_runtime_guard_accepts() -> 
     assert template["NHMS_AUTH_MODE"] == "production"
     assert template["NHMS_DISPLAY_DISABLE_CONTROL_MUTATIONS"] == "true"
     assert template["NHMS_DISPLAY_ALLOW_LOCAL_FILE_LOGS"] == "false"
-    assert template["OBJECT_STORE_ROOT"].strip()
+    assert template["NHMS_DISPLAY_API_PORT"] == "8080"
+    # #3231: the storage roots are node-27 host paths, not paths inside a container.
+    assert template["OBJECT_STORE_ROOT"] == "/home/ghdc/nwm/object-store"
+    assert template["NHMS_PUBLISHED_ARTIFACT_ROOT"] == "/home/ghdc/nwm/published"
     assert DISPLAY_RUNTIME_FORBIDDEN_ENV_KEYS.isdisjoint(template)
 
     # The guard bites: the same assignments plus any one forbidden key yield exactly its blocker.
@@ -113,6 +120,45 @@ def test_display_env_template_is_a_configuration_the_runtime_guard_accepts() -> 
         assert [blocker.env_var for blocker in blockers] == [key], key
     reopened = runtime_mode.display_boundary_blockers({**template, "NHMS_DISPLAY_DISABLE_CONTROL_MUTATIONS": "false"})
     assert [blocker.code for blocker in reopened] == ["DISPLAY_CONTROL_MUTATIONS_FORBIDDEN"]
+
+
+def _readme_refused_display_keys(text: str) -> list[str]:
+    """The backticked keys of the README bullet that opens with ``REFUSED_KEYS_BULLET``."""
+
+    lines = text.splitlines()
+    starts = [index for index, line in enumerate(lines) if line.startswith(REFUSED_KEYS_BULLET)]
+    assert len(starts) == 1, f"expected one refused-keys bullet, found {len(starts)}"
+    bullet = [lines[starts[0]][len(REFUSED_KEYS_BULLET) :]]
+    for line in lines[starts[0] + 1 :]:
+        if not line.startswith("  "):
+            break
+        bullet.append(line)
+    return re.findall(r"`([^`]+)`", "\n".join(bullet))
+
+
+def test_env_readme_lists_exactly_the_keys_the_display_role_refuses() -> None:
+    """#3231 D5: the runtime guard owns the refused-key list; the README states the same set."""
+
+    keys = _readme_refused_display_keys(ENV_README.read_text(encoding="utf-8"))
+
+    assert len(keys) == len(set(keys)), keys
+    assert set(keys) == DISPLAY_RUNTIME_FORBIDDEN_ENV_KEYS
+
+
+@pytest.mark.parametrize(
+    ("unit", "role"),
+    [
+        ("infra/systemd/node22/nhms-compute-api.service", runtime_mode.ServiceRole.COMPUTE_CONTROL),
+        ("infra/systemd/node22/nhms-slurm-gateway.service", runtime_mode.ServiceRole.SLURM_GATEWAY),
+    ],
+)
+def test_compute_units_set_an_explicit_service_role(unit: str, role: runtime_mode.ServiceRole) -> None:
+    """#3231: the tracked compute API and Slurm gateway units fix ``NHMS_SERVICE_ROLE`` themselves."""
+
+    lines = (REPO_ROOT / unit).read_text(encoding="utf-8").splitlines()
+    assignments = [line.strip() for line in lines if line.strip().startswith("Environment=NHMS_SERVICE_ROLE=")]
+
+    assert assignments == [f"Environment=NHMS_SERVICE_ROLE={role.value}"]
 
 
 def test_standalone_slurm_gateway_exposes_only_gateway_routes() -> None:
@@ -287,7 +333,6 @@ def test_role_boundary_document_mentions_required_inventory_and_hard_gate() -> N
         "workers/",
         "apps/api/main.py",
         "services/slurm_gateway/app.py",
-        "infra/env/compute.example",
         "infra/env/display.example",
         "openapi/nhms.v1.yaml",
         "db/migrations",

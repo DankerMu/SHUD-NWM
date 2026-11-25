@@ -182,6 +182,7 @@ def _production_topology_scan_files(root: Path) -> Iterable[Path]:
     roots = [
         root / "scripts",
         root / "infra" / "env",
+        root / "infra" / "systemd",
         root / "instructions" / "agents",
         root / "docs" / "governance",
         root / "docs" / "runbooks",
@@ -191,7 +192,6 @@ def _production_topology_scan_files(root: Path) -> Iterable[Path]:
     files = [
         root / "AGENTS.md",
         root / "CLAUDE.md",
-        root / "infra" / "README.two-node-docker.md",
         root / "openspec" / "project-profile.md",
     ]
     yield from _iter_text_files(root, [*roots, *files])

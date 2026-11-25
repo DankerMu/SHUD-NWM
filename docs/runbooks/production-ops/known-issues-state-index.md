@@ -272,8 +272,7 @@ readlink -f "$NHMS_SCHEDULER_JOURNAL_ROOT"
 
 **处置**：把 `NHMS_SCHEDULER_JOURNAL_ROOT` 改成 `readlink -f` 的输出，重启
 `nhms-compute-scheduler.timer`。同一约束已写在
-`infra/env/compute.scheduler-dbfree.env.example`、`infra/env/compute.example`
-和 `infra/README.two-node-docker.md` 的该变量上方。
+`infra/env/compute.scheduler-dbfree.env.example` 的该变量上方。
 
 **本 PR 之后**：调度器在构造 file journal repository 时就验证该 root，不合规
 直接以 `FILE_JOURNAL_INVALID_ROOT: <message>` 写 stderr 并 exit 1（oneshot unit

@@ -73,7 +73,7 @@ bare `uv run` / `uv sync` belongs on this surface):
 /scratch/frd_muziyao/NWM/.venv/bin/python -m services.orchestrator.cli plan-production --continuous --submit --max-passes "$NHMS_SCHEDULER_MAX_PASSES"
 ```
 
-Production deployment variables live in `infra/env/compute.example`.
+Production deployment variables: see the unit-to-file table of `infra/env/README.md`.
 The generic production continuous daemon is
 `nhms-pipeline plan-production --continuous --submit`, which calls
 `services/orchestrator/scheduler.py` `run_continuous` and submits through the

@@ -404,7 +404,6 @@ def test_agent_artifact_ownership_skips_doc_status_symlink_to_outside_file(
                 ".codex/evidence/",
                 "apps/frontend/artifacts/**",
                 "Root `artifacts/`",
-                ".dockerignore",
             ]
         ),
         encoding="utf-8",
@@ -424,9 +423,26 @@ def test_agent_artifact_ownership_skips_doc_status_symlink_to_outside_file(
             ".codex/evidence/",
             "apps/frontend/artifacts/**",
             "Root `artifacts/`",
-            ".dockerignore",
         )
     }
+
+
+# `artifacts/` is a substring of `apps/frontend/artifacts/`, so the check cannot see it missing on its own;
+# the parametrized drift fixture covers a .gitignore without any of the three.
+@pytest.mark.parametrize("missing", [".codex/", "apps/frontend/artifacts/"])
+def test_agent_artifact_ignore_policy_flags_each_missing_gitignore_entry(tmp_path: Path, missing: str) -> None:
+    # #3231: the ignore check reads only .gitignore.
+    _setup_clean_hard_gate_fixture(tmp_path)
+    _write(
+        tmp_path / ".gitignore",
+        "".join(f"{entry}\n" for entry in (".codex/", "artifacts/", "apps/frontend/artifacts/") if entry != missing),
+    )
+
+    findings = _findings_by_check(tmp_path, "agent-artifact-ignore-policy")
+
+    assert [(finding["evidence_path"], finding["description"]) for finding in findings] == [
+        (".gitignore", f"Expected ignore token `{missing}` was not found in the relevant ignore file.")
+    ]
 
 
 @pytest.mark.parametrize(

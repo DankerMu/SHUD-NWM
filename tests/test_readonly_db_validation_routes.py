@@ -614,7 +614,6 @@ touch header-sentinel
 
 def test_docs_secret_source_snippets_use_fail_closed_guards() -> None:
     runbook = (REPO_ROOT / "docs" / "runbooks" / "two-node-production-e2e-plan.md").read_text(encoding="utf-8")
-    docker_readme = (REPO_ROOT / "infra" / "README.two-node-docker.md").read_text(encoding="utf-8")
     env_readme = (REPO_ROOT / "infra" / "env" / "README.md").read_text(encoding="utf-8")
 
     assert "READONLY_SECRET_SOURCE=infra/env/display-readonly-secrets.env" in runbook
@@ -624,37 +623,9 @@ def test_docs_secret_source_snippets_use_fail_closed_guards() -> None:
     assert "test -f infra/env/display-readonly-secrets.env || install -m 0600" not in runbook
     assert 'test "$(stat -c \'%a\' infra/env/display-readonly-secrets.env)" = "600"' not in runbook
 
-    assert "READONLY_SECRET_SOURCE=infra/env/display-readonly-secrets.env" in docker_readme
-    assert "block_operator_auth_source()" in docker_readme
-    assert "operator_auth_mode=\"$(stat -c '%a' infra/env/operator-auth.env)\" || \\" in docker_readme
-    assert 'if [ "$operator_auth_mode" != "600" ]; then' in docker_readme
-    assert 'block_operator_auth_source "infra/env/operator-auth.env must be mode 0600 before sourcing"' in docker_readme
-    assert 'test "$(stat -c \'%a\' infra/env/operator-auth.env)" = "600"' not in docker_readme
-    assert docker_readme.index("block_operator_auth_source()") < docker_readme.index(". infra/env/operator-auth.env")
-    assert docker_readme.index(". infra/env/operator-auth.env") < docker_readme.index("OPERATOR_CURL_HEADER")
-
     assert "use a fail-closed guard" in env_readme
     assert "prints `BLOCKED:`" in env_readme
     assert "exits before `source`" in env_readme
-
-
-def test_systemd_source_trust_preflight_is_checked_in_and_authoritative() -> None:
-    docker_readme = (REPO_ROOT / "infra" / "README.two-node-docker.md").read_text(encoding="utf-8")
-
-    assert "scripts/validate_two_node_docker_source_trust.py" in docker_readme
-    assert "--trusted-owner root --trusted-owner nhms-deploy" in docker_readme
-    assert "--role compute" in docker_readme
-    assert "--role display" in docker_readme
-    assert "$CHECKOUT_ROOT/infra/systemd/nhms-compute-compose.service" in docker_readme
-    assert "$CHECKOUT_ROOT/infra/systemd/nhms-display-compose.service" in docker_readme
-    assert 'sudo install -m 0644 "$CHECKOUT_ROOT/infra/systemd/nhms-compute-compose.service"' in docker_readme
-    assert 'sudo install -m 0644 "$CHECKOUT_ROOT/infra/systemd/nhms-display-compose.service"' in docker_readme
-    assert "source-trust preflight 是 authoritative gate" in docker_readme
-    assert 'namei -l "$CHECKOUT_ROOT/infra" | tee "$NAMEI_EVIDENCE"' not in docker_readme
-    assert "block_systemd_preflight()" not in docker_readme
-    assert 'check_systemd_source_path "$path"' not in docker_readme
-    assert 'test -z "$(find' not in docker_readme
-    assert "sudo install -m 0644 infra/systemd/" not in docker_readme
 
 
 def test_systemd_namei_awk_rejects_untrusted_owner_and_group_writable_components(tmp_path: Path) -> None:
@@ -712,7 +683,7 @@ END { exit bad }
 
 
 def test_systemd_source_path_guard_rejects_group_world_writable_sources(tmp_path: Path) -> None:
-    unit_source = tmp_path / "infra" / "systemd" / "nhms-display-compose.service"
+    unit_source = tmp_path / "infra" / "systemd" / "nhms-display-api.service"
     unit_source.parent.mkdir(parents=True)
     unit_source.write_text("[Service]\n", encoding="utf-8")
     unit_source.chmod(0o664)
