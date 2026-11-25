@@ -1,8 +1,13 @@
 # analysis-forecast-curve-splicing Specification
 
 ## Purpose
-TBD - created by archiving change m2-analysis-warm-start. Update Purpose after archive.
+
+How the forecast-series API returns an analysis segment and a forecast segment for one river segment, joined at the
+issue time. This is the API side only: the display frontend requests forecasts without the analysis segment and draws
+no spliced curve.
+
 ## Requirements
+
 ### Requirement: API Spliced Curve Response
 系统 SHALL 在 forecast-series 接口中返回 analysis + forecast 两段数据，支持前端拼接展示。
 
@@ -36,26 +41,3 @@ TBD - created by archiving change m2-analysis-warm-start. Update Purpose after a
 #### Scenario: Boundary point deduplication
 - **WHEN** analysis 段和 forecast 段在 issue_time 处有重叠数据点
 - **THEN** analysis 段不包含 issue_time 时刻（开区间），forecast 段包含 issue_time 时刻（闭区间），避免重复
-
-### Requirement: Frontend Curve Splicing Display
-前端 SHALL 在预报曲线图中展示 analysis + forecast 拼接曲线。
-
-#### Scenario: Dual-segment curve rendering
-- **WHEN** API 返回 analysis + forecast 两段数据
-- **THEN** 前端用不同颜色渲染两段（如 analysis 蓝色实线、forecast 橙色实线），在 issue_time 处画竖向分界线
-
-#### Scenario: Source annotation
-- **WHEN** 曲线渲染完成
-- **THEN** 图表标注资料来源（从 API 响应中的 source 字段获取，如 ERA5 或 GFS fallback）和起报时间，不硬编码来源名称
-
-#### Scenario: Analysis segment missing
-- **WHEN** API 仅返回 forecast segment（无 analysis 数据）
-- **THEN** 前端正常渲染 forecast 曲线，不显示 analysis 段和分界线
-
-### Requirement: Issue Time Display
-前端 SHALL 明确显示预报起报时间（issue_time）和分界线含义。
-
-#### Scenario: Issue time indicator
-- **WHEN** 拼接曲线展示
-- **THEN** 分界线处标注"起报时间"文字和具体时间值，鼠标 hover 显示 tooltip 说明"左侧为真实场 analysis，右侧为预报"
-
