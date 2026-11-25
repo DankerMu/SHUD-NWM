@@ -1,5 +1,5 @@
 {
-  "branch": "feat/issue-3221-delete-validation-lanes",
+  "branch": "chore/issue-3233-production-closure-leftovers",
   "cleanup_priorities": [
     {
       "axis": "context",
@@ -20,7 +20,7 @@
       "target": "Stage large decomposition of services/orchestrator/scheduler.py and services/orchestrator/chain.py"
     }
   ],
-  "commit": "194a55553b2a",
+  "commit": "3c5dec26ae31",
   "high_spread_patterns": [
     {
       "axis": "legacy/dead-code",
@@ -126,7 +126,7 @@
       "node_modules",
       "openspec/changes/archive (stale-display-route-token only)"
     ],
-    "source_report_generated_at": "2026-11-19T17:28:24+00:00",
+    "source_report_generated_at": "2026-11-25T15:07:57+00:00",
     "source_report_mode": "report-only",
     "source_report_schema": "governance-4a.entropy-report.v1",
     "summary_counts": {
@@ -216,7 +216,7 @@
       "control": {
         "score": "low"
       },
-      "file_count": 289,
+      "file_count": 280,
       "finding_count": 18,
       "priority": "P2",
       "protocol": {
@@ -630,7 +630,7 @@
       "control": {
         "score": "medium"
       },
-      "file_count": 132,
+      "file_count": 135,
       "finding_count": 0,
       "priority": "P1",
       "protocol": {
@@ -644,29 +644,6 @@
           "services/orchestrator/scheduler.py",
           "services/orchestrator/chain.py"
         ],
-        "score": "high"
-      }
-    },
-    "services/production_closure": {
-      "behavior": {
-        "score": "medium"
-      },
-      "context": {
-        "score": "medium"
-      },
-      "control": {
-        "score": "medium"
-      },
-      "file_count": 11,
-      "finding_count": 0,
-      "priority": "P1",
-      "protocol": {
-        "score": "medium"
-      },
-      "semantics": {
-        "score": "low"
-      },
-      "structure": {
         "score": "high"
       }
     },
@@ -700,13 +677,13 @@
     "check_family_count": 5,
     "gate_eligible_count": 0,
     "governance_finding_count": 247,
-    "modules_with_high_entropy": 2,
+    "modules_with_high_entropy": 1,
     "overall_trend": "baseline",
     "total_instruction_files": 15,
-    "total_modules": 23,
-    "total_source_files": 4822,
-    "total_test_files": 853
+    "total_modules": 22,
+    "total_source_files": 4924,
+    "total_test_files": 875
   },
-  "timestamp": "2026-11-19T17:28:05Z",
+  "timestamp": "2026-11-25T15:07:07Z",
   "version": 1
 }
