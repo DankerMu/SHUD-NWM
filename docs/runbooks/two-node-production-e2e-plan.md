@@ -132,8 +132,7 @@ NHMS_REQUIRE_SERVICE_ROLE=true
 NHMS_AUTH_MODE=production
 NHMS_DISPLAY_DISABLE_CONTROL_MUTATIONS=true
 NHMS_DISPLAY_ALLOW_LOCAL_FILE_LOGS=false
-NHMS_PUBLISHED_ARTIFACT_HOST_ROOT=/home/ghdc/nwm/published
-NHMS_PUBLISHED_ARTIFACT_ROOT=/var/lib/nhms/published
+NHMS_PUBLISHED_ARTIFACT_ROOT=/home/ghdc/nwm/published
 NHMS_PUBLISHED_ARTIFACT_URI_PREFIX=published://
 NHMS_PUBLISHED_ARTIFACT_S3_BUCKET=nhms-prod
 NHMS_PUBLISHED_ARTIFACT_S3_PREFIX=published
@@ -851,7 +850,7 @@ uv run python scripts/validate_two_node_e2e_evidence.py \
 输出文件为 `$EVIDENCE_ROOT/final-e2e-evidence/summary.json`。该汇总只有在每个必需 lane 都有当前 evidence bundle 的 live evidence、
 27 display runtime 无控制能力、readonly DB 是真实 live PASS、API/browser/logs 都匹配 22 产出的完整 strict identity，
 且所有 declared source 都通过时才允许 `PASS`。缺 DB/browser/Slurm/生产 auth 或 stale evidence 时是 `BLOCKED`；
-单 source 或缺 source scope 是 `PARTIAL` 或 `BLOCKED`；任何 27 Slurm/Munge/Docker/workspace 能力、writer DB/mutating grant、
+单 source 或缺 source scope 是 `PARTIAL` 或 `BLOCKED`；任何 27 Slurm/Munge/workspace 能力、writer DB/mutating grant、
 mock/historical latest、wrong run/model/source/cycle/job identity 或 27 产生 retry/cancel receipt 都是 `FAIL`。
 
 ### 10.1 计算控制面 PASS

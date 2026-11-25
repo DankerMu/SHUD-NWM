@@ -87,7 +87,6 @@ operational display path。`/hydro-met`、`/forecast`、`/meteorology`、`/flood
 ```text
 22 host path: /ghdc/data/nwm/published
 27 host path: /home/ghdc/nwm/published
-container path: /var/lib/nhms/published
 URI prefix: published://
 ```
 
@@ -153,7 +152,7 @@ Slurm 计算节点不是第三个业务部署节点，但它是 22 计算控制�
 - 不调用 Slurm Gateway。
 - 不执行 retry/cancel。
 - 不写 hydro/met/pipeline 终态。
-- 不挂载 22 私有 workspace、`.nhms-runs`、private `/scratch`、Munge、Slurm 配置或 Docker socket。
+- 不挂载 22 私有 workspace、`.nhms-runs`、private `/scratch`、Munge 或 Slurm 配置。
 
 用户在 27 看到失败任务时，正确动作是复制诊断信息，交给 22 的 operator 在计算控制面处理。22 处理完成后，27 再通过只读状态刷新看到结果。
 
@@ -305,7 +304,7 @@ systemd 不是新的应用运行模式，也不会改变 22/27 的职责边界�
 - 27 上出现真实 retry/cancel 控制按钮或控制 POST。
 - 27 需要 writer DB credential 才能展示。
 - 27 需要挂载 22 私有 workspace 才能看日志。
-- 27 挂载 Docker socket、Slurm/Munge 或额外可写业务目录。
+- 27 挂载 Slurm/Munge 或额外可写业务目录。
 
 这些都是角色边界破坏，应该先修部署配置或回滚展示入口，而不是临时把 27 改成单机控制面。
 
@@ -437,8 +436,8 @@ jq -c 'select(.record_type == "pipeline_event"
 
 - `NHMS_SERVICE_ROLE=display_readonly`。
 - `DATABASE_URL` 是 readonly 账号，并有 denied write probe 证据。
-- published artifact host root 只读挂载。
-- 未配置 Slurm Gateway、workspace、Basins/model assets、Docker socket、Munge 或 Slurm 路径。
+- published artifact 根目录对 service 用户不可写（没有只读挂载；见 bring-up checklist C1 的 `storage_not_writable`）。
+- 未配置 Slurm Gateway、workspace、Basins/model assets、Munge 或 Slurm 路径。
 - `/api/v1/runtime/config` 返回 display readonly 能力。
 - `/ops` 不请求 Slurm 队列深度，不显示真实控制按钮。
 
