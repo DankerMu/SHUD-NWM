@@ -27,7 +27,7 @@ changed in the report; the entropy hard gate ends at 0 failing.
 - [ ] 2.1 `git rm` the files of the proposal's "Deleted" list (the
   capability's spec is removed by the archive, not by hand). Remove the
   ruff per-file ignore of the runtime validator from `pyproject.toml` and
-  the three deleted test files from `scripts/ci/full_test_durations.json`.
+  the deleted test files from `scripts/ci/full_test_durations.json`.
 - [ ] 2.2 After the deletion, `git grep` for each deleted path and for
   `validate_two_node`, `test_two_node_docker`, `compose.compute`,
   `compose.display`, `Dockerfile.app`, `infra/docker/`, `dockerignore`,

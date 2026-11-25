@@ -68,8 +68,7 @@ OBJECT_STORE_ROOT=/home/ghdc/nwm/object-store
 
 `infra/env/display.example` 记录 display env 模板；当前物理 DB 归属以
 `docs/governance/ROLE_BOUNDARY.md` 为准；node-27 display 启动检查见
-`docs/runbooks/two-node-production-e2e-plan.md`。`infra/compose.display.yml`
-将 `NHMS_ENABLE_LIVE_POSTGIS_MVT` 透传给 `display-api`。
+`docs/runbooks/two-node-production-e2e-plan.md`。
 
 改后重启服务：`bash scripts/ops/start-display-api.sh`（issue [#597](https://github.com/DankerMu/SHUD-NWM/issues/597)）。
 脚本流程：preflight 检查 env file + venv →
@@ -360,10 +359,8 @@ deadline 到达后剩余请求**不再发起**（不是取消在途请求），�
 （热 key；冷 key 最长 600 s），该 tick 可能预热上一周期，下一 tick 自愈。两处 token 不一致的后果相同，
 但**没有 warning**——这是配置漂移唯一不吵的失败面，改 token 时两边一起改。
 
-**已知缺口**：`infra/compose.display.yml` 逐条列举 `environment:`，**不透传**该键；当前生产不走 compose
-（走 `nhms-display-api.service` / `scripts/ops/start-display-api.sh` 的 `set -a; . display.env` 整份注入）。
-日后若改走 compose，必须同时加透传并把该键加进 `scripts/validate_two_node_docker_runtime.py` 的
-`DISPLAY_AUDITED_INTERPOLATION_ENV`，否则 token 声明了却进不了应用，prewarm 发着应用不认的 token 静默退化。
+该键经 `nhms-display-api.service` / `scripts/ops/start-display-api.sh` 的 `set -a; . display.env`
+整份注入到 display 进程。
 
 ### 准入与淘汰（issue #2078）
 

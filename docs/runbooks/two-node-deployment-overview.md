@@ -28,7 +28,7 @@
 >
 > 设计文档保留作为 role contract reference（代码层 `ServiceRole` 仍按角色契约强制）；
 > 物理 host 分配以 `CLAUDE.md` 服务器拓扑段 + `docs/governance/ROLE_BOUNDARY.md` 顶部
-> "Current physical deployment" 段为准。下文 §3.4 权限矩阵、§4 共享表、§5.2 22 compute
+> "Current physical deployment" 段为准。下文 §3.4 权限矩阵、§4 共享表、§5.1 22 compute
 > 启动段都是设计意图描述，**不反映当前生产 host 分配**。
 >
 > **#2420 live acceptance passed on 2026-09-20:** see the
@@ -57,7 +57,7 @@ M22 设计将系统从“单机既计算又展示”的形态，收敛为两个�
 - 27 节点的设计目标是“能看、能诊断、能复制交接信息”，不是“能直接重跑或停止计算”。
 
 这份文档用于说明系统怎么运转、每个节点负责什么、怎么部署、会产生哪些产物。当前值守命令、生产路径、产物位置和已知卡点见
-[`current-production-ops.md`](current-production-ops.md)。具体命令见 [`infra/README.two-node-docker.md`](../../infra/README.two-node-docker.md)，端到端证据要求见 [`docs/runbooks/two-node-production-e2e-plan.md`](two-node-production-e2e-plan.md)。
+[`current-production-ops.md`](current-production-ops.md)。端到端证据要求见 [`docs/runbooks/two-node-production-e2e-plan.md`](two-node-production-e2e-plan.md)。
 
 ## 2. 整体运转流程
 
@@ -190,7 +190,6 @@ Slurm 计算节点不是第三个业务部署节点，但它是 22 计算控制�
 | PostgreSQL/PostGIS/TimescaleDB | 读写账号 | 只读账号 | pipeline、met、hydro、model、ops 状态源 |
 | published artifacts | 写 `/ghdc/data/nwm/published` | 只读读 `/home/ghdc/nwm/published` | `/` 单页地图、`/ops`、日志弹窗和诊断 |
 | shared object-store mirror | publish/copyback 写 `/ghdc/data/nwm/object-store` | 只读读 `/home/ghdc/nwm/object-store` | 完整 `runs/<run_id>/...` 运行产物交付 |
-| Docker 镜像 | 同一 app 镜像 | 同一 app 镜像 | 通过环境变量和 Compose 分化角色 |
 
 不共享的内容：
 
@@ -202,47 +201,18 @@ Slurm 计算节点不是第三个业务部署节点，但它是 22 计算控制�
 
 ## 5. 部署方式
 
-### 5.1 镜像
+两节点都以 systemd user unit 运行；docker/compose 部署线已由 #3231 退役。
 
-两节点使用同一个应用镜像。镜像里包含：
-
-- Python 后端和服务代码。
-- 前端构建产物 `apps/frontend/dist`。
-- OpenAPI、schema、配置、sbatch 模板和 Docker entrypoint。
-
-镜像启动时通过 `NHMS_SERVICE_ROLE` 决定角色。生产或类生产启动时必须显式设置角色，不能依赖默认单机开发模式。
-
-### 5.2 22 节点部署入口
+### 5.1 22 节点部署入口
 
 `infra/env/compute.env` 是已退役的 docker-e2e 产物，node-22 没有任何单元加载它；单元到环境文件的权威见 [`infra/env/README.md`](../../infra/env/README.md#node-22-unit--environmentfile-authority-1694)。
-
-22 使用：
-
-Archive status:
-- status: superseded
-- current_authority: infra/env/README.md#node-22-unit--environmentfile-authority-1694
-- superseded_by: docs/runbooks/node22-control-plane-manual-recovery.md
-- status_since: 2026-10-16
-- archive_scope: section
-- retained_for: compose-lane design evidence
-
-- Compose 文件：[`infra/compose.compute.yml`](../../infra/compose.compute.yml)
-- 环境样例：[`infra/env/compute.example`](../../infra/env/compute.example)
-- 本地真实环境文件：`infra/env/compute.env`，不提交
-- systemd 样例：[`infra/systemd/nhms-compute-compose.service`](../../infra/systemd/nhms-compute-compose.service)
-
-Compose 中包含两个服务形态：
-
-- `compute-api`：计算控制面 API，默认不发布公网端口。
-- `scheduler-once`：手工 profile，用于一次性运行 no-flag 生产计划入口
-  `nhms-pipeline plan-production --plan`。
 
 22 的环境文件需要配置 writer DB、workspace、object-store、published artifact 写入路径、scheduler
 lock/evidence/runtime/temp roots、非空 `NHMS_SCHEDULER_ALLOWED_ROOTS`、service role、
 source/model/basin filters、interval/max-pass bounds、Basins/model assets、Slurm Gateway 和资料源参数。
 
 当前 22 published artifact host root 使用 `/ghdc/data/nwm/published`，即写入 27 导出的 NFS 发布面。
-`scheduler-once` 不传 `--workspace-root`、`--lock-path` 或 `--evidence-dir`；这些路径必须分别由
+scheduler 不传 `--workspace-root`、`--lock-path` 或 `--evidence-dir`；这些路径必须分别由
 `WORKSPACE_ROOT`、`NHMS_SCHEDULER_LOCK_ROOT` 和 `NHMS_SCHEDULER_EVIDENCE_ROOT` 解析。显式 root flags
 只保留给本地诊断兼容，不作为 22 business proof path。
 连续或 timer 模式也使用同一套 env roots，并显式限定 `NHMS_SCHEDULER_INTERVAL_SECONDS`、
@@ -251,35 +221,23 @@ source/model/basin filters、interval/max-pass bounds、Basins/model assets、Sl
 `NHMS_SCHEDULER_ALLOWED_ROOTS` 是独立批准的 root 边界，不能在运行时由这些候选 root 自动推导；缺失或为空时
 no-flag scheduler 必须在 registry/adapters/orchestrator 前阻塞。
 
-### 5.3 27 节点部署入口
+### 5.2 27 节点部署入口
 
 27 使用：
 
-- Compose 文件：[`infra/compose.display.yml`](../../infra/compose.display.yml)
 - 环境样例：[`infra/env/display.example`](../../infra/env/display.example)
 - 本地真实环境文件：`infra/env/display.env`，不提交
-- systemd 样例：[`infra/systemd/nhms-display-compose.service`](../../infra/systemd/nhms-display-compose.service)
-
-27 的容器是只读展示容器：
-
-- 容器根文件系统为只读。
-- 只允许挂载 published artifacts，且挂载为只读。
-- 丢弃 Linux capabilities，并启用 `no-new-privileges`。
-- 对外只绑定本机 `127.0.0.1:${NHMS_DISPLAY_API_PORT:-8080}`，通常由反向代理或内网入口转发。
+- systemd 单元：[`infra/systemd/nhms-display-api.service`](../../infra/systemd/nhms-display-api.service)，由 [`scripts/ops/start-display-api.sh`](../../scripts/ops/start-display-api.sh) 安装和重启
 
 27 的环境文件需要配置 readonly DB、readonly published artifact root、只读对象存储凭证或只读 shared object-store mirror 挂载、CORS 和端口。不能配置 Slurm Gateway、workspace、Basins/model assets、Docker socket、`NHMS_OBJECT_STORE_COPYBACK_ROOT` 或其他计算控制能力。
 
-当前 27 published artifact host root 使用 `/home/ghdc/nwm/published`，并在 display compose 中以只读方式挂载到容器内 `/var/lib/nhms/published`。
+当前 27 published artifact host root 使用 `/home/ghdc/nwm/published`。
 
-### 5.4 systemd 的作用
+### 5.3 systemd 的作用
 
-systemd 单元只是把对应 Compose 服务交给系统服务管理：
+27 的 display API 是 `nhms-display-api.service`，加载 `infra/env/display.env`；22 的单元和它们加载的环境文件见 [`infra/env/README.md`](../../infra/env/README.md#node-22-unit--environmentfile-authority-1694) 的单元到环境文件表。
 
-- 开机后拉起对应节点的 Compose。
-- 支持 stop/reload/restart。
-- 固定 WorkingDirectory 和 env 文件位置。
-
-systemd 不是新的应用运行模式，也不会改变 22/27 的职责边界。安装或重启 systemd 前，仍要先做 source-trust 和 Docker 预检，避免让 Docker 读取权限不安全的 env、compose 或 unit 文件。
+systemd 不是新的应用运行模式，也不会改变 22/27 的职责边界。
 
 ## 6. 每个节点的产物
 
@@ -304,7 +262,7 @@ systemd 不是新的应用运行模式，也不会改变 22/27 的职责边界�
 - 面向运维查看的 `/ops` 页面。
 - API 响应中的 runtime config、latest-product、pipeline、jobs、logs 等只读查询结果。
 - 失败任务的诊断复制内容，供 operator 带到 22 处理。
-- 27 侧 Docker/security/readonly DB/browser evidence。
+- 27 侧 security/readonly DB/browser evidence。
 - 27 服务日志和反向代理日志。
 
 27 的关键交付是“只读展示链路可用，并且物理上没有控制计算的能力”。
@@ -347,7 +305,7 @@ systemd 不是新的应用运行模式，也不会改变 22/27 的职责边界�
 - 27 上出现真实 retry/cancel 控制按钮或控制 POST。
 - 27 需要 writer DB credential 才能展示。
 - 27 需要挂载 22 私有 workspace 才能看日志。
-- 27 容器挂载 Docker socket、Slurm/Munge 或额外可写业务目录。
+- 27 挂载 Docker socket、Slurm/Munge 或额外可写业务目录。
 
 这些都是角色边界破坏，应该先修部署配置或回滚展示入口，而不是临时把 27 改成单机控制面。
 
@@ -418,16 +376,15 @@ jq -c 'select(.record_type == "pipeline_event"
 ### 8.1 两边都要确认
 
 - 两台机器 checkout 同一个 git commit。
-- 两台机器使用同一个 app image digest。
 - 本机依赖按 Linux 环境重建，不复用其他机器的 `.venv` 或 `node_modules`。
-- Docker 可用，DockerRootDir、磁盘空间、`TMPDIR` 和 evidence root 已记录。
+- 磁盘空间、`TMPDIR` 和 evidence root 已记录。
 - 本地 env 文件权限为 `0600`，且没有被提交。
 - 项目生成的临时产物写入仓库 ignored 的 `artifacts/` 或 `/scratch/frd_muziyao/`。
 
 ### 8.2 22 重点确认
 
 - `NHMS_SERVICE_ROLE=compute_control`。
-- `DATABASE_URL` 只供 `compute-api` / rollback 使用；`scheduler-once` runtime env 中必须缺席。
+- `DATABASE_URL` 只供 `compute-api` / rollback 使用；scheduler runtime env 中必须缺席。
 - scheduler state/lock/registry/readiness/journal/state-index selectors 都是 `file`，对应
   manifest/index/journal paths 非空且位于允许根内。`NHMS_SCHEDULER_DB_FREE_REQUIRED=true` 保留在模板里，
   作为 job-env 契约（run manifest 与 Slurm 作业 env 一律带 `true`），不再是模式开关：自 #3255 起
@@ -489,8 +446,8 @@ jq -c 'select(.record_type == "pipeline_event"
 
 可以声明的：
 
-- M22 deterministic 和 Docker 安全边界已在代码、测试和 CI 中覆盖。
-- 22/27 的 Docker 部署形态、env 示例、systemd 示例和只读边界已经落地。
+- M22 deterministic 边界已在代码、测试和 CI 中覆盖。
+- 22/27 的 env 示例、systemd 示例和只读边界已经落地。
 - 27 的产品定位是只读展示和诊断交接。
 
 不能直接声明的：
@@ -504,7 +461,6 @@ jq -c 'select(.record_type == "pipeline_event"
 
 ## 10. 相关文档
 
-- Docker 命令手册：[`infra/README.two-node-docker.md`](../../infra/README.two-node-docker.md)
 - 两节点 E2E 证据计划：[`docs/runbooks/two-node-production-e2e-plan.md`](two-node-production-e2e-plan.md)
 - 两节点 Docker 部署方案：[`docs/plans/2026-05-27-two-node-docker-readonly-display-deployment-plan.md`](../plans/2026-05-27-two-node-docker-readonly-display-deployment-plan.md)
 - 只读展示重构方案：[`docs/plans/2026-05-27-two-node-readonly-display-refactor-plan.md`](../plans/2026-05-27-two-node-readonly-display-refactor-plan.md)

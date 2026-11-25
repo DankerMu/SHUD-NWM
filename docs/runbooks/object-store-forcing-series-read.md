@@ -61,7 +61,7 @@ bash scripts/ops/start-display-api.sh
 |---|---|---|
 | `RuntimeModeError` / `OBJECT_STORE_ROOT_REQUIRED` | `NHMS_SERVICE_ROLE=display_readonly` 启动时未设置 `OBJECT_STORE_ROOT` | 在 node-27 display env 写入 `OBJECT_STORE_ROOT=/home/ghdc/nwm/object-store`，再重启 display API |
 | `RuntimeModeError` / `OBJECT_STORE_ROOT_UNREADABLE` | env 指向不存在、不可读或不可遍历的目录 | 核对挂载是否存在，目录和所有父目录是否有 execute bit；display 用户只需读和遍历，不应为排障放宽成可写 |
-| `DISPLAY_BOUNDARY_CONFIG_UNSAFE` 提到 `OBJECT_STORE_ROOT` | 运行代码仍是 PR-B 前的 role-boundary 规则，或部署未同步 `scripts/validate_two_node_docker_runtime.py` / runtime 常量 | 先同步并部署 PR-B 后代码；不要通过删除 `OBJECT_STORE_ROOT` 绕过，因为新 series 路径启动必需该 env |
+| `DISPLAY_BOUNDARY_CONFIG_UNSAFE` 提到 `OBJECT_STORE_ROOT` | 运行代码仍是 PR-B 前的 role-boundary 规则，或部署未同步 runtime 常量 | 先同步并部署 PR-B 后代码；不要通过删除 `OBJECT_STORE_ROOT` 绕过，因为新 series 路径启动必需该 env |
 | 默认本地 import 不要求 `OBJECT_STORE_ROOT` | `NHMS_SERVICE_ROLE` 未设置时是 `dev_monolith` 兼容路径 | 这是预期；生产 display_readonly 仍必须配置 |
 
 ## Disk Layout And Producer Coordination

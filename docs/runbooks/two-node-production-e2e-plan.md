@@ -13,12 +13,6 @@
 > [`current-production-ops.md`](current-production-ops.md) 和
 > [`ROLE_BOUNDARY.md`](../governance/ROLE_BOUNDARY.md) 为准。
 
-Docker/systemd 操作细节见 `infra/README.two-node-docker.md`。所有直接 Docker Compose 和 systemd
-install/start/restart lane 都必须先运行 `scripts/validate_two_node_docker_source_trust.py`，把 source-trust
-JSON/text 报告写入 `docker-security/` evidence；compute/display 必须使用同一个 `--evidence-run-id`
-分别生成 role-scoped source-trust 报告，避免互相覆盖。该脚本失败时对应 lane 只能记为 `BLOCKED`。本文只定义 E2E
-证据边界；Docker 验证不能把 compose 启动、DB、API、浏览器、Slurm、日志和只读安全检查合并成一个模糊 PASS。
-
 如果需要先理解系统怎么运转、22/27 各自负责什么、每个节点会产生哪些产物，先读 [`two-node-deployment-overview.md`](two-node-deployment-overview.md)；本文只定义验收证据边界。
 
 ## 1. 文档目的
@@ -109,8 +103,7 @@ SLURM_GATEWAY_URL=http://<gateway-host>:<port>
 - 能访问 `DATABASE_URL` 对应数据库。
 - 能运行 `SHUD_EXECUTABLE`。
 
-如果现场 Slurm 计算节点没有挂载 22 侧 `/ghdc`，这不是 27 展示面问题，也不能通过把 27 私有目录挂进
-display 容器解决。应把 Slurm runtime workspace 放在计算节点可见路径，完成后由 22 侧 publish/copyback
+如果现场 Slurm 计算节点没有挂载 22 侧 `/ghdc`，这不是 27 展示面问题。应把 Slurm runtime workspace 放在计算节点可见路径，完成后由 22 侧 publish/copyback
 步骤写入 `/ghdc/data/nwm/published`，再由 27 从 `/home/ghdc/nwm/published` 只读消费。
 
 ### 2.3 27 节点：展示服务面
@@ -158,7 +151,7 @@ CORS_ALLOWED_ORIGINS=https://display.internal.example
 如果 `/ops` 需要读取文件日志，27 必须能访问日志发布位置。优先使用对象存储或受控共享发布区，而不是挂载 22 的完整工作目录。
 
 当前部署约定使用 27 导出的 NFS 发布面：22 写 `/ghdc/data/nwm/published`，27 从本机
-`/home/ghdc/nwm/published` 只读挂载到容器内 `/var/lib/nhms/published`。该目录只承载展示产品、
+`/home/ghdc/nwm/published` 只读读取。该目录只承载展示产品、
 manifest、日志和诊断证据；不要把 22 私有 workspace 或 `.nhms-runs` 暴露给 27。
 
 ## 3. 共享依赖边界
@@ -196,10 +189,10 @@ manual_ops_boundary: PASS | PARTIAL | FAIL | BLOCKED
 ```bash
 export RUN_ID="two-node-e2e-$(date -u +%Y%m%dT%H%M%SZ)"
 export EVIDENCE_ROOT="artifacts/two-node-e2e/$RUN_ID"
-mkdir -p "$EVIDENCE_ROOT"/{22-compute,27-display,cross-plane,manual-ops,db,api,browser,slurm,logs,docker-preflight,docker-security,final-e2e-evidence}
+mkdir -p "$EVIDENCE_ROOT"/{22-compute,27-display,cross-plane,manual-ops,db,api,browser,slurm,logs,final-e2e-evidence}
 ```
 
-项目创建的临时文件、Docker smoke 输出、review 输出和 E2E evidence 只能写到仓库 `artifacts/` 或 `/scratch/frd_muziyao`。如果 Docker daemon cache 无法由项目控制，必须在 `docker-preflight/` 记录当前 `evidence_run_id`、DockerRootDir、`docker system df` 和相关 `df -h`；最终聚合不接受复制到当前目录但缺少当前 run 绑定的 Docker preflight PASS。空间不足时 Docker lane 记为 `BLOCKED`。
+项目创建的临时文件、review 输出和 E2E evidence 只能写到仓库 `artifacts/` 或 `/scratch/frd_muziyao`。
 
 最低交付物：
 
@@ -221,17 +214,7 @@ mkdir -p "$EVIDENCE_ROOT"/{22-compute,27-display,cross-plane,manual-ops,db,api,b
   `/hydro-met -> /`，只能列为旧别名重定向 smoke。
 - `slurm/summary.md`：22 Gateway health、minimal submit probe、Slurm receipt。
 - `logs/summary.md`：published log URI、读取结果和缺失原因。
-- `docker-preflight/summary.md`：当前 `evidence_run_id`、DockerRootDir、cache/space、TMPDIR 和 evidence root。
-- `docker-security/summary.json`：必须由 `security-summary` helper 生成
-  `nhms.two_node_docker.security_summary.v1`，并带 `source_trust`、`static`、`smoke`
-  child artifact 路径与 sha256；其中 source-trust child 必须包含 compute/display 两份 role env
-  ownership/mode/type 证明，static child 必须由 `static --evidence-run-id "$EVIDENCE_RUN_ID" --report "$EVIDENCE_ROOT/docker-security/static-compose-env-check.json"`
-  产出最终可校验的 HostConfig/mount/env/readonly proof 字段，smoke child 必须由
-  `smoke --evidence-run-id "$EVIDENCE_RUN_ID" --evidence-root "$EVIDENCE_ROOT/docker-security"` 产出。
-  `security-summary` 必须在 smoke producer 之后执行，并通过重复 `--source-trust-report`
-  消费 `two-node-docker-source-trust-compute.json` 和 `two-node-docker-source-trust-display.json`；手写、
-  单 role source-trust、缺 source artifact 或缺当前 run 绑定的 summary 不能作为 PASS。
-- `final-e2e-evidence/summary.json`：#239 最终 JSON 汇总，聚合 Docker、DB、API、browser、cross-plane、manual ops、Slurm、logs 和 compute/display lane。
+- `final-e2e-evidence/summary.json`：#239 最终 JSON 汇总，聚合 DB、API、browser、cross-plane、manual ops、Slurm、logs 和 compute/display lane。
 - `summary.md`：最终 PASS/PARTIAL/FAIL/BLOCKED 汇总。
 - `bugs.md` 或链接到 `docs/bugs.md`：失败项、根因、复测条件。
 
@@ -328,14 +311,8 @@ touch "$OBJECT_STORE_ROOT/probe-from-compute-$(hostname)"
 
 ### 6.4 正式生产链路执行
 
-在 22 节点执行正式入口：
-
-```bash
-docker compose --env-file infra/env/compute.env -f infra/compose.compute.yml run --rm scheduler-once
-```
-
-`scheduler-once` 的默认命令是 no-flag root 业务验证：`nhms-pipeline plan-production --plan`，只允许从
-`compute.env` 解析 roots、locks、evidence、service role 和 source/model filters。它是 #253 的
+no-flag root 业务验证是 `nhms-pipeline plan-production --plan`，只允许从环境解析
+roots、locks、evidence、service role 和 source/model filters。它是 #253 的
 PASS/BLOCKED smoke，不等同于 Task 7 live E2E。需要真实提交时必须另行使用明确授权的 submit/timer lane，
 并保留同一套 root preflight 证据。
 
@@ -351,29 +328,14 @@ evidence 的 `root_preflight.checks.temp_root.created=true`；父目录缺失/�
 `..._SYMLINK`。其余根（含 `NHMS_SCHEDULER_RUNTIME_ROOT`）缺失仍按 `SCHEDULER_ROOT_<FIELD>_NOT_FOUND`
 fail-closed。
 
-有界连续/定时 lane 示例：
-
-```bash
-docker compose --env-file infra/env/compute.env -f infra/compose.compute.yml run --rm scheduler-once \
-  uv run nhms-pipeline plan-production \
-    --continuous \
-    --interval-seconds "${NHMS_SCHEDULER_INTERVAL_SECONDS:-300}" \
-    --max-passes "${NHMS_SCHEDULER_MAX_PASSES:-1}" \
-    --max-cycles-per-source "${NHMS_SCHEDULER_MAX_CYCLES_PER_SOURCE:-1}" \
-    --source gfs \
-    --model-id basins_qhh_shud \
-    --basin-id basins_qhh \
-    --plan
-```
-
-禁用定时 lane 时，停用对应 timer/service，并保留 `scheduler-once` 手工 proof path：
+禁用定时 lane 时，停用对应 timer/service：
 
 ```bash
 sudo systemctl disable --now nhms-compute-scheduler.timer
 sudo systemctl reset-failed nhms-compute-scheduler.service
 ```
 
-#### 6.4.1 scheduler-once 两种调用模式
+#### 6.4.1 plan-production 两种调用模式
 
 `plan-production` 有两种调用形态，必须严格区分：no-flag root 是**业务验证**路径，`--workspace-root`
 覆盖只用于**诊断/排查**。两者默认都是 `--dry-run`（`--plan` 是其同义别名），不提交 Slurm、非变更；
@@ -381,7 +343,7 @@ sudo systemctl reset-failed nhms-compute-scheduler.service
 
 | 维度 | 业务验证（no-flag root） | 诊断（`--workspace-root`） |
 | --- | --- | --- |
-| 触发方式 | `scheduler-once` 默认命令 / `nhms-pipeline plan-production --plan` | `nhms-pipeline plan-production --plan --workspace-root /path` |
+| 触发方式 | `nhms-pipeline plan-production --plan` | `nhms-pipeline plan-production --plan --workspace-root /path` |
 | root 来源 | 从 `WORKSPACE_ROOT` 环境变量解析 | 由 `--workspace-root` 显式覆盖 |
 | 用途 | 两节点 E2E 业务验收的 proof path | 本地/排查兼容性诊断，不作为业务证据 |
 | 是否变更 | 否（dry-run 默认，不提交 Slurm） | 否（dry-run 默认，不提交 Slurm） |
@@ -887,8 +849,8 @@ uv run python scripts/validate_two_node_e2e_evidence.py \
 ```
 
 输出文件为 `$EVIDENCE_ROOT/final-e2e-evidence/summary.json`。该汇总只有在每个必需 lane 都有当前 evidence bundle 的 live evidence、
-27 Docker/display runtime 无控制能力、readonly DB 是真实 live PASS、API/browser/logs 都匹配 22 产出的完整 strict identity，
-且所有 declared source 都通过时才允许 `PASS`。缺 Docker/DB/browser/Slurm/生产 auth 或 stale evidence 时是 `BLOCKED`；
+27 display runtime 无控制能力、readonly DB 是真实 live PASS、API/browser/logs 都匹配 22 产出的完整 strict identity，
+且所有 declared source 都通过时才允许 `PASS`。缺 DB/browser/Slurm/生产 auth 或 stale evidence 时是 `BLOCKED`；
 单 source 或缺 source scope 是 `PARTIAL` 或 `BLOCKED`；任何 27 Slurm/Munge/Docker/workspace 能力、writer DB/mutating grant、
 mock/historical latest、wrong run/model/source/cycle/job identity 或 27 产生 retry/cancel receipt 都是 `FAIL`。
 

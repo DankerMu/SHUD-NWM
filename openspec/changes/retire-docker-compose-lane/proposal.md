@@ -31,6 +31,10 @@ procedure outside the lane imports or runs the validators.
 - `tests/test_two_node_docker_runtime.py`,
   `tests/test_two_node_docker_runbook_environment_invariant.py`,
   `tests/test_two_node_docker_source_trust.py`
+- `tests/test_two_node_22_e2e.py`: a live check that runs `docker exec`
+  in the compose container of the compute API on the retired node-22 host
+  (found during implementation; skipped unless an env variable that
+  nothing sets is given)
 - the capability `two-node-docker-runtime`
 
 **Kept, and why**
