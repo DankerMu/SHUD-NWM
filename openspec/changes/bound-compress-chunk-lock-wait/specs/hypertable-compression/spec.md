@@ -49,12 +49,12 @@ unit 的 `ExecStartPre` preflight 与唯一 `ExecStart` 的次序、`TimeoutStar
 
 #### Scenario: 失败触发告警 unit
 
-- **WHEN** 压缩 unit 以非零退出（outcome `partial`、`failed`、`refused_*`，或 preflight 失败）
+- **WHEN** 压缩 unit 以非零退出（outcome `partial`、`failed`（含配置 tombstone），或 preflight 失败）
 - **THEN** systemd 启动 `nhms-node27-unit-failure-alert@nhms-node27-timeseries-compression.service.service`
 
-#### Scenario: 争用延期不告警
+#### Scenario: 争用延期与生命周期锁被占不告警
 
-- **WHEN** tick 的 outcome 为 `deferred`
+- **WHEN** tick 的 outcome 为 `deferred` 或 `refused_lock`
 - **THEN** unit 以 0 退出，不触发告警
 
 ## MODIFIED Requirements

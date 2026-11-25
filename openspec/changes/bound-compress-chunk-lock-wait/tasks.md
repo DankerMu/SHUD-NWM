@@ -13,7 +13,8 @@ chain legs and every existing validation; `acquire_compression_fence`, its
 `SET` / `RESET` of `lock_timeout` and its tests; the tick-deadline guard;
 reconcile before any label of a failed `compress_chunk`; the generic failure
 arm and `_safe_failure` (no raw exception text in a receipt); exit code 0
-for `clean` and `deferred`, non-zero otherwise; receipts of schema 1.0, 2.0,
+for `clean`, `deferred` and `refused_lock`, non-zero for `partial` and
+`failed`; receipts of schema 1.0, 2.0,
 2.1 and 2.2 validate exactly as before; the frozen live-evidence contracts;
 the unit's `ExecStartPre` preflight before its single `ExecStart`, its
 `TimeoutStartSec`, and where its stdout and stderr go; a live env file that
