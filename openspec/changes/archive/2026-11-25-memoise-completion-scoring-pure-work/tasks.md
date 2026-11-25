@@ -20,18 +20,18 @@ unedited.
 
 ## 1. Sanitiser caches (`services/orchestrator/public_evidence.py`)
 
-- [ ] 1.1 The text sanitiser (`_sanitize_public_text`) and the string branch
+- [x] 1.1 The text sanitiser (`_sanitize_public_text`) and the string branch
   of the scalar sanitiser (`_sanitize_public_scalar`) remember their result
   per input string in bounded least-recently-used caches. A string longer
   than a module constant is computed without being remembered. Non-string
   scalars never enter a cache. The uncached implementations are module-level
   functions that the cached path looks up at call time, so a test can replace
   or count them.
-- [ ] 1.2 The sensitive-key test used by `_sanitize_public_field` remembers
+- [x] 1.2 The sensitive-key test used by `_sanitize_public_field` remembers
   its answer per field name in a bounded cache that wraps
   `packages.common.redaction.is_sensitive_key`; a name longer than a module
   constant is tested without being remembered.
-- [ ] 1.3 The bounds are module constants. Starting values: 8192 strings of
+- [x] 1.3 The bounds are module constants. Starting values: 8192 strings of
   at most 1024 characters for each text cache, 4096 names of at most 256
   characters for the key cache. The comment states the memory honestly: an
   entry holds the input and the output; the output is normally about as long
@@ -43,7 +43,7 @@ unedited.
 
 ## 2. Readiness scope (`services/orchestrator/source_cycle_raw_manifest.py`, `scheduler_discovery.py`)
 
-- [ ] 2.1 A context manager opens a readiness scope held in a `ContextVar`
+- [x] 2.1 A context manager opens a readiness scope held in a `ContextVar`
   (set on entry, reset in `finally`). Inside a scope,
   `nfs_raw_manifest_readiness_from_env(source_id, cycle_time)` computes its
   result once per key and returns a deep copy to every caller, the first
@@ -55,14 +55,14 @@ unedited.
   that raises stores nothing. Outside a scope the
   function body is what it is today. A scope opened inside another one starts
   empty and restores the outer one on exit.
-- [ ] 2.2 `_cycle_completion_verdict` scores its cycle inside one scope (the
+- [x] 2.2 `_cycle_completion_verdict` scores its cycle inside one scope (the
   whole function body, both branches). Nothing else opens a scope.
 
 ## 3. Tests
 
 New file `tests/test_public_evidence_memo.py`:
 
-- [ ] 3.1 Corpus parity. The whole corpus is run in order through one cache
+- [x] 3.1 Corpus parity. The whole corpus is run in order through one cache
   that is not cleared between strings, twice; for each string the cached
   function returns what the uncached implementation returns, for the text
   sanitiser and for the scalar sanitiser. The corpus
@@ -74,7 +74,7 @@ New file `tests/test_public_evidence_memo.py`:
   trailing whitespace and render differently, two that differ only by letter
   case and render differently (not `S3://` against `s3://`, which both become
   `[object-uri]`), non-ASCII text, and a string longer than the length limit.
-- [ ] 3.2 Payload parity. A nested payload (mappings, lists, a tuple, a
+- [x] 3.2 Payload parity. A nested payload (mappings, lists, a tuple, a
   datetime, `None`, `1`, `1.0`, `0`, `0.0`, `True`, `False`, `"1"`, a `_file_journal_` key, sensitive
   keys in plain and escaped spelling, `message` / `*_message`, `*_path` with a
   scalar and with a mapping, `*_uri`) renders equal three times: cold, warm,
@@ -83,17 +83,17 @@ New file `tests/test_public_evidence_memo.py`:
   non-string scalars are asserted, not only equality, and rendering a list
   of non-string scalars (no mapping, whose keys would enter the key cache)
   leaves the size of every cache unchanged.
-- [ ] 3.3 Bounds. After sanitising more distinct strings than a cache holds,
+- [x] 3.3 Bounds. After sanitising more distinct strings than a cache holds,
   its size equals its maximum; an over-long string and an over-long key leave
   the cache sizes unchanged and are still rendered correctly; the constants
   have the starting values of 1.3.
-- [ ] 3.4 Reuse happens: rendering the same payload twice calls the uncached
+- [x] 3.4 Reuse happens: rendering the same payload twice calls the uncached
   text implementation once per distinct cacheable string (count through a
   wrapper installed by the test).
 
 New file `tests/test_raw_manifest_readiness_scope.py`:
 
-- [ ] 3.5 Scope unit tests with the underlying `nfs_raw_manifest_readiness`
+- [x] 3.5 Scope unit tests with the underlying `nfs_raw_manifest_readiness`
   counted: (a) three calls for one (source, cycle) inside a scope compute
   once and return equal mappings that are distinct objects, and appending to
   a nested list of the first does not show in the second; (b) another cycle,
@@ -106,7 +106,7 @@ New file `tests/test_raw_manifest_readiness_scope.py`:
   function is never called, inside and outside a scope; (h) the result inside
   a scope equals the result outside it for a real manifest on disk (ready,
   and with one file missing).
-- [ ] 3.6 Scoring on the real file journal and the real scheduler wiring.
+- [x] 3.6 Scoring on the real file journal and the real scheduler wiring.
   The test must drive the branch production runs: the strict/successor branch
   of `_cycle_completion_verdict` (strict provider `None`, successor provider
   `{"ready": True}` for three models, the way
@@ -122,7 +122,7 @@ New file `tests/test_raw_manifest_readiness_scope.py`:
   second cycle computes once more; a `candidate_state` call made outside
   completion scoring computes on its own. The states handed to the ladder
   for the three models carry equal readiness mappings.
-- [ ] 3.7 State parity on the real file journal: for a journal whose rows
+- [x] 3.7 State parity on the real file journal: for a journal whose rows
   carry content the sanitiser changes (a secret-looking token in an error
   message, an absolute path and an `s3://` URI in job details, URIs in
   `hydro_run` and in the run manifest's initial state), `candidate_state`
@@ -131,12 +131,12 @@ New file `tests/test_raw_manifest_readiness_scope.py`:
 
 ## 4. Evidence floor
 
-- [ ] 4.1 Red first, in `.workplans/3236/red-runs.log`: 3.3 (bounds), 3.4,
+- [x] 4.1 Red first, in `.workplans/3236/red-runs.log`: 3.3 (bounds), 3.4,
   3.5 (a), (e) and 3.6 fail on the unmodified tree, with the failing line or
   the missing attribute. 3.1, 3.2, 3.7 and 3.5 (c), (g), (h) compare
   behaviour that must not change; where they can run on the unmodified tree
   they pass before and after, and the log says which could not run before.
-- [ ] 4.2 Mutations, each applied by hand, the named test run, the failing
+- [x] 4.2 Mutations, each applied by hand, the named test run, the failing
   assertion recorded, the file restored and checked with `cmp`:
   M1 the text cache is keyed on the stripped string -> 3.1;
   M2 the scalar cache is keyed on the lower-cased string -> 3.1;
@@ -153,7 +153,7 @@ New file `tests/test_raw_manifest_readiness_scope.py`:
   directly, so no scope is open and the count is three). A whole-pass scope
   would hand one snapshot to discovery, the adapters, the predecessor gate
   and the submitting path; it must not pass.
-- [ ] 4.3 Local: the two new files; `tests/test_file_orchestration_journal.py`;
+- [x] 4.3 Local: the two new files; `tests/test_file_orchestration_journal.py`;
   `tests/test_completion_scoring_event_evidence.py`;
   `tests/test_scheduler_backfill.py`; `tests/test_source_cycle_raw_manifest.py`;
   every test file that names `public_evidence` or
@@ -161,14 +161,14 @@ New file `tests/test_raw_manifest_readiness_scope.py`:
   `tests/test_production_scheduler.py` once;
   `uv run --no-sync ruff check --no-cache .`; the topology hard gate count
   unchanged; `openspec validate memoise-completion-scoring-pure-work --strict --no-interactive`.
-- [ ] 4.4 A local timing, recorded in the log and not turned into a test:
+- [x] 4.4 A local timing, recorded in the log and not turned into a test:
   rendering one synthetic candidate state (a few hundred events sharing a few
   dozen distinct messages, a readiness mapping) 500
   times, before and after. A real readiness mapping holds counts and at
   most five file samples; the synthetic one has that shape.
-- [ ] 4.5 node-27: the new files and the journal, scoring and raw-manifest
+- [x] 4.5 node-27: the new files and the journal, scoring and raw-manifest
   test files in a temporary detached worktree.
-- [ ] 4.6 CI: every shard of the full suite green.
+- [x] 4.6 CI: every shard of the full suite green.
 
 ## 5. After merge (evidence owed on the issue, not a task of this change)
 
