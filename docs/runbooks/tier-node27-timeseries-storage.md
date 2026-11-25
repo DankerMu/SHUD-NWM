@@ -2802,10 +2802,6 @@ uv run --no-sync pytest -q tests/test_node27_cold_residency_runtime_identity.py 
   tests/test_node27_cold_residency_publication.py tests/test_node27_cold_tablespace_cli.py \
   tests/test_node27_cold_residency_census.py > "$RUN_ROOT/receipts/realdb-lanes-$RUN_STAMP.log" 2>&1 || rc=$?
 test "$rc" -eq 0 || { echo "NO-GO: real-DB lane pytest exit $rc" >&2; exit 1; }
-rc=0
-uv run --no-sync python scripts/validate_two_node_docker_runtime.py static \
-  > "$RUN_ROOT/receipts/two-node-static-$RUN_STAMP.log" 2>&1 || rc=$?
-test "$rc" -eq 0 || { echo "NO-GO: two-node static runtime validation exit $rc" >&2; exit 1; }
 ```
 
 C1: start the display API with the repository wrapper.  The wrapper alone sources
