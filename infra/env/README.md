@@ -520,13 +520,24 @@ Node-27 download role:
   `infra/env/node27-download.env` with mode `0600` and writer-capable
   `DATABASE_URL` on node-27.
 - Leave `NODE27_DOWNLOAD_CYCLE_TIME` empty for production automation. The runner
-  selects the first missing raw cycle after the existing contiguous raw chain,
-  bounded by the latest allowed UTC cycle from
-  `NHMS_NODE27_DOWNLOAD_ALLOWED_CYCLE_HOURS_UTC` after
-  `NODE27_DOWNLOAD_CYCLE_DELAY_HOURS` (default template: 8 hours). When no raw
-  seed exists in the continuity lookback window, it selects the latest allowed
-  cycle as the first seed. Set `NODE27_DOWNLOAD_CYCLE_TIME` only for explicit
-  operator-directed runs.
+  scans the allowed cycles from the start of the raw chain (the oldest cycle
+  with a raw manifest in the continuity lookback window) up to the latest
+  allowed UTC cycle from `NHMS_NODE27_DOWNLOAD_ALLOWED_CYCLE_HOURS_UTC` after
+  `NODE27_DOWNLOAD_CYCLE_DELAY_HOURS` (default template: 8 hours). A cycle
+  counts as downloaded only when its raw files are complete for every selected
+  source: the manifest matches and every file it lists is a non-empty regular
+  file, the rule the scheduler applies. A manifest alone does not count. The
+  latest allowed cycle is served first when it is incomplete; otherwise the
+  oldest incomplete cycle is served; otherwise the latest allowed cycle. When no
+  raw seed exists in the lookback window, it selects the latest allowed cycle
+  as the first seed. The pass summary lists the incomplete cycles with the
+  status and reason per source under `cycle_time_selection_detail`. Set
+  `NODE27_DOWNLOAD_CYCLE_TIME` only for explicit operator-directed runs.
+- To get past an older cycle the upstream no longer serves, set
+  `NODE27_DOWNLOAD_CONTINUITY_START_TIME` to a cycle after it; the scan then
+  starts there. This start ignores the lookback window, so unset it again once
+  that cycle has left the window; left in place, cycles after it that raw
+  retention later removes would be selected again.
 - The download env is not display runtime config. It must use
   `NHMS_NODE27_DOWNLOAD_ROLE=node27_data_plane_download`, local node-27
   PostgreSQL `:55432`, `OBJECT_STORE_ROOT=/home/ghdc/nwm/object-store`, and a

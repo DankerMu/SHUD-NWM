@@ -28,6 +28,7 @@ import psycopg2
 
 from packages.common.contracts.time_normalization import parse_cycle_time
 from packages.common.redaction import redact_payload, redact_text
+from services.orchestrator.source_cycle_raw_manifest import nfs_raw_manifest_readiness
 
 DOWNLOAD_ROLE = "node27_data_plane_download"
 DOWNLOAD_SUMMARY_SCHEMA = "nhms.node27_download.summary.v1"
@@ -37,6 +38,8 @@ LOCK_BLOCKED_RC = 2
 DEFAULT_ALLOWED_DB_ENDPOINTS = "127.0.0.1:55432,localhost:55432"
 DEFAULT_AUTOMATIC_CYCLE_DELAY_HOURS = 8
 DEFAULT_AUTOMATIC_CONTINUITY_LOOKBACK_DAYS = 14
+SELECTION_DETAIL_KEY = "cycle_time_selection_detail"
+SELECTION_DETAIL_MAX_NOT_READY_CYCLES = 20
 DATABASE_URL_ALLOWED_QUERY_KEYS = frozenset(
     {
         "application_name",
@@ -492,18 +495,47 @@ def _automatic_continuity_start(
     return min(existing_cycles)
 
 
-def _select_automatic_cycle_time(
+def _raw_cycle_readiness(
+    object_store_root: Path,
+    source: str,
+    cycle_time: datetime,
+    *,
+    object_store_prefix: str,
+) -> dict[str, Any]:
+    """Status and reason of the scheduler's raw manifest readiness rule for one source and cycle."""
+    try:
+        readiness = nfs_raw_manifest_readiness(
+            source_id=source,
+            cycle_time=cycle_time,
+            object_store_root=object_store_root,
+            object_store_prefix=object_store_prefix,
+        )
+    except Exception:  # noqa: BLE001 - one unreadable cycle must not fail the pass before it selects
+        return {"status": "error", "reason": "readiness_error"}
+    return {"status": readiness.get("status"), "reason": readiness.get("reason")}
+
+
+def _select_automatic_cycle(
     env: dict[str, str],
     *,
     now: datetime | None = None,
     sources: Sequence[str] | None = None,
-) -> str:
+) -> tuple[str, dict[str, Any]]:
+    """Select the automatic cycle and return it with the not-ready cycles of the window.
+
+    A cycle is ready when every selected source passes the raw manifest
+    readiness rule. The latest allowed cycle wins when it is not ready, then
+    the oldest not-ready cycle from the chain start, then the latest allowed
+    cycle.
+    """
     allowed_hours = _allowed_cycle_hours(env)
     latest_allowed = _latest_allowed_cycle(env, now=now)
     selected_sources = tuple(sources or _normalize_sources(None, env))
+    not_ready: list[dict[str, Any]] = []
+    detail = {"latest_allowed_cycle_time": _format_cycle_time(latest_allowed), "not_ready_cycles": not_ready}
     object_store_root_value = (env.get("OBJECT_STORE_ROOT") or "").strip()
     if not object_store_root_value:
-        return _format_cycle_time(latest_allowed)
+        return _format_cycle_time(latest_allowed), detail
 
     object_store_root = Path(object_store_root_value)
     continuity_start = _automatic_continuity_start(
@@ -514,12 +546,44 @@ def _select_automatic_cycle_time(
         latest_allowed=latest_allowed,
     )
     if continuity_start is None:
-        return _format_cycle_time(latest_allowed)
+        return _format_cycle_time(latest_allowed), detail
 
+    # The adapters started by this pass write manifest URIs with this prefix.
+    object_store_prefix = env.get("OBJECT_STORE_PREFIX") or ""
     for cycle_time in _iter_allowed_cycles(continuity_start, latest_allowed, allowed_hours):
-        if any(not _raw_manifest_exists(object_store_root, source, cycle_time) for source in selected_sources):
-            return _format_cycle_time(cycle_time)
-    return _format_cycle_time(latest_allowed)
+        readiness = {
+            source: _raw_cycle_readiness(object_store_root, source, cycle_time, object_store_prefix=object_store_prefix)
+            for source in selected_sources
+        }
+        if any(item["status"] != "ready" for item in readiness.values()):
+            not_ready.append({"cycle_time": _format_cycle_time(cycle_time), "sources": readiness})
+
+    latest_text = _format_cycle_time(latest_allowed)
+    if not not_ready or not_ready[-1]["cycle_time"] == latest_text:
+        return latest_text, detail
+    return not_ready[0]["cycle_time"], detail
+
+
+def _select_automatic_cycle_time(
+    env: dict[str, str],
+    *,
+    now: datetime | None = None,
+    sources: Sequence[str] | None = None,
+) -> str:
+    return _select_automatic_cycle(env, now=now, sources=sources)[0]
+
+
+def _selection_summary_fields(detail: dict[str, Any] | None) -> dict[str, Any]:
+    if detail is None:
+        return {}
+    not_ready = detail["not_ready_cycles"]
+    return {
+        SELECTION_DETAIL_KEY: {
+            "latest_allowed_cycle_time": detail["latest_allowed_cycle_time"],
+            "not_ready_cycle_count": len(not_ready),
+            "not_ready_cycles": not_ready[:SELECTION_DETAIL_MAX_NOT_READY_CYCLES],
+        }
+    }
 
 
 def _lock_preflight(raw_value: str | None) -> tuple[dict[str, Any], list[dict[str, str]]]:
@@ -859,9 +923,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         _emit_json_summary(summary)
         return PREFLIGHT_BLOCKED_RC
 
+    selected_by = "explicit" if args.cycle_time else "automatic"
+    selection_detail: dict[str, Any] | None = None
     try:
-        selected_by = "explicit" if args.cycle_time else "automatic"
-        raw_cycle_time = args.cycle_time or _select_automatic_cycle_time(env, sources=sources)
+        if args.cycle_time:
+            raw_cycle_time = args.cycle_time
+        else:
+            raw_cycle_time, selection_detail = _select_automatic_cycle(env, sources=sources)
     except ValueError as error:
         summary = {
             "schema": DOWNLOAD_SUMMARY_SCHEMA,
@@ -897,6 +965,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "role": DOWNLOAD_ROLE,
             "cycle_time": raw_cycle_time,
             "cycle_time_selection": selected_by,
+            **_selection_summary_fields(selection_detail),
             "sources": [],
             "preflight": preflight,
             "downloads": {"downloaded": 0, "failed": 0, "processed": 0, "details": []},
@@ -916,6 +985,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "role": DOWNLOAD_ROLE,
             "cycle_time": cycle_time,
             "cycle_time_selection": selected_by,
+            **_selection_summary_fields(selection_detail),
             "sources": list(sources),
             "preflight": preflight,
             "downloads": {"downloaded": 0, "failed": 0, "processed": 0, "details": []},
@@ -933,6 +1003,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "role": DOWNLOAD_ROLE,
                 "cycle_time": cycle_time,
                 "cycle_time_selection": selected_by,
+                **_selection_summary_fields(selection_detail),
                 "sources": list(sources),
                 "preflight": preflight,
                 "downloads": {"downloaded": 0, "failed": 0, "processed": 0, "details": []},
@@ -961,6 +1032,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "role": DOWNLOAD_ROLE,
         "cycle_time": cycle_time,
         "cycle_time_selection": selected_by,
+        **_selection_summary_fields(selection_detail),
         "sources": list(sources),
         "preflight": preflight,
         "downloads": {**counts, "details": details},
