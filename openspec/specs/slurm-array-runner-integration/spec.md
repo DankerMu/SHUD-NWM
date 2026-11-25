@@ -1,17 +1,20 @@
 # slurm-array-runner-integration Specification
 
 ## Purpose
-TBD - created by archiving change m20-production-multibasin-continuous-automation. Update Purpose after archive.
+Define how the production scheduler runs heavy work on Slurm: gateway submission by default, array-capable model stages, and scheduler configuration construction whose path handling gives the same result on every supported interpreter.
+
 ## Requirements
+
 ### Requirement: Slurm-first heavy execution
 
 The production scheduler SHALL submit heavy download/canonical/forcing/SHUD/parse/publish work through the Slurm gateway by default when Slurm execution is enabled.
 
 #### Scenario: compute-node database preflight
 
-WHEN Slurm execution is enabled and `DATABASE_URL` points to localhost or is missing
-THEN the scheduler rejects submission before creating Slurm jobs
-AND records a preflight blocker explaining the required compute-node reachable database endpoint.
+WHEN Slurm execution is enabled and `DATABASE_URL` is missing, points to localhost, or points to a remote host
+THEN the Slurm preflight does not require a database endpoint: it records `checks.database` with `required: false`, `db_free_runtime: true` and `compute_node_reachable: "not_required"`, and emits no `SLURM_PREFLIGHT_DATABASE_URL_*` blocker for any of the three (the scheduler is always DB-free; `ProductionSchedulerConfig` pins `scheduler_db_free_required` to `true`)
+AND a configured `DATABASE_URL`, local or remote, is refused by the DB-free runtime preflight as `database_url_forbidden` (`DATABASE_URL`): `run_once()` returns `preflight_blocked` with `execution_boundary` and `lock.reason` both `db_free_runtime_preflight_blocked`, the scheduler lock is not acquired, and no Slurm job is created
+AND a missing `DATABASE_URL` is the expected DB-free state and is not refused on that ground (#3311 observed-behaviour rows 1-3, table restated in PR #3325 body).
 
 #### Scenario: project-local runtime roots
 
@@ -43,23 +46,21 @@ AND records a storage preflight blocker.
 
 #### Scenario: unresolvable allowed storage root
 
-WHEN Slurm execution is enabled and a configured allowed storage root cannot be canonically resolved for a reason other than absence (for example a path whose ancestor is a regular file or an untraversable directory), as detected by errno from strict resolution
-THEN on database-backed runtimes, on every scheduler pass that reaches the storage preflight, the storage preflight excludes that root from the effective allowed roots, records a storage preflight blocker, and rejects submission before creating Slurm jobs, with identical storage-preflight behavior across supported CPython versions
-AND on database-backed runtimes with runtime roots required, the scheduler runtime-root preflight planes (the lock/evidence arm and the full runtime arm alike) reach the same verdict as the storage preflight for the same configured root — the root is excluded from the effective allowed roots that serve as approved containment bases, a structured scheduler-root blocker in the existing `SCHEDULER_ROOT_*` family records why, and the preflight payload's allowed-roots evidence never lists the excluded root — so for a given filesystem state the two evidence planes produced by one run never contradict each other and the adjudication never escapes as an unhandled exception on any supported CPython version
-AND on database-backed runtimes with runtime roots not required, the not-required preflight payload shares the same adjudication — its allowed-roots evidence never lists the unresolvable root, the adjudication never escapes as an unhandled exception on any supported CPython version, and no runtime-root blocker is emitted (that payload declares no containment adjudication and carries no blocker channel; when Slurm execution is enabled the storage preflight remains the blocker-bearing plane for that configuration)
-AND scheduler configuration construction never aborts because an allowed storage root is unresolvable; the configuration layer hands down the canonicalised value without adjudicating and classification is owned by the storage preflight
-AND on db-free runtimes the db-free lane keeps the existing lexical-fallback tolerance for such a root without a blocker, and the db-free selector's allowed-roots lane records its existing unresolvable-root rejection for such a root instead of admitting it
-AND on a database-backed run that exercises the db-free-lane containment checks (repair authority), the unresolvable root is excluded from that lane's containment bases and a structured blocker in that lane's existing family records why — the lexical tolerance is a property of the db-free lane, not of database-backed runs through it
-AND an allowed root that remains merely missing after canonicalization (ENOENT) is never treated as unsafe and never escapes configuration construction or the storage preflight as an unhandled exception on any runtime
-AND blocker paths obey the runtime-root preflight's existing evidence-safe masking discipline.
+WHEN Slurm execution is enabled and a configured allowed storage root cannot be canonically resolved — its ancestor is a regular file (`ENOTDIR`), an ancestor denies traversal (`EACCES`), it is a symlink loop (`ELOOP`), or it does not exist (`ENOENT`) — as detected by errno from strict resolution
+THEN scheduler configuration construction never aborts because of it; the configuration layer hands the value down without adjudicating, admitting it into `allowed_storage_roots` lexically for the three non-`ENOENT` errnos and as the non-strict real path for `ENOENT`
+AND the root is admitted as a containment base with no blocker of its own on every plane of the run: the storage preflight emits no `ALLOWED_STORAGE_ROOTS_*` blocker, the scheduler runtime-root preflight emits no `SCHEDULER_ROOT_ALLOWED_ROOTS_*` blocker, and the DB-free lane emits no `db_free_allowed_root_unsafe` blocker; every plane lists the root in its allowed-roots evidence, so for a given filesystem state the evidence planes produced by one run never contradict each other, and the adjudication never escapes as an unhandled exception
+AND this admission is adjudicated by `docs/adr/0009-path-canonicalization-dereference-doctrine.md` clause 3: the admitted root serves only as a containment base and carries no assertion that it exists, and a path judged against it is dereferenced before any verdict is committed — a DB-free required path placed under such a root is itself adjudicated by the DB-free runtime preflight's required-path blockers (for example `NHMS_SCHEDULER_JOURNAL_ROOT` under an `ENOTDIR` or `ELOOP` root is refused as `db_free_required_path_unsafe`)
+AND the same holds whether or not the pass carries repair authority (`repair_missing_forcing` false and true)
+AND an allowed root that remains merely missing after canonicalization (ENOENT) is never treated as unsafe and never escapes configuration construction or the storage preflight as an unhandled exception
+AND blocker paths and allowed-roots evidence obey the runtime-root preflight's existing evidence-safe masking discipline (`[local-path]`) (#3311 observed-behaviour rows 4-11, 24-25).
 
 #### Scenario: unresolvable general storage root at configuration construction
 
-WHEN a database-backed runtime configures an object-store, published-artifact, log, runtime, or temp root — a root that is not a containment base for other configured paths — whose final path component cannot be canonically resolved for a reason other than absence (for example a symlink loop)
+WHEN the scheduler configures an object-store, published-artifact, log, runtime, or temp root — a root that is not a containment base for other configured paths — whose final path component cannot be canonically resolved for a reason other than absence (for example a symlink loop)
 THEN scheduler configuration construction never aborts: the configuration layer hands down the non-strict canonicalised value without adjudicating, producing the same canonical form and the same subsequent verdict across supported CPython versions
-AND when Slurm execution is enabled, for such roots consulted by the storage preflight (object-store, log, and runtime roots), the storage preflight records the corresponding unsafe-path storage preflight blocker and rejects submission before creating Slurm jobs
-AND a root that is merely missing (ENOENT) keeps the existing construction-time semantics — configuration construction performs no existence validation and the canonicalised value is identical to the previous non-strict resolution product
-AND on db-free runtimes the same inputs keep the existing graceful-degradation behavior unchanged.
+AND when Slurm execution is enabled, the storage preflight records the unsafe-path storage preflight blocker for the roots it consults (`SLURM_PREFLIGHT_OBJECT_STORE_ROOT_UNSAFE_PATH`, `SLURM_PREFLIGHT_LOG_ROOT_UNSAFE_PATH`, `SLURM_PREFLIGHT_RUNTIME_ROOT_UNSAFE_PATH`) and rejects submission before creating Slurm jobs
+AND when such a root's final segment is a symlink loop, the scheduler runtime-root preflight refuses the object-store, published-artifact, runtime and temp roots it judges as `SCHEDULER_ROOT_<FIELD>_SYMLINK`; it does not judge the log root
+AND a root that is merely missing (ENOENT) keeps the existing construction-time semantics — configuration construction performs no existence validation and the canonicalised value is identical to the previous non-strict resolution product (#3311 observed-behaviour rows 12-16).
 
 #### Scenario: safe template and environment export
 
@@ -73,98 +74,108 @@ AND secret leakage, shell metacharacter injection, and unrecognized template nam
 Scheduler configuration construction SHALL apply the established
 strict-realpath-then-non-strict paradigm to the containment-base confinement
 helper, to both preserve-final parent-segment helpers, and to the
-safe-directory final-component guard's parent-segment resolution, so that a
-symlink loop in WORKSPACE_ROOT's or NHMS_SCHEDULER_LOCK_ROOT's final segment,
-or in any configured path's parent segment, produces the same exception type
-and the same subsequent verdict on CPython 3.11/3.12 as on 3.13+, and never
-aborts construction with an errno-less RuntimeError in those geometries. The
-safe-directory guard's own final-segment resolve (a loop as the evidence
-directory's final segment inside the workspace) remains version-divergent and
-is tracked separately as issue #1544 — it is outside this requirement.
+safe-directory final-component guard's parent-segment resolution. The scheduler
+SHALL build its configuration only through the DB-free construction (there is no
+database-backed configuration arm; `ProductionSchedulerConfig` pins
+`scheduler_db_free_required` to `true`, `scheduler_config/config.py`). That
+construction SHALL hand a path it cannot confine or canonicalise down to the
+scheduler root preflight (`scheduler_config/path_modes.py`
+`_confined_path_for_mode`, `_require_under_workspace_for_mode`,
+`_require_safe_directory_final_component_for_mode`) instead of raising, so that
+a symlink loop in WORKSPACE_ROOT's or NHMS_SCHEDULER_LOCK_ROOT's final segment,
+or in any configured path's parent segment, never aborts construction with an
+errno-less RuntimeError or a construction-time ValueError, and the root
+preflight refuses it before the scheduler lock is acquired with the same
+field-named blocker codes on CPython 3.11/3.12 as on 3.13+. The confinement
+helper `_confined_path` itself keeps its structured containment refusal as a
+helper-level contract. The safe-directory guard's own final-segment resolve (a
+loop as the evidence directory's final segment inside the workspace) remains
+version-divergent and is tracked separately as issue #1544 — it is outside this
+requirement.
 
 #### Scenario: WORKSPACE_ROOT final-segment loop converges to the structured safe-directory refusal
 
-WHEN WORKSPACE_ROOT is a symlink loop's final segment
-THEN configuration construction raises the existing structured safe-directory
-ValueError identically on CPython 3.11/3.12 and 3.13+ (the current message
-attributes the evidence_dir field; that attribution is a known defect tracked
-as issue #1545, and this scenario locks the refusal class, not the string)
+- **WHEN** WORKSPACE_ROOT is a symlink loop's final segment
+- **THEN** configuration construction does not raise, identically on CPython
+  3.11/3.12 and 3.13+
+- **AND** the scheduler root preflight refuses before the lock with the
+  field-named blockers `SCHEDULER_ROOT_WORKSPACE_ROOT_SYMLINK` (`workspace_root`),
+  `SCHEDULER_ROOT_LOCK_ROOT_UNSAFE_PATH` (`lock_root`) and
+  `SCHEDULER_ROOT_EVIDENCE_ROOT_UNSAFE_PATH` (`evidence_root`), and the
+  evidence directory the preflight judged is the one derived from the looping
+  workspace root (`tests/test_production_scheduler.py`
+  `test_resolve_residue_config_final_segment_loop_converges_to_structured_refusal`)
+- **AND** when the loop is the evidence root's final segment inside the
+  workspace, the same construction route refuses it before the lock as
+  `SCHEDULER_ROOT_EVIDENCE_ROOT_SYMLINK` (`evidence_root`)
+  (`test_final_segment_loop_refuses_on_the_construction_route`).
 
 #### Scenario: NHMS_SCHEDULER_LOCK_ROOT final-segment loop converges to the structured containment refusal
 
-WHEN NHMS_SCHEDULER_LOCK_ROOT is a symlink loop's final segment
-THEN configuration construction raises the existing structured containment
-ValueError (carrying the field name) identically on CPython 3.11/3.12 and
-3.13+
+- **WHEN** NHMS_SCHEDULER_LOCK_ROOT is a symlink loop's final segment
+- **THEN** configuration construction does not raise, identically on CPython
+  3.11/3.12 and 3.13+
+- **AND** the scheduler root preflight refuses before the lock with the
+  field-named containment blocker `SCHEDULER_ROOT_LOCK_ROOT_OUT_OF_WORKSPACE`
+  (`lock_root`), followed by `SCHEDULER_ROOT_EVIDENCE_ROOT_NOT_FOUND`
+  (`evidence_root`)
+  (`test_resolve_residue_config_final_segment_loop_converges_to_structured_refusal`)
+- **AND** the containment-base confinement helper `_confined_path`, called
+  directly, still canonicalises a loop in the base's parent chain and keeps a
+  final-segment loop verbatim
+  (`test_resolve_residue_confined_path_canonicalises_parent_segment_loop`,
+  `test_resolve_residue_confined_path_keeps_final_segment_loop_verbatim`).
 
 #### Scenario: parent-segment loop no longer aborts construction on 3.11/3.12
 
-WHEN any env-driven root's parent segment contains a symlink loop under the
-db-backed configuration arm
-THEN configuration construction on CPython 3.11/3.12 produces the same
-canonical form and the same subsequent verdict as 3.13+ instead of raising an
-errno-less RuntimeError. The db-free preserve-final arm
-(`_safe_preserve_final_component`) is outside this requirement: on 3.11/3.12
-it still swallows the loop and returns the raw path. That sub-family has since
-been adjudicated by `docs/adr/0009-path-canonicalization-dereference-doctrine.md`,
-which admits this arm under clause 1: the products of its call sites reach a
-kernel dereference — the preflight `lstat` — before any verdict derived from them
-is committed. The product does differ between CPython 3.12 and 3.13+ where the
-loop sits behind a symlinked parent, but that difference is neutral at the
-dereference: the condition that makes the two spellings differ is precisely a
-loop surviving in the parent chain, so `lstat` reports `ELOOP` for both. The
-neutrality is backed by `tests/test_preserve_final_component_loop_spelling.py`,
-which builds both spellings and asserts `ELOOP` for each on the pinned
-interpreter; the 3.13 spelling it builds is synthesized from the folding rule
-rather than produced by a 3.13 runtime, so the 3.13 half of this claim rests on
-that construction and is tracked with the rest of the cross-interpreter question
-by issue #2453. The neutrality claim SHALL NOT be widened beyond a parent-chain
-loop: for a `<missing>/../<loop>` input the two spellings do not agree at the
-dereference — the raw spelling faults `ENOENT` and the folded one `ELOOP` — and
-the same test pins that boundary so the wording cannot drift outward. A cross-interpreter
-difference in the refusal's blocker code and in the emitted evidence payload
-does exist on this preflight leg; a counterfactual probe attributes it to that
-leg's own `Path.resolve(strict=False)` rather than to this arm, and it is
-tracked by issue #2453
+- **WHEN** any env-driven root's parent segment contains a symlink loop and the
+  root is canonicalised through the resolve arm (`_resolve_config_path_for_mode`,
+  `scheduler_config/path_modes.py`)
+- **THEN** configuration construction on CPython 3.11/3.12 produces the same
+  canonical form and the same subsequent verdict as 3.13+ instead of raising an
+  errno-less RuntimeError, and the root's preflight path carries the same
+  canonical form so the storage preflight owns the verdict
+  (`test_resolve_residue_config_parent_segment_loop_object_store_root_constructs`)
+- **AND** the preserve-final arm (`_safe_preserve_final_component`) is outside
+  this requirement: on 3.11/3.12 it still swallows the loop and returns the raw
+  path. That sub-family has since been adjudicated by
+  `docs/adr/0009-path-canonicalization-dereference-doctrine.md`, which admits
+  this arm under clause 1: the products of its call sites reach a kernel
+  dereference — the preflight `lstat` — before any verdict derived from them is
+  committed. The product does differ between CPython 3.12 and 3.13+ where the
+  loop sits behind a symlinked parent, but that difference is neutral at the
+  dereference: the condition that makes the two spellings differ is precisely a
+  loop surviving in the parent chain, so `lstat` reports `ELOOP` for both. The
+  neutrality is backed by `tests/test_preserve_final_component_loop_spelling.py`,
+  which builds both spellings and asserts `ELOOP` for each on the pinned
+  interpreter; the 3.13 spelling it builds is synthesized from the folding rule
+  rather than produced by a 3.13 runtime, so the 3.13 half of this claim rests
+  on that construction and is tracked with the rest of the cross-interpreter
+  question by issue #2453. The neutrality claim SHALL NOT be widened beyond a
+  parent-chain loop: for a `<missing>/../<loop>` input the two spellings do not
+  agree at the dereference — the raw spelling faults `ENOENT` and the folded one
+  `ELOOP` — and the same test pins that boundary so the wording cannot drift
+  outward. A cross-interpreter difference in the refusal's blocker code and in
+  the emitted evidence payload does exist on this preflight leg; a
+  counterfactual probe attributes it to that leg's own `Path.resolve(strict=False)`
+  rather than to this arm, and it is tracked by issue #2453.
 
 #### Scenario: ENOENT and non-loop containment semantics are unchanged
 
-WHEN a configured path merely does not exist yet, or a non-loop path violates
-workspace containment
-THEN the existing no-existence-validation construction semantics and the
-existing "must be under workspace_root" refusal are byte-for-byte unchanged
-
-### Requirement: Scheduler configuration construction SHALL survive an undeterminable home directory on both database arms
-
-Scheduler configuration construction SHALL treat a configured path whose leading `~` component has no determinable home directory as a value to hand down to the storage preflight, not as a construction-time abort, on the database-backed arm exactly as on the database-free arm, because classification of unusable roots belongs to the preflight and a construction-time abort produces no structured blocker at all.
-
-The two arms SHALL produce byte-identical products for the same such input, so that the convergence is pinned by an equality of results rather than merely by the absence of an exception. This applies to the two configuration fields that bypass the deliberate re-raise helper and reach the module's own bare expansions — the allowed storage roots and the log root. Every other root field aborts earlier in the deliberate re-raise, which is an existing design ruling and is out of scope; a third bare expansion in the module is reachable only through the compatibility forwarders and is closed as a ledger item, not because a production field reaches it.
-
-#### Scenario: An allowed storage root naming an unknown user constructs successfully on the database-backed arm
-
-- **GIVEN** an allowed storage root configured as `~<unknown user>/roots`
-- **WHEN** the scheduler configuration is constructed with the database-backed arm selected
-- **THEN** construction succeeds instead of aborting with an errno-less `RuntimeError`
-- **AND** the resulting value is byte-identical to the value the database-free arm produces for the same input
-
-#### Scenario: A log root naming an unknown user constructs successfully on the database-backed arm
-
-- **GIVEN** a log root configured as `~<unknown user>/logs`
-- **WHEN** the scheduler configuration is constructed with the database-backed arm selected
-- **THEN** construction succeeds and the value is byte-identical to the database-free arm's value
-
-#### Scenario: The compatibility-surface expansion helper stops throwing bare on the same input
-
-- **GIVEN** the module's non-relative preserve-final-component helper, `_config_path_preserve_final_component`, called directly with `~<unknown user>/workspace`
-- **WHEN** it expands the value
-- **THEN** it returns the same product the database-free arm would produce
-- **AND** it does not raise an errno-less `RuntimeError`
-
-#### Scenario: The storage preflight still classifies the unusable root structurally
-
-- **GIVEN** a configuration constructed from such a value
-- **WHEN** the storage preflight runs
-- **THEN** it returns its structured blocked result rather than raising, the unusable root being admitted by the tolerance arm for a merely missing path and classified through the consequential root blockers
+- **WHEN** a configured path merely does not exist yet, or a non-loop path
+  violates workspace containment
+- **THEN** configuration construction performs no existence validation and the
+  canonicalised value is the previous non-strict resolution product
+  (`test_resolve_residue_helpers_keep_missing_path_semantics`,
+  `test_resolve_residue_config_keeps_missing_lock_root_semantics`)
+- **AND** a non-loop lock or evidence path outside the workspace constructs and
+  is refused by the root preflight before the lock as
+  `SCHEDULER_ROOT_LOCK_ROOT_OUT_OF_WORKSPACE` / `SCHEDULER_ROOT_EVIDENCE_ROOT_OUT_OF_WORKSPACE`
+  (`test_explicit_paths_must_stay_under_workspace`)
+- **AND** the confinement helper `_confined_path`, called directly, keeps the
+  existing "must be under workspace_root" `ValueError` byte-for-byte, whether or
+  not the offending parent exists
+  (`test_resolve_residue_confined_path_keeps_non_loop_containment_refusal`).
 
 ### Requirement: The safe-directory guard SHALL resolve a final-segment symlink identically on every supported interpreter
 
@@ -172,14 +183,16 @@ The safe-directory final-component guard SHALL decide a final-segment symlink by
 
 Every strict real-path failure other than a loop SHALL first fall back to non-strict real-path resolution, preserving the established resolution product for a target that does not exist, a target whose parent denies traversal, or a target reached through a regular file. The fallback SHALL NOT itself be treated as proof that the target is absent or a directory: the subsequent final-target classification SHALL distinguish absence, directory, non-directory, and metadata denial without relying on the interpreter-dependent exception swallowing of `Path.exists()` or `Path.is_dir()`. `EACCES` or `EPERM` at that classification boundary SHALL fail closed with the guard's structured `ValueError` safety contract, never leak a raw permission exception and never be accepted as a missing target.
 
+The guard is a helper-level contract. Scheduler configuration construction, which is always the DB-free construction, does not let the guard's refusal abort it: it hands the evidence directory down (`scheduler_config/path_modes.py` `_require_safe_directory_final_component_for_mode`) and the scheduler runtime-root preflight refuses the loop before the scheduler lock is acquired.
+
 The loop refusal SHALL be recognised by the loop error number obtained from the `errno` module rather than by a hard-coded integer. The guard's separate metadata-lookup failure handler SHALL keep its existing refusal for every error number other than a loop, so that the non-loop geometries already pinned against that handler stay green verbatim.
 
 #### Scenario: A final-segment loop inside the workspace is refused identically on both interpreter arms
 
 - **GIVEN** an evidence directory whose final segment is a symlink loop located inside the workspace root
-- **WHEN** the scheduler configuration is constructed on the database-backed arm
-- **THEN** it raises the structured configuration error on CPython 3.11 and 3.12 and on 3.13 and later alike
-- **AND** the loop is never adopted as the field's value
+- **WHEN** the scheduler configuration is constructed
+- **THEN** construction does not raise, and `evidence_dir` keeps the configured spelling of the loop rather than a resolved target
+- **AND** the scheduler runtime-root preflight refuses it before the lock as `SCHEDULER_ROOT_EVIDENCE_ROOT_SYMLINK` (`evidence_root`) (`tests/test_production_scheduler.py` `test_final_segment_loop_refuses_on_the_construction_route`; #3311 observed-behaviour row 17)
 
 #### Scenario: The guard reaches the same verdict on both interpreter arms when called directly
 
@@ -222,34 +235,35 @@ The loop refusal SHALL be recognised by the loop error number obtained from the 
 
 ### Requirement: A workspace-root loop refusal SHALL name the operator's own knob and carry the offending path
 
-The configuration refusal raised when the workspace root itself is a symlink loop SHALL carry the offending path as its sibling refusals in the same guard carry their operands and SHALL let an operator reach the workspace-root knob, because the refusal is currently attributed to a derived evidence-directory field the operator never configured and carries neither a path nor an environment variable name.
-
-The refusal SHALL remain a configuration `ValueError`, the message SHALL be identical on CPython 3.11 and 3.12 and on 3.13 and later, and the lock-root containment refusal SHALL keep its current wording verbatim. The path SHALL be carried as the guard's sibling refusals carry their operands, because that guard receives no evidence-redaction flag and cannot reproduce the preflight lane's redaction treatment. The non-loop geometries that reach the same handler — a workspace root that is a regular file, and one whose mode denies traversal — SHALL keep their existing message verbatim, so the enriched wording is reached only by the loop.
+The refusal of a workspace root that is itself a symlink loop SHALL be attributed to the workspace-root knob the operator configured, not only to the evidence directory derived from it. Scheduler configuration construction, which is always the DB-free construction, SHALL NOT raise for this geometry: it hands the workspace root and the lock and evidence roots derived from it down to the scheduler runtime-root preflight, which refuses them before the scheduler lock is acquired with field-named blockers whose first entry names `workspace_root`. The blocker codes SHALL be identical on CPython 3.11 and 3.12 and on 3.13 and later, because the root check decides them from the kernel `lstat` of the configured path (see `runtime-evidence-and-operations` "The scheduler root check SHALL attribute a symlink-loop root identically on every supported interpreter"). Blocker paths obey the preflight's evidence-safe masking discipline. The non-loop geometries — a workspace root that is a regular file, and one whose mode denies traversal — SHALL also construct and SHALL keep a verdict distinct from the loop's.
 
 #### Scenario: The workspace-root loop refusal is attributable to the workspace root
 
 - **GIVEN** a workspace root configured as a symlink loop and no evidence-root override set
-- **WHEN** the scheduler configuration is constructed
-- **THEN** the raised configuration error carries the offending path
-- **AND** it lets the operator reach the workspace-root knob rather than pointing only at the derived evidence directory
+- **WHEN** the scheduler configuration is constructed and the scheduler runtime-root preflight runs
+- **THEN** construction does not raise
+- **AND** the preflight is blocked with `SCHEDULER_ROOT_WORKSPACE_ROOT_SYMLINK` (`workspace_root`), followed by `SCHEDULER_ROOT_LOCK_ROOT_UNSAFE_PATH` (`lock_root`) and `SCHEDULER_ROOT_EVIDENCE_ROOT_UNSAFE_PATH` (`evidence_root`) for the roots derived from it (`tests/test_production_scheduler.py` `test_resolve_residue_config_final_segment_loop_converges_to_structured_refusal`; #3311 observed-behaviour row 18)
 
 #### Scenario: The refusal text is identical across interpreter arms
 
 - **GIVEN** the same workspace-root loop
-- **WHEN** the configuration is constructed on CPython 3.11 or 3.12 and on 3.13 or later
-- **THEN** the two messages are identical
+- **WHEN** the configuration is constructed and the root preflight runs on CPython 3.11 or 3.12 and on 3.13 or later
+- **THEN** the two runs carry the same blocker codes and fields
 
 #### Scenario: The lock-root refusal is untouched
 
 - **GIVEN** a lock root configured as a symlink loop
 - **WHEN** the configuration is constructed
-- **THEN** the refusal keeps its existing containment wording verbatim
+- **THEN** construction does not raise
+- **AND** a loop outside the workspace is refused by the root preflight as `SCHEDULER_ROOT_LOCK_ROOT_OUT_OF_WORKSPACE` (`lock_root`) (`test_resolve_residue_config_final_segment_loop_converges_to_structured_refusal[NHMS_SCHEDULER_LOCK_ROOT-expected_blockers1]`), and a loop inside the workspace as `SCHEDULER_ROOT_LOCK_ROOT_SYMLINK` (`lock_root`); for the latter `run_once()` returns `preflight_blocked` with `execution_boundary` and `lock.reason` both `scheduler_root_preflight_blocked` and the lock is not acquired (#3311 observed-behaviour row 21)
+- **AND** the confinement helper `_confined_path`, called directly, keeps its "must be under workspace_root" wording verbatim (`test_resolve_residue_confined_path_keeps_non_loop_containment_refusal`)
 
 #### Scenario: The non-loop workspace-root refusals are untouched
 
 - **GIVEN** in turn a workspace root that is a regular file and a workspace root whose mode denies traversal
-- **WHEN** the configuration is constructed
-- **THEN** each keeps its existing refusal message verbatim
+- **WHEN** the configuration is constructed and the root preflight runs
+- **THEN** construction does not raise
+- **AND** the scheduler runtime-root preflight is blocked with `SCHEDULER_ROOT_WORKSPACE_ROOT_OUT_OF_APPROVED_ROOT` (`workspace_root`) for each (#3311 observed-behaviour rows 19-20, table restated in PR #3325 body)
 
 ### Requirement: The compatibility-surface path helpers SHALL converge on a normalized result instead of diverging by interpreter
 
@@ -276,3 +290,63 @@ Their existing contract SHALL be preserved exactly: a `None` or empty value stil
 - **WHEN** either helper is called
 - **THEN** it returns the non-strict normalized result rather than raising
 
+### Requirement: Scheduler configuration construction SHALL survive an undeterminable home directory
+
+Scheduler configuration construction, which is always the DB-free construction,
+SHALL treat a configured path whose leading `~` component has no determinable
+home directory as a value to hand down to the storage preflight, not as a
+construction-time abort, because classification of unusable roots belongs to
+the preflight and a construction-time abort produces no structured blocker at
+all.
+
+This applies to the two configuration fields that bypass the deliberate re-raise
+helper and reach the module's own bare expansions — the allowed storage roots
+and the log root. Every other root field reaches the construction's mode-aware
+expansion (`scheduler_config/path_modes.py` `_expanduser_for_mode`), which also
+keeps an unexpandable value instead of raising; the deliberate re-raise that the
+database-backed arm applied there was deleted with that arm (#3311), and this
+requirement pins only the two fields above. A third bare
+expansion in the module is reachable only through the compatibility forwarders
+and is closed as a ledger item, not because a production field reaches it. The
+construction's product SHALL be pinned by spelled-out values rather than merely
+by the absence of an exception, and passing the retired keyword
+`scheduler_db_free_required=False` SHALL yield the same DB-free configuration.
+
+#### Scenario: An allowed storage root naming an unknown user constructs successfully
+
+- **GIVEN** an allowed storage root configured as `~<unknown user>/roots`
+- **WHEN** the scheduler configuration is constructed, with or without the
+  retired keyword `scheduler_db_free_required=False`
+- **THEN** construction succeeds instead of aborting with an errno-less
+  `RuntimeError`, and the configuration reports `db_free_required` as `true`
+- **AND** the value keeps the tilde segment verbatim, anchored at the working
+  directory (`tests/test_production_scheduler.py`
+  `test_expanduser_residue_config_constructs_on_the_db_free_construction`,
+  which replaces the two-arm equality test).
+
+#### Scenario: A log root naming an unknown user constructs successfully
+
+- **GIVEN** a log root configured as `~<unknown user>/logs`
+- **WHEN** the scheduler configuration is constructed, with or without the
+  retired keyword `scheduler_db_free_required=False`
+- **THEN** construction succeeds and the value keeps the tilde segment verbatim,
+  anchored at `workspace_root`
+  (`test_expanduser_residue_config_constructs_on_the_db_free_construction`).
+
+#### Scenario: The compatibility-surface expansion helper stops throwing bare on the same input
+
+- **GIVEN** the module's non-relative preserve-final-component helper, `_config_path_preserve_final_component`, called directly with `~<unknown user>/workspace`
+- **WHEN** it expands the value
+- **THEN** it returns the same product as the DB-free construction's
+  preserve-final helper (`_config_path_preserve_final_component_for_mode`)
+- **AND** it does not raise an errno-less `RuntimeError`
+  (`test_expanduser_residue_preserve_final_component_helper_matches_db_free_arm`).
+
+#### Scenario: The storage preflight still classifies the unusable root structurally
+
+- **GIVEN** a configuration constructed from such a value
+- **WHEN** the storage preflight runs
+- **THEN** it returns its structured blocked result rather than raising, the
+  unusable root being admitted by the tolerance arm for a merely missing path
+  and classified through the consequential root blockers
+  (`test_expanduser_residue_preflight_classifies_structurally`).

@@ -31,6 +31,40 @@ anywhere in that unit's subtree (closures included) a reference.  A sibling
 must never bind a facade-resident patched name by import (top level or function
 body): a bound copy escapes the facade monkeypatch.
 
+The ``callers`` table is per top-level unit, so it cannot see one method of a
+mixin bypassing the facade while another method of the same mixin still reads
+the name off it.  The origin rule closes that statically for every patched name
+the facade binds by import (``binding: import``): the origin is derived from the
+facade's own ``from <module> import <origin> [as <name>]`` statement, and in any
+sibling, at any depth, it rejects a from-import of the origin name (from any
+module, under any alias, so a re-export through a third module is covered too)
+and any ``<base>.<origin name>`` whose base is not bound to the facade module in
+that top-level unit (``safe_fs.stat_no_follow``, ``import ... safe_fs as s;
+s.stat_no_follow`` and the unaliased dotted form).  Other names of an origin
+module (``SafeFilesystemError``, ``format_cycle_time`` ...) stay allowed.
+What the origin rule sees, and its accepted limits:
+
+* reads by string are not seen: ``getattr(module, "<origin>")`` and
+  ``module.__dict__["<origin>"]``;
+* ``importlib.import_module(...).<origin>`` IS reported: it is an attribute
+  read by name whose base is not a facade alias;
+* a star import (``from packages.common.safe_fs import *``) followed by a
+  bare-name call is not seen by this lint; ruff F403/F405 rejects that form;
+* any ``<obj>.<origin>`` is reported whatever ``<obj>`` is (``self``, a
+  reassigned module alias ``s = safe_fs; s.stat_no_follow``, a call result),
+  and so is a reassigned facade alias (``journal = file_orchestration_journal;
+  journal.stat_no_follow``): fail-closed false positives, with zero hits today;
+* facade aliases are matched by name over a whole top-level unit, so a name
+  imported as the facade in one method of a class and bound to something else
+  in another method of the same class (``fj = safe_fs; fj.stat_no_follow``)
+  passes;
+* patched names the facade defines itself (``binding: def``, such as
+  ``_stat_signature``) have no origin, so this rule cannot see a local copy of
+  one; the behavioural seam tests in ``tests/test_file_journal_mixin_seams.py``
+  guard them, and the ``(_stat_signature, reconcile_inventory)`` pair there is
+  site-complete (every call site of the name in that mixin must read the
+  facade attribute).
+
 The patched-name scanner reads every ``tests/**/*.py`` that mentions the facade
 module and recognises:
 
@@ -248,10 +282,15 @@ def coverage_problems(root: Path, cluster_map: Mapping[str, object]) -> list[str
     return problems
 
 
-def late_lookup_problems(root: Path, cluster_map: Mapping[str, object]) -> list[str]:
+def _resident_patched(cluster_map: Mapping[str, object]) -> set[str]:
     patched = cluster_map["patched"]
     assert isinstance(patched, Mapping)
-    resident = {name for name, entry in patched.items() if entry["cluster"] == "facade"}
+    return {name for name, entry in patched.items() if entry["cluster"] == "facade"}
+
+
+def late_lookup_problems(root: Path, cluster_map: Mapping[str, object]) -> list[str]:
+    """Import bindings of a facade-resident patched name, then reads of its origin past the facade."""
+    resident = _resident_patched(cluster_map)
     problems: list[str] = []
     for cluster in EXTRACTION_ORDER:
         path = sibling_path(root, cluster)
@@ -266,6 +305,87 @@ def late_lookup_problems(root: Path, cluster_map: Mapping[str, object]) -> list[
                     problems.append(
                         f"{_rel(root, path)}:{node.lineno}: binds the facade-resident patched name `{name}` "
                         "by import; import the facade module inside the function body and call it as an attribute"
+                    )
+    return problems + origin_bypass_problems(root, cluster_map)
+
+
+@dataclass(frozen=True)
+class Origin:
+    module: str
+    facade_name: str
+
+
+def facade_import_origins(root: Path, cluster_map: Mapping[str, object]) -> dict[str, Origin]:
+    """``origin name -> Origin`` for every facade-resident patched name the map records as ``binding: import``.
+
+    Derived from the facade's own module-level ``from <module> import <origin> [as <facade name>]``
+    statements, so the table follows the facade instead of a hard-coded copy.  A ``binding: import``
+    name with no such statement fails loudly: an empty table would make the origin rule vacuous.
+    """
+    patched = cluster_map["patched"]
+    assert isinstance(patched, Mapping)
+    wanted = {
+        name for name, entry in patched.items() if entry["binding"] == "import" and entry["cluster"] == "facade"
+    }
+    origins: dict[str, Origin] = {}
+    for node in _parse(root / FACADE).body:
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        for alias in node.names:
+            bound = alias.asname or alias.name
+            if bound in wanted:
+                origins[alias.name] = Origin("." * node.level + (node.module or ""), bound)
+    unresolved = sorted(wanted - {origin.facade_name for origin in origins.values()})
+    if unresolved:
+        raise AssertionError(
+            f"{FACADE}: import-bound patched name(s) {unresolved} have no module-level from-import in the facade, "
+            "so the origin rule cannot derive their origin"
+        )
+    return origins
+
+
+def origin_bypass_problems(root: Path, cluster_map: Mapping[str, object]) -> list[str]:
+    """Reads, in a ``file_journal_*`` sibling, of the origin of an import-bound facade-resident patched name.
+
+    Two forms, at any depth: a from-import of the origin name from any module under any alias, and an
+    attribute ``<base>.<origin name>`` whose base is not bound to the facade module in that top-level
+    unit (facade aliases are collected per unit, as ``host_units`` does).  A from-import the binding rule
+    above already reports (the bound or imported name is itself a patched name) is not reported twice.
+    """
+    origins = facade_import_origins(root, cluster_map)
+    resident = _resident_patched(cluster_map)
+    problems: list[str] = []
+    for cluster in EXTRACTION_ORDER:
+        path = sibling_path(root, cluster)
+        if not path.exists():
+            continue
+        rel = _rel(root, path)
+        tree = _parse(path)
+        module_aliases = _facade_import_aliases(
+            n for n in tree.body if isinstance(n, (ast.Import, ast.ImportFrom))
+        )
+        for statement in tree.body:
+            aliases = module_aliases | _facade_import_aliases(ast.walk(statement))
+            for node in ast.walk(statement):
+                if isinstance(node, ast.ImportFrom):
+                    for alias in node.names:
+                        origin = origins.get(alias.name)
+                        if origin is None or {alias.name, alias.asname or alias.name} & resident:
+                            continue
+                        problems.append(
+                            f"{rel}:{node.lineno}: from-imports `{alias.name}`, the origin "
+                            f"(`{origin.module}`) of the facade-resident patched name `{origin.facade_name}`; "
+                            f"read `file_orchestration_journal.{origin.facade_name}` off the facade at call time"
+                        )
+                elif isinstance(node, ast.Attribute) and node.attr in origins:
+                    base = node.value
+                    if (isinstance(base, ast.Name) and base.id in aliases) or _dotted(base) == FACADE_MODULE:
+                        continue
+                    origin = origins[node.attr]
+                    problems.append(
+                        f"{rel}:{node.lineno}: reads `{ast.unparse(base)}.{node.attr}`, the origin "
+                        f"(`{origin.module}`) of the facade-resident patched name `{origin.facade_name}`, "
+                        f"past the facade; read `file_orchestration_journal.{origin.facade_name}` at call time"
                     )
     return problems
 
@@ -794,6 +914,167 @@ def test_synthetic_sibling_binding_a_patched_name_by_import_fails(tmp_path: Path
         "services/orchestrator/file_journal_paths.py:5",
     ]
     assert all("`_stat_signature`" in p for p in problems)
+
+
+_ORIGIN_FACADE_SRC = '''"""Synthetic facade that binds two patched names by import."""
+from __future__ import annotations
+
+from packages.common.contracts.time_normalization import utc_now as _utcnow
+from packages.common.safe_fs import stat_no_follow
+
+
+class Repository:
+    def now(self):
+        return _utcnow()
+
+    def stat(self, path):
+        return stat_no_follow(path)
+'''
+
+
+def _origin_map(**clusters: list[str]) -> dict[str, object]:
+    cluster_map = _synthetic_map(facade=["Repository"], **clusters)
+    cluster_map["patched"] = {
+        "_utcnow": {"binding": "import", "cluster": "facade", "callers": {}},
+        "stat_no_follow": {"binding": "import", "cluster": "facade", "callers": {}},
+    }
+    return cluster_map
+
+
+def _marked_lines(rel: str, lines: list[str], marker: str) -> list[str]:
+    return [f"{rel}:{number}" for number, line in enumerate(lines, start=1) if line.endswith(f"# {marker}")]
+
+
+def test_synthetic_origin_reads_past_the_facade_fail(tmp_path: Path) -> None:
+    _write(tmp_path, FACADE, _ORIGIN_FACADE_SRC)
+    rel = "services/orchestrator/file_journal_events.py"
+    lines = [
+        "def plain():",
+        "    from packages.common.contracts.time_normalization import utc_now  # utc_now",
+        "",
+        "    return utc_now()",
+        "",
+        "",
+        "def aliased():",
+        "    from packages.common.contracts.time_normalization import utc_now as clock  # utc_now",
+        "",
+        "    return clock()",
+        "",
+        "",
+        "def third_module():",
+        "    from services.orchestrator.scheduler_state import utc_now  # utc_now",
+        "",
+        "    return utc_now()",
+        "",
+        "",
+        "def module_alias(path):",
+        "    from packages.common import safe_fs",
+        "",
+        "    return safe_fs.stat_no_follow(path)  # stat_no_follow",
+        "",
+        "",
+        "def import_as(path):",
+        "    import packages.common.safe_fs as s",
+        "",
+        "    return s.stat_no_follow(path)  # stat_no_follow",
+        "",
+        "",
+        "def dotted(path):",
+        "    import packages.common.safe_fs",
+        "",
+        "    return packages.common.safe_fs.stat_no_follow(path)  # stat_no_follow",
+        "",
+        "",
+        "def reassigned(path):",
+        "    from packages.common import safe_fs",
+        "",
+        "    s = safe_fs",
+        "    return s.stat_no_follow(path)  # stat_no_follow",
+        "",
+        "",
+        "def by_name(path):",
+        "    from packages.common.safe_fs import stat_no_follow  # binding",
+        "",
+        "    return stat_no_follow(path)",
+        "",
+        "",
+        "def other_unit(file_orchestration_journal, path):",
+        "    return file_orchestration_journal.stat_no_follow(path)  # stat_no_follow",
+        "",
+        "",
+        "def facade_alias_elsewhere():",
+        "    from services.orchestrator import file_orchestration_journal",
+        "",
+        "    return file_orchestration_journal._utcnow()",
+    ]
+    _write(tmp_path, rel, "\n".join(lines) + "\n")
+    cluster_map = _origin_map(
+        events=[
+            "aliased",
+            "by_name",
+            "dotted",
+            "facade_alias_elsewhere",
+            "import_as",
+            "module_alias",
+            "other_unit",
+            "plain",
+            "reassigned",
+            "third_module",
+        ]
+    )
+
+    problems = late_lookup_problems(tmp_path, cluster_map)
+
+    origin_problems = origin_bypass_problems(tmp_path, cluster_map)
+    binding_problems = [p for p in problems if p not in origin_problems]
+    assert [p.split(": ", 1)[0] for p in binding_problems] == _marked_lines(rel, lines, "binding")
+    clock_sites = [p for p in origin_problems if "`_utcnow`" in p]
+    stat_sites = [p for p in origin_problems if "`stat_no_follow`" in p]
+    assert sorted(clock_sites + stat_sites) == sorted(origin_problems)
+    assert [p.split(": ", 1)[0] for p in clock_sites] == _marked_lines(rel, lines, "utc_now")
+    assert [p.split(": ", 1)[0] for p in stat_sites] == _marked_lines(rel, lines, "stat_no_follow")
+    assert all("from-imports `utc_now`" in p for p in clock_sites)
+    assert "reads `safe_fs.stat_no_follow`" in stat_sites[0]
+    assert "reads `packages.common.safe_fs.stat_no_follow`" in stat_sites[2]
+
+
+def test_synthetic_origin_neighbours_and_facade_reads_pass(tmp_path: Path) -> None:
+    _write(tmp_path, FACADE, _ORIGIN_FACADE_SRC)
+    _write(
+        tmp_path,
+        "services/orchestrator/file_journal_events.py",
+        "from packages.common.contracts.time_normalization import format_cycle_time\n"
+        "from packages.common.safe_fs import SafeFilesystemError\n\n\n"
+        "def neighbours(path):\n"
+        "    from packages.common import safe_fs\n\n"
+        "    if not path:\n        raise safe_fs.SafeFilesystemError(str(path))\n"
+        "    return format_cycle_time, SafeFilesystemError\n\n\n"
+        "def through_the_facade(path):\n"
+        "    import services.orchestrator.file_orchestration_journal\n"
+        "    from services.orchestrator import file_orchestration_journal as fj\n\n"
+        "    fj.stat_no_follow(path)\n"
+        "    services.orchestrator.file_orchestration_journal.stat_no_follow(path)\n\n"
+        "    def nested():\n        return fj._utcnow()\n\n"
+        "    return nested\n",
+    )
+    cluster_map = _origin_map(events=["neighbours", "through_the_facade"])
+    assert late_lookup_problems(tmp_path, cluster_map) == []
+
+
+def test_synthetic_origin_table_follows_the_facade_imports(tmp_path: Path) -> None:
+    _write(tmp_path, FACADE, _ORIGIN_FACADE_SRC)
+    assert facade_import_origins(tmp_path, _origin_map()) == {
+        "utc_now": Origin("packages.common.contracts.time_normalization", "_utcnow"),
+        "stat_no_follow": Origin("packages.common.safe_fs", "stat_no_follow"),
+    }
+    unbound = _origin_map()
+    unbound["patched"]["unlink_no_follow"] = {"binding": "import", "cluster": "facade", "callers": {}}
+    try:
+        facade_import_origins(tmp_path, unbound)
+    except AssertionError as error:
+        assert "['unlink_no_follow'] have no module-level from-import in the facade" in str(error)
+    else:
+        raise AssertionError("an import-bound patched name without a facade from-import must fail loudly")
 
 
 def test_synthetic_sibling_with_an_extra_definition_fails(tmp_path: Path) -> None:

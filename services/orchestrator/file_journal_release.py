@@ -10,9 +10,11 @@ resolves through the MRO.  ``_record_identity_released_signal_failure``, the
 degraded trace written when the operator signal fails, stays in the facade
 class body under the LOGGER rule: it logs through the facade ``LOGGER``, and
 every ``LOGGER`` user stays in the facade because tests filter on the facade's
-logger name.  The journal's error type and the facade-defined signal constant,
-recovery-command helper and attestation field are imported inside the methods
-that use them.  The facade-resident patched clock is looked up on the facade
+logger name.  It is the facade's second caller of
+``_append_pipeline_job_event_unlocked``: it appends the degraded-signal event
+through the same MRO-resolved method.  The journal's error type and the
+facade-defined signal constant, recovery-command helper and attestation field
+are imported inside the methods that use them.  The facade-resident patched clock is looked up on the facade
 module at call time.
 """
 

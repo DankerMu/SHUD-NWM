@@ -1,50 +1,57 @@
 # chain-facade-deepening Specification
 
 ## Purpose
-TBD - created by archiving change governance-8-module-deepening. Update Purpose after archive.
+Keep `services.orchestrator.chain` a stable import and monkeypatch surface while the implementation lives in owner modules: the facade binds its names explicitly, owner families move whole, and the facade imports nothing that has no reader.
 
 ## Requirements
 
 ### Requirement: Chain facade keeps orchestration entrypoints stable
-The chain facade SHALL keep `ForecastOrchestrator`, `AnalysisOrchestrator`,
-`OrchestratorConfig`, chain result/context types, `SlurmGatewayClient`,
-`HttpSlurmGatewayClient`, and legacy `services.orchestrator.chain` import and
-monkeypatch surfaces stable while implementation families move to owner
-modules.
+The chain facade SHALL keep `ForecastOrchestrator`, `OrchestratorConfig`, the
+chain result/context types, `SlurmGatewayClient`, `HttpSlurmGatewayClient`, and
+the `services.orchestrator.chain` import and monkeypatch surfaces stable while
+implementation families live in owner modules. Owner modules SHALL keep reading
+facade names at call time. The facade SHALL import each name it exposes
+explicitly. It SHALL NOT install names programmatically (`globals().update` of
+an installer's return value, or merged export dicts), and it SHALL NOT carry
+`_*_COMPAT_*` self-check tables.
 
 #### Scenario: legacy chain import remains in use
-- **WHEN** callers import inventoried chain symbols from `chain.py`
-- **THEN** those imports keep working through compatibility re-exports until a
-  caller-migration issue records safe removal
+- **WHEN** callers import a chain symbol from `chain.py`
+- **THEN** the import resolves through an explicit import or alias line in
+  `chain.py`
 
 #### Scenario: chain monkeypatch path is used
-- **WHEN** tests monkeypatch an inventoried chain helper such as array
-  accounting, manifest, tile publisher, or source identity behavior
-- **THEN** the moved implementation observes the patch or a compatibility test
-  fails before merge
+- **WHEN** a test monkeypatches a chain helper through
+  `services.orchestrator.chain`, for example array accounting, manifest, tile
+  publisher, source identity, or `_utcnow`
+- **THEN** the owner implementation observes the patch, because it reads the
+  name off the facade at call time
+- **AND** the facade name-resolution test fails before merge if the name does
+  not resolve on the facade
 
 ### Requirement: Chain owner families are completed rather than partially moved
 Chain extraction SHALL move behavior by complete owner families: stage
 catalog/type contracts, stage execution, array accounting, manifest assembly,
-reservation, retry, tile publication, worker/source-identity adapters,
-time-consistency behavior, and persistence/repository behavior.
+reservation, retry, tile publication, worker/source-identity adapters, and
+time-consistency behavior. The file journal owns repository behaviour; the
+chain keeps only the `OrchestratorRepository` protocol.
 
 #### Scenario: repository behavior is not ready to move
-- **WHEN** `PsycopgOrchestratorRepository` or repository protocols remain in
-  `chain.py`
-- **THEN** the chain inventory records them as chain-owned local implementation
-  and no PR classifies them as pure forwarding wrappers
+- **WHEN** a reader looks for orchestration repository behaviour in the chain
+- **THEN** `chain.py` holds only the `OrchestratorRepository` protocol and the
+  implementation is `FileOrchestrationJournalRepository`; no
+  `PsycopgOrchestratorRepository` exists
 
 #### Scenario: owner family extraction changes facade surface
-- **WHEN** a PR adds or removes a chain facade wrapper, alias, or re-export
-- **THEN** the chain compatibility inventory and guard expectations are updated
-  in the same PR
+- **WHEN** a PR adds or removes a chain facade name
+- **THEN** it adds or removes the explicit import line, and the facade
+  name-resolution test stays green
 
 #### Scenario: chain inventory is updated with the extraction
-- **WHEN** a chain owner family changes ownership or retention classification
-- **THEN** `docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md` records the owner
-  module, retained facade surface, removal condition if any, and focused
-  verification command in the same PR
+- **WHEN** a chain owner family changes ownership
+- **THEN** no compatibility inventory is edited; the owner module, the explicit
+  facade import, and its focused tests are the record, and
+  `docs/governance/CHAIN_COMPATIBILITY_INVENTORY.md` does not exist
 
 ### Requirement: Chain extraction preserves durable orchestration semantics
 Chain extraction SHALL preserve reservation-before-submit, bind-after-submit,

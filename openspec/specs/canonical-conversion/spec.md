@@ -1,7 +1,7 @@
 # canonical-conversion Specification
 
 ## Purpose
-TBD - created by archiving change m1-gfs-forecast-loop. Update Purpose after archive.
+Define how raw forecast products become canonical products: variable and unit standardisation, the time axis, lineage, persistence and idempotent re-execution, and how readiness and quality flags are reported to the forcing stage.
 
 ## Requirements
 
@@ -233,7 +233,7 @@ The canonical converter SHALL compute the IFS `tp` de-accumulation tolerance as 
 
 ### Requirement: Forcing usability of canonical quality flags
 
-Canonical readiness (`evaluate_canonical_readiness`) and the forcing producer's canonical-product selection (`canonical_product_is_forcing_usable`, used by the file-backed DB-free path) SHALL treat a product as forcing-usable when it has a non-empty checksum and its `quality_flag` is `ok`, `warn`, or `warning_negative_precip`. A precipitation `warning_negative_precip` product is diagnostic only: its values are already clamped to zero. The flag `error_precip_accumulation`, and any other flag, SHALL make the product unusable. Readiness evidence SHALL report accepted non-`ok` flags as `accepted_warning_quality_flags` (flag to row count), so that accepting a warning is auditable. The DB-backed selection queries (`workers/forcing_producer/store.py`, `services/orchestrator/chain_repository.py`), which already accept only `ok`, are outside this requirement.
+Canonical readiness (`evaluate_canonical_readiness`) and the forcing producer's canonical-product selection (`canonical_product_is_forcing_usable`, used by the file-backed DB-free path) SHALL treat a product as forcing-usable when it has a non-empty checksum and its `quality_flag` is `ok`, `warn`, or `warning_negative_precip`. A precipitation `warning_negative_precip` product is diagnostic only: its values are already clamped to zero. The flag `error_precip_accumulation`, and any other flag, SHALL make the product unusable. Readiness evidence SHALL report accepted non-`ok` flags as `accepted_warning_quality_flags` (flag to row count), so that accepting a warning is auditable. The DB-backed selection query (`workers/forcing_producer/store.py`), which already accepts only `ok`, is outside this requirement.
 
 #### Scenario: Single negative-precipitation warning no longer blocks the cycle
 

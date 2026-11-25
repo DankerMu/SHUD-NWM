@@ -420,7 +420,7 @@ semantics SHALL be equivalent to the pre-split owners.
 ### Requirement: Entropy audit enforcement and its corpus split without report drift
 
 The repository SHALL split `scripts/governance/audit_repo_entropy.py` and
-its former single test module (now the fifteen `tests/test_entropy_audit_*.py` partitions of
+its former single test module (now the `tests/test_entropy_audit_*.py` partitions of
 `ENTROPY_AUDIT_TESTS`) below 1,000 lines with shared definitions in
 support modules. The audit's check identifiers, module heatmap keys, public function
 set, exit codes, and the stable subset of `metadata` SHALL be unchanged. The stable
@@ -431,10 +431,10 @@ are excluded because they embed wall-clock time, the absolute repository root, t
 resolved comparison base ref, or counts of the audit's own tracked lines, all of
 which drift between any two invocations. The split SHALL also land the two deferred #1809
 items: five expected-command literals migrated to the `tests/test_gateway_reconcile_*.py`
-glob and the two frozen pre-#1809 provenance lines removed from the compatibility
-inventories. Verification-command literals in `_ScopedAgentContextConfig`, the scoped
-`AGENTS.md` files, the governance inventories and the triage document SHALL name the
-new partitions.
+glob and the two frozen pre-#1809 provenance lines removed. Verification-command literals
+in `_ScopedAgentContextConfig`, the scoped `AGENTS.md` files,
+`docs/governance/STRUCTURAL_FILE_DISPOSITION_INVENTORY.md` and the triage document SHALL
+name the new partitions.
 
 #### Scenario: the audit report is unchanged by its own split
 
@@ -451,8 +451,8 @@ new partitions.
 
 - **WHEN** the entropy audit suites are collected after partitioning
 - **THEN** the sorted suffix set equals the pre-split baseline of 410
-- **AND** no frozen pre-#1809 guard literal remains in either compatibility
-  inventory, and the five expected commands name the gateway-reconcile glob.
+- **AND** no frozen pre-#1809 guard literal remains, and the five expected
+  commands name the gateway-reconcile glob.
 
 ### Requirement: Production ops runbook becomes an index over sub-runbooks
 
@@ -555,18 +555,19 @@ For every module under `services/orchestrator` discovered from disk, importing i
 - **THEN** the first-import guard fails and names that module
 
 ### Requirement: The journal cluster map SHALL be a checked-in artifact before any extraction
-`tests/fixtures/file_journal_cluster_map.json` SHALL assign every top-level definition of `services/orchestrator/file_orchestration_journal.py` to exactly one of `facade`, `context`, `read_attribution`, `primitives`, `replay`, `candidates`, `paths`, `retry_helpers`, and SHALL list, for every name that any test monkeypatches on the facade (found by searching `tests/` for `file_orchestration_journal.<name>` patch targets and for `setattr(<alias>, "<name>"`), its cluster and the clusters of all its call sites. A test SHALL fail when a top-level definition is unassigned, assigned twice, or when a patched name is assigned to a cluster other than `facade` while one of its call sites is assigned elsewhere without the late-lookup rule below.
+`tests/fixtures/file_journal_cluster_map.json` SHALL assign every top-level definition of `services/orchestrator/file_orchestration_journal.py` and of every `services/orchestrator/file_journal_*.py` sibling to exactly one registered cluster. The registered clusters are `facade`, the seven extraction clusters `context`, `read_attribution`, `primitives`, `replay`, `candidates`, `paths`, `retry_helpers`, and the repository-mixin clusters `retention`, `events`, `release`, `reclaim`, `operator`, `cohort`, `submit`, `reconcile_inventory`; a later mixin module SHALL be registered as a further cluster before it can exist on disk. The map SHALL list, for every name that any test monkeypatches on the facade (found by searching `tests/` for `file_orchestration_journal.<name>` patch targets and for `setattr(<alias>, "<name>"`), its cluster and the clusters of all its call sites. A test SHALL fail when a top-level definition is unassigned, assigned twice, or when a patched name is assigned to a cluster other than `facade` while one of its call sites is assigned elsewhere without the late-lookup rule below.
 
 #### Scenario: Map covers the file
 - **WHEN** the map test runs at the commit that introduces the map
 - **THEN** every top-level `def`/`class`/assignment name in the facade is assigned exactly once and every patched name is listed with its call-site clusters
 
 ### Requirement: Journal responsibility clusters SHALL be extracted behind a stable facade
-`services/orchestrator/file_orchestration_journal.py` SHALL be reduced by moving, in the order `context` (`file_journal_context.py`), `read_attribution` (`file_journal_read_attribution.py`), `primitives` (`file_journal_primitives.py`), `replay` (`file_journal_replay.py`), `candidates` (`file_journal_candidates.py`), `paths` (`file_journal_paths.py`), `retry_helpers` (`file_journal_retry_helpers.py`) the definitions the map assigns to that cluster. After each step the facade SHALL re-export (listed in `__all__`, `# noqa: F401` where needed) every moved name that any non-test module **imports** and every moved name a test **imports**; a name whose only test references are monkeypatches SHALL NOT be re-exported (base requirement "Relocated monkeypatch seams keep their negative oracles live"). Every existing test file that references the journal module SHALL pass with no edits other than patch-target repointing listed for that step.
+`services/orchestrator/file_orchestration_journal.py` SHALL be reduced by moving, in the order `context` (`file_journal_context.py`), `read_attribution` (`file_journal_read_attribution.py`), `primitives` (`file_journal_primitives.py`), `replay` (`file_journal_replay.py`), `candidates` (`file_journal_candidates.py`), `paths` (`file_journal_paths.py`), `retry_helpers` (`file_journal_retry_helpers.py`), and then the repository-mixin clusters `retention`, `events`, `release`, `reclaim`, `operator`, `cohort`, `submit`, `reconcile_inventory` (each in `file_journal_<cluster>.py`, as one mixin class that `FileOrchestrationJournalRepository` composes as a base), the definitions the map assigns to that cluster. After each step the facade SHALL re-export (listed in `__all__`, `# noqa: F401` where needed) every moved name that any non-test module **imports** and every moved name a test **imports**; a name whose only test references are monkeypatches SHALL NOT be re-exported (base requirement "Relocated monkeypatch seams keep their negative oracles live"). Every existing test file that references the journal module SHALL pass with no edits other than patch-target repointing listed for that step and, for a repository-mixin step, the cluster registration that the cluster-map requirement obliges (the cluster list and its docstring in the cluster-map test, and the map fixture).
 
-Patched seams follow two rules:
+Patched seams follow three rules:
 - A patched name moves only together with **all** its call sites; the tests' patch targets move to the new owner in the same PR and the facade does not re-export it.
-- A patched name with a call site that stays in the facade (the `FileOrchestrationJournalRepository` and `FileJournalRetryService` classes stay; today this covers all eighteen patched names recorded in the cluster map's `patched` table, including `_utcnow`, `read_bytes_limited_no_follow`, `list_directory_no_follow_limited`, `_stat_signature`, `_iter_regular_json_files`, `_iter_jsonl_files`, `_released_candidate_cycle_scope`, `_cycle_scope_from_job_id`; `_next_file_manual_retry_job_id_for_run` left the table when #3157 deleted the manual-retry pending-row allocator) stays in the facade; a moved function that calls it SHALL resolve it at call time as an attribute of the facade module (late import inside the function body), never by binding the name at import time, so a patch on the facade still reaches every call.
+- A patched name that the cluster map's `patched` table assigns to `facade` stays in the facade wherever its call sites live (the `FileOrchestrationJournalRepository` and `FileJournalRetryService` classes stay; today every name in the table is facade-resident, including `_utcnow`, `read_bytes_limited_no_follow`, `list_directory_no_follow_limited`, `unlink_no_follow`, `stat_no_follow`, `_stat_signature`, `_iter_regular_json_files`, `_iter_jsonl_files`, `_released_candidate_cycle_scope`, `_cycle_scope_from_job_id`; `_next_file_manual_retry_job_id_for_run` left the table when #3157 deleted the manual-retry pending-row allocator). A moved function that calls it SHALL resolve it at call time as an attribute of the facade module (late import inside the function body), never by binding the name at import time, so a patch on the facade still reaches every call.
+- A sibling module SHALL NOT read the origin of a patched name that the facade binds by import. A static test SHALL fail, naming the sibling and the facade name, on a from-import of the origin name from any module under any alias, and on an attribute read `<base>.<origin name>` whose base is not a name that the enclosing top-level unit binds to the facade module by import. The rule is decided by name: it also rejects a reassigned facade alias and the same attribute name on an unrelated object. It does not see `getattr` or `__dict__` reads, a star import followed by a bare-name call (ruff rejects that form), or an alias that one method of a unit imports as the facade and another method of the same unit rebinds. A patched name that the facade defines itself has no origin; every read of it in a repository mixin SHALL be covered by a behavioural seam test (scenario "Repository-mixin callers reach the facade seam").
 
 #### Scenario: Extraction step keeps importers and patches working
 - **WHEN** a cluster is moved
@@ -591,6 +592,16 @@ Patched seams follow two rules:
 #### Scenario: Annotation-only back references
 - **WHEN** a moved module needs a facade-resident name (e.g. `FileOrchestrationJournalRepository`, `FileOrchestrationJournalError`) only in annotations
 - **THEN** it imports it under `TYPE_CHECKING` and no import cycle is introduced
+
+#### Scenario: Repository-mixin callers reach the facade seam
+- **WHEN** a test patches a facade-resident patched name on `file_orchestration_journal` with a stub that records its caller's module and drives a method of a repository mixin whose cluster the map lists among that name's callers
+- **THEN** the stub is called from that mixin's module
+- **AND** a test fails when the set of (patched name, mixin cluster) pairs that have a seam test differs from the pairs in the map
+- **AND** for a patched name that the facade defines itself, the lines from which the stub is called in that mixin's module equal the call sites of that name in the module
+
+#### Scenario: Origin bypass in a sibling is rejected
+- **WHEN** one call site in a sibling reads `utc_now` imported from `packages.common.contracts.time_normalization`, or `safe_fs.stat_no_follow` through a module alias, while the other sites of that sibling still read the facade attribute
+- **THEN** the late-lookup lint fails and names the sibling and the facade name
 
 ### Requirement: Journal contract SHALL remove dead re-exports
 After the last extraction, the facade's `__all__` SHALL contain only names with a remaining importer, where "importer" means an AST-resolved `from … import` or attribute access through any alias of the facade module, or a dotted-string patch target, found by scanning `apps/ packages/ services/ workers/ scripts/ tests/`. A test SHALL fail if `__all__` lists a name no module uses by that definition, or if a module other than the facade and its `file_journal_*.py` siblings imports or reads through an alias a facade name missing from `__all__` (monkeypatch-only targets are never listed), and the facade's remaining top-level definitions SHALL equal the map's `facade` cluster.

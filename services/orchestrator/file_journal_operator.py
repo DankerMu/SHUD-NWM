@@ -447,7 +447,8 @@ class _FileJournalOperatorMixin:
             return OperatorDemoteResult("stale_attempt")
         if existing.get("submission_attempt") != expected_submission_attempt or current_anchor != expected_anchor:
             return OperatorDemoteResult("stale_attempt")
-        # Lazy import: ``reconcile`` imports this module at load time.
+        # Lazy import: ``reconcile`` imports the facade at load time (through
+        # ``reconcile_reserved``), and the facade imports this module.
         from services.orchestrator import reconcile
 
         anchor_instant = _strict_utc_datetime(current_anchor)
@@ -672,7 +673,8 @@ class _FileJournalOperatorMixin:
         if canonical_submit is None:
             return OperatorBindResult("slurm_submit_time_invalid")
         # The ONE SubmitLine key authority the automatic #2655 fallback uses.
-        # Lazy import: ``reconcile`` imports this module at load time.
+        # Lazy import: ``reconcile`` imports the facade at load time (through
+        # ``reconcile_reserved``), and the facade imports this module.
         from services.orchestrator.reconcile import _submitline_comment_key
 
         submitline_key = _submitline_comment_key(submit_line)

@@ -63,19 +63,19 @@ RealSlurmGateway SHALL map raw Slurm terminal states to stable control-plane err
 
 - **WHEN** `sacct` reports `TIMEOUT`
 - **THEN** the pipeline job MUST persist `status=failed`, `error_code=SLURM_TIMEOUT`, and raw state metadata
-- **AND** RetryService MUST treat the job as eligible for retry subject to retry limits
+- **AND** the retry classification the file-journal retry service applies MUST treat the job as eligible for retry subject to retry limits
 
 #### Scenario: Deadline termination becomes retryable
 
 - **WHEN** `sacct` reports `DEADLINE`
 - **THEN** the pipeline job MUST persist `error_code=SLURM_DEADLINE` and raw state metadata
-- **AND** RetryService MUST treat the job as eligible for retry subject to retry limits, and automatic downstream resume MUST treat the failure as non-permanent
+- **AND** the retry classification the file-journal retry service applies MUST treat the job as eligible for retry subject to retry limits, and automatic downstream resume MUST treat the failure as non-permanent
 
 #### Scenario: Node failure becomes retryable
 
 - **WHEN** `sacct` reports `NODE_FAIL`, `PREEMPTED`, or `BOOT_FAIL`
 - **THEN** the pipeline job MUST persist `error_code=NODE_FAILURE`
-- **AND** RetryService MUST treat the job as eligible for retry subject to retry limits
+- **AND** the retry classification the file-journal retry service applies MUST treat the job as eligible for retry subject to retry limits
 
 #### Scenario: Out of memory preserves a stable error code
 

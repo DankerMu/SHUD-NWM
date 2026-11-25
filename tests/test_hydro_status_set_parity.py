@@ -16,6 +16,8 @@ copies are gone, and the lock asserts identity across all five sites instead
 
 from __future__ import annotations
 
+import ast
+import importlib
 import re
 import shutil
 import sys
@@ -202,6 +204,17 @@ def test_every_member_is_a_declared_enum_member_except_complete() -> None:
     assert durable - {"complete"} <= enum_members
     assert code_clearing - {"complete"} <= enum_members
 
+    # The discovered `file_journal_*` sibling bindings, under the same rule as
+    # the set each one must be: `"complete"` is exempt only where it is exempt
+    # for the shared set.
+    outside: dict[str, list[str]] = {}
+    for label, (name, members) in _sibling_status_set_values().items():
+        exempt = set() if _PINNED_STATUS_SET_NAMES[name] == "ACTIVE_HYDRO_STATUSES" else {"complete"}
+        stray = set(members) - exempt - enum_members
+        if stray:
+            outside[label] = sorted(stray)
+    assert outside == {}, f"sibling status-set bindings hold non-enum members: {outside}"
+
 
 def test_convergence_only_frequency_done_is_in_no_status_set() -> None:
     """#2048: 000062 makes `frequency_done` a declared member, and nothing may treat it as a state.
@@ -223,20 +236,23 @@ def test_convergence_only_frequency_done_is_in_no_status_set() -> None:
         "chain_forecast_trigger._completed_hydro_statuses()": (
             chain_forecast_trigger_module._completed_hydro_statuses()
         ),
+        **{label: members for label, (_name, members) in _sibling_status_set_values().items()},
     }
     holding = sorted(name for name, members in status_sets.items() if "frequency_done" in members)
     assert holding == [], f"`frequency_done` is convergence-only (000062) and must not be in {holding}"
 
 
 def test_active_hydro_statuses_are_the_same_object() -> None:
-    """The five sites bind ONE set, and `"pending"` is in it.
+    """Every site of `ACTIVE_HYDRO_STATUSES` binds ONE set, and `"pending"` is in it.
 
-    Five sites: the three binding sites -- ``scheduler_state_types`` (the
-    definition), ``chain``, ``file_orchestration_journal``
-    -- plus the two lanes that DECIDE on the set without re-exporting it:
-    ``scheduler_state_decision`` (``:194``, the candidate-state active/duplicate
-    verdict) and ``scheduler_state_manual_retry`` (``:524``, ``:729``, ``:885``,
-    the manual-retry blocker verdicts).
+    The binding sites are ``scheduler_state_types`` (the definition),
+    ``chain``, the ``file_orchestration_journal`` facade and every
+    ``file_journal_*`` sibling that binds the name at module top level; the
+    siblings are discovered from their source and pinned by
+    ``test_file_journal_sibling_status_set_bindings_are_the_shared_objects``,
+    not listed here.  Two lanes DECIDE on the set without re-exporting it:
+    ``scheduler_state_decision`` (the candidate-state active/duplicate verdict)
+    and ``scheduler_state_manual_retry`` (the manual-retry blocker verdicts).
 
     Requirement-driven replacement of #1581's
     ``test_active_hydro_status_divergence_is_locked_not_adjudicated``, which
@@ -258,14 +274,16 @@ def test_active_hydro_statuses_are_the_same_object() -> None:
 
     active = scheduler_state_types_module.ACTIVE_HYDRO_STATUSES
     assert chain_module.ACTIVE_HYDRO_STATUSES is active
-    # The journal's own ``from ... import ACTIVE_HYDRO_STATUSES`` binding is the
-    # surface its five decision sites read -- the ``has_active_pipeline`` probe
-    # (``:1241``), the three attempt-scoped write paths
-    # (``reject_pipeline_job_submit_attempt:3703``,
-    # ``permit_pipeline_job_retry:4064``,
-    # ``demote_operator_verified_reserved_job:4226``) and the cohort projection
-    # (``project_forecast_cohort_tasks:4968``) -- so the module attribute is
-    # what must be pinned, not the module it used to be copied from.
+    # Each journal module decides on its OWN ``from ... import
+    # ACTIVE_HYDRO_STATUSES`` binding, so the module attribute is what must be
+    # pinned, not the module it used to be copied from.  The facade binding is
+    # the surface of the ``has_active_pipeline`` probe.  The attempt-scoped
+    # write paths (``reject_pipeline_job_submit_attempt`` and
+    # ``permit_pipeline_job_retry`` in ``file_journal_submit``,
+    # ``demote_operator_verified_reserved_job`` in ``file_journal_operator``)
+    # and the cohort projection (``project_forecast_cohort_tasks`` in
+    # ``file_journal_cohort``) read their sibling's binding, which the
+    # discovered sibling pin covers.
     assert journal_module.ACTIVE_HYDRO_STATUSES is active
     # The two deciding lanes hold no re-export of their own: they `from ...
     # import` the name and test membership against it directly, so an equal
@@ -273,6 +291,96 @@ def test_active_hydro_statuses_are_the_same_object() -> None:
     assert scheduler_state_decision_module.ACTIVE_HYDRO_STATUSES is active
     assert scheduler_state_manual_retry_module.ACTIVE_HYDRO_STATUSES is active
     assert active == {"created", "staged", "pending", "submitted", "running"}
+
+
+# Pinned bound or imported name -> the ``scheduler_state_types`` attribute it must be.
+_PINNED_STATUS_SET_NAMES = {
+    "ACTIVE_HYDRO_STATUSES": "ACTIVE_HYDRO_STATUSES",
+    "DURABLE_HYDRO_SUCCESS_STATUSES": "DURABLE_HYDRO_SUCCESS_STATUSES",
+    "COMPLETED_HYDRO_STATUSES": "DURABLE_HYDRO_SUCCESS_STATUSES",
+    "HYDRO_RUN_CODE_CLEARING_STATUSES": "HYDRO_RUN_CODE_CLEARING_STATUSES",
+}
+# The siblings that bind a pinned set today; discovery must find at least these.
+_SIBLING_STATUS_SET_FLOOR = frozenset(
+    (f"services.orchestrator.file_journal_{cluster}", "ACTIVE_HYDRO_STATUSES")
+    for cluster in ("operator", "cohort", "submit")
+)
+
+
+def _sibling_status_set_bindings() -> dict[tuple[str, str], frozenset[str]]:
+    """``(sibling module, bound name) -> the shared sets it must be``, found by ``ast``.
+
+    Walks the module body of every ``services/orchestrator/file_journal_*.py``
+    and keeps each top-level binding whose bound name, or whose imported name
+    before an ``as`` alias, is a pinned status-set name: a ``from ... import``
+    from ANY module (not only ``scheduler_state_types``), and an ``Assign`` /
+    ``AnnAssign`` target.  A rebinding such as ``ACTIVE_HYDRO_STATUSES =
+    set(_ACTIVE) - {"pending"}`` is found by its bound name; ``from ... import
+    ACTIVE_HYDRO_STATUSES as _ACTIVE`` is found by its imported name and
+    pinned under ``_ACTIVE``.
+
+    Out of reach, by construction: function-local bindings, including the
+    siblings' function-local facade imports.  Module-attribute identity cannot
+    see a name bound inside a function body, so this pin checks only what a
+    module exposes at top level; an ``if TYPE_CHECKING:`` import never runs and
+    is skipped too.
+    """
+
+    bindings: dict[tuple[str, str], set[str]] = {}
+    for path in sorted((_REPO_ROOT / "services" / "orchestrator").glob("file_journal_*.py")):
+        module_name = f"services.orchestrator.{path.stem}"
+        for node in ast.parse(path.read_text(encoding="utf-8"), filename=str(path)).body:
+            if isinstance(node, ast.ImportFrom):
+                for alias in node.names:
+                    bound = alias.asname or alias.name
+                    pinned = {name for name in (alias.name, bound) if name in _PINNED_STATUS_SET_NAMES}
+                    if pinned:
+                        bindings.setdefault((module_name, bound), set()).update(pinned)
+            elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                for target in targets:
+                    elements = target.elts if isinstance(target, (ast.Tuple, ast.List)) else [target]
+                    for element in elements:
+                        if isinstance(element, ast.Name) and element.id in _PINNED_STATUS_SET_NAMES:
+                            bindings.setdefault((module_name, element.id), set()).add(element.id)
+    return {key: frozenset(pinned) for key, pinned in bindings.items()}
+
+
+def _sibling_status_set_values() -> dict[str, tuple[str, object]]:
+    """``"<sibling module>.<bound name>" -> (pinned name, the module attribute)`` for every discovered binding."""
+
+    values: dict[str, tuple[str, object]] = {}
+    for (module_name, bound), pinned in sorted(_sibling_status_set_bindings().items()):
+        value = getattr(importlib.import_module(module_name), bound)
+        for name in sorted(pinned):
+            values[f"{module_name}.{bound} ({name})"] = (name, value)
+    return values
+
+
+def test_file_journal_sibling_status_set_bindings_are_the_shared_objects() -> None:
+    """#3347: every ``file_journal_*`` top-level binding of a pinned set is the shared object.
+
+    The J-series moved journal decision sites into ``file_journal_*`` mixins,
+    and each mixin carries its own top-level from-import, so pinning only the
+    facade attribute left those bindings outside the lock: a sibling rebound to
+    a derived copy (``set(X) - {...}``) or a re-aliased name would silently
+    restore the per-module membership #1581 removed, and
+    ``tests/test_status_literal_scan.py`` only sees fresh literals.  The
+    bindings are discovered from the source, so a later move is inside the
+    lock without editing this test.
+    """
+
+    bindings = _sibling_status_set_bindings()
+    missing = sorted(_SIBLING_STATUS_SET_FLOOR - set(bindings))
+    assert not missing, f"status-set discovery lost known sibling bindings {missing}; the pin would be vacuous"
+    drifted = [
+        f"{module_name}.{bound} is not scheduler_state_types.{_PINNED_STATUS_SET_NAMES[name]} (pinned as `{name}`)"
+        for (module_name, bound), pinned in sorted(bindings.items())
+        for name in sorted(pinned)
+        if getattr(importlib.import_module(module_name), bound)
+        is not getattr(scheduler_state_types_module, _PINNED_STATUS_SET_NAMES[name])
+    ]
+    assert drifted == [], drifted
 
 
 # The two shapes the sweep is built to survive, as executable probes rather

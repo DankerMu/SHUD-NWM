@@ -6,6 +6,7 @@ Every slice PR, before merge:
 - `uv run ruff check . --no-cache` clean, and the CI full suite green (every `Unit Tests (full)` shard).
 - If the slice adds or edits a spec delta in this change: `openspec validate redesign-orchestration-core --strict --no-interactive` passes.
 - The node checks named in its task group's Verification task, at the D5 cadence.
+  - From 2026-11-23 the compute-node passes are taken on w3 (control) and w2, which carry the compute role since that day (#3345). "node-22" in the Verification lines below names that role, not the retired host. The grouped deploys that cover the PRs merged around the move are recorded under task 16.4.
 - The slice's task boxes are ticked in this file in the PR's final push.
 
 Order, dependencies and verification follow design.md D1–D5. Appendix C says which slice deletes each SQL-path symbol. Appendix D says which slice rewrites each main-spec passage. Every PR runs `uv run ruff check . --no-cache` and the CI full suite.
@@ -170,7 +171,8 @@ Slice triage (R2b, #3255, tasks 3.1-3.6):
 - [x] 4.3 Delete the PostgreSQL scheduler lease (`scheduler_core.py:241-250`, its `scheduler_lease.py` branch) and its tests (`PostgresSchedulerLease`, `_postgres_advisory_lock_key` in `tests/test_production_scheduler.py`).
 - [x] 4.4 Add the Appendix D R2c spec deltas. Update `infra/env/README.md` (:169, :321), `docs/runbooks/two-node-deployment-overview.md:423`, `docs/runbooks/scheduler-dbfree-typed-reasons.md:4` and `docs/runbooks/production-service-config.md:14` so the variable is described as the job-env contract, not a mode switch. `docs/runbooks/node22-db-retirement-runbook.md:51` (names `PsycopgOrchestratorRepository`) is updated in R3. Templates keep the variable.
 - [x] 4.5 Verification: on node-22, one idle pass and one submitting pass.
-- [ ] 4.6 Delete the remaining dead non-DB-free arms, the orphan `_scheduler_lock_evidence_root_preflight`, and their cascades, with the spec deltas (#3311, R2c follow-up). Verification: CI, plus node-27 for the two qhh integration files, plus one node-22 idle pass and one submitting pass.
+- [x] 4.6 Delete the remaining dead non-DB-free arms, the orphan `_scheduler_lock_evidence_root_preflight`, and their cascades, with the spec deltas (#3311, R2c follow-up). Verification: CI, plus node-27 for the two qhh integration files, plus one node-22 idle pass and one submitting pass.
+  - Evidence: CI green at merge (#3325); node-27 receipt on #3325 (14 passed over the two qhh integration files); compute-node passes on w3/w2, group 1 (deploy of `a306fd5e4` on w3, 2026-11-23T18:05:57Z; idle pass `scheduler_2026112318_98a63a25dc28`, submitting pass `scheduler_2026112322_8fd610692e1a`, 132 submitted, 0 failed), posted on #3311.
 
 Suggested fixture level: expanded - the scheduler lease (concurrency) and the reconcile path.
 Minimal mergeable slice: 4.1 alone (factory arms and adapters); 4.2 and 4.3 follow as separate PRs, each green on its own, because the three arms share no code.
@@ -730,7 +732,8 @@ Slice triage (T1, #3264, tasks 8.1-8.3):
 
   Unrelated f-strings such as `f"manual_retry_{key}"` (`scheduler_state_manual_retry.py:914`) and membership tests are not flagged.
 - [x] 9.6 (after T1, independent of the guard) File the behaviour-change issue (#3319) for the non-master path and the status-set difference, citing the T1 rows it would edit.
-- [ ] 9.7 Verification: per PR, CI. The T1 table's expected values are unchanged in every PR. node-22 batch passes per D5.
+- [x] 9.7 Verification: per PR, CI. The T1 table's expected values are unchanged in every PR. node-22 batch passes per D5.
+  - Evidence: #3320, #3321 and #3322 are inside `649f4ee8b`, the commit the production checkout on w3 ran from the move until the first grouped deploy (idle pass `scheduler_2026112317_84915fcb2d46`, submitting pass `scheduler_2026112310_62da44dac87d`, 132 submitted); #3323 and #3324 are in group 1 (deploy of `a306fd5e4` on w3, 2026-11-23T18:05:57Z; idle pass `scheduler_2026112318_98a63a25dc28`, submitting pass `scheduler_2026112322_8fd610692e1a`, 132 submitted, 0 failed). Posted on the slices' issues.
 
 Suggested fixture level: expanded - persisted retry identity in a shared state machine.
 Minimal mergeable slice: 9.1 alone; 9.2, 9.3, 9.4 follow as separate PRs, and 9.5 lands last when no local formula remains.
@@ -1990,7 +1993,8 @@ Slice triage (T2-5, #3269, tasks 9.5, 9.7):
 
 - [x] 10.1 Move `_now`, `_sleep`, `_bounded_evidence_payload` and `_evidence_status` (`scheduler_compat_runtime.py:195,208,311,315`) into a scheduler owner module. Keep the `_source_*` / `_accepted_horizon_from_hours` aliases (`:72-75`) as explicit aliases in `scheduler.py`. Move `_utcnow` (`chain_compat_runtime.py:162-163`, nested in the installer) into a chain owner module. Each facade imports the moved names explicitly. Owners keep reading them through `_scheduler.` / `_chain.`. The entropy facade guard flags every new `_`-prefixed facade import (`scripts/governance/entropy_audit/facade_guard.py:110-142,505-568`), so add a Guard Hook Seed row for each new name to the matching compatibility inventory, with removal condition "deleted with the inventory in F3".
 - [x] 10.2 Add `tests/test_facade_name_resolution.py`. It statically collects every attribute read through `_scheduler.` / `_chain.` in `services/orchestrator/*.py`, and every name patched or read on `scheduler` / `chain` in `tests/`, and asserts that each one resolves on the imported facade.
-- [ ] 10.3 Verification: CI, then node-22 batch passes per D5.
+- [x] 10.3 Verification: CI, then node-22 batch passes per D5.
+  - Evidence: #3328 and #3329 are in group 2 (deploy of `1a3c43c22` on w3, 2026-11-24T00:05:42Z; idle pass `scheduler_2026112400_1065677d0f6f`, submitting pass `scheduler_2026112410_b3ab8a7ced2d`, 132 submitted, 0 failed), posted on #3271.
 
 Suggested fixture level: expanded - moves helpers every scheduler pass calls.
 Minimal mergeable slice: 10.2 alone first (the guard is green today); then 10.1 as a pure-move PR.
@@ -2154,7 +2158,7 @@ Slice triage (F1-2, #3271, tasks 10.1, 10.3):
 - [x] 11.3 Remove the deleted modules from `FIRST_IMPORT_ALLOWLIST` (`tests/test_orchestrator_first_import.py:38-67`) and the path strings in `tests/test_sqlalchemy_driver_explicit.py:120`, `tests/test_node27_connection_attribution*.py` and `tests/test_file_journal_full_tree_budget_contract.py:374`. (chain #3272, scheduler #3273)
 - [x] 11.4 Test: importing `chain` / `scheduler` leaves no `_COMPAT_` name in either namespace, and the F1 guard stays green. (chain #3272, scheduler #3273)
 - [x] 11.5 Add the Appendix D F2 spec deltas for each side: chain side `chain-facade-deepening` and `import-layering-guard:23`; scheduler side `scheduler-facade-deepening` and `scheduler-discovery-evidence-owner-compat:31-40`. (chain #3272, scheduler #3273)
-- [ ] 11.6 Verification: on node-22, one idle pass and one submitting pass for each PR of this group that changes production code (11.0c, 11.1, 11.2). (chain side code done, #3272; node-22 D5 pending for #3292, #3272, #3273)
+- [x] 11.6 Verification: on node-22, one idle pass and one submitting pass for each PR of this group that changes production code (11.0c, 11.1, 11.2). Evidence: #3330, #3331, #3332, #3333 and #3334 are in group 2 (deploy of `1a3c43c22` on w3, 2026-11-24T00:05:42Z; idle pass `scheduler_2026112400_1065677d0f6f`, submitting pass `scheduler_2026112410_b3ab8a7ced2d`, 132 submitted, 0 failed), posted on #3292, #3272 and #3273.
 
 Suggested fixture level: expanded - legacy compatibility surface and import-time behaviour.
 Minimal mergeable slice: 11.0a and 11.0b (test-only) first; 11.0c next; then 11.1 (chain side) and 11.2 (scheduler side), which are independent; neither facade imports the other's compat modules.
@@ -2488,7 +2492,7 @@ Slice triage (F2-5, #3273, tasks 11.2, 11.3/11.4/11.5 scheduler side):
   - F1 at a97491fc2: 1817 scheduler reads over 281 distinct names. 115 of the 169 non-table candidate-runtime names are required: 103 defined in `scheduler_candidate_runtime`, 11 in `scheduler_preflight`, 1 in `scheduler_discovery`. 31 of the 137 state-wrapper names are required. All 4 compat-runtime aliases are required, and they are already explicit.
   - `.workplans/3270/carry-overs.md` #3: with all three installers removed and nothing added, the guard reports 528 unresolved reads across 13 owner modules. Removing only the EXPORTS line breaks facade import: `scheduler_compat_runtime` raises `RuntimeError` on `_source_horizon_metadata`. So the lines at `:675` and `:679` go together.
   - F1 scans only `services/orchestrator` and `tests` (`tests/test_facade_name_resolution.py:104`). `apps`, `scripts`, `workers` and `packages` are not scanned.
-  - `scheduler_candidate_runtime.py:6` copies the namespace (`globals().update(_scheduler.__dict__)`) when it is imported mid-way through the facade. That is the owner's own snapshot, not facade installation, and it stays: late binding and `__module__` rewrites are out of scope. Importing it explicitly at the same point in `scheduler.py` keeps the timing.
+  - `scheduler_candidate_runtime.py:6` copies the namespace (`globals().update(_scheduler.__dict__)`) when it is imported mid-way through the facade. That is the owner's own snapshot, not facade installation, and it stays in this change: late binding and `__module__` rewrites are out of scope (the copy was removed later by #3365, under #3335). Importing it explicitly at the same point in `scheduler.py` keeps the timing.
   - `scheduler_lease._scheduler_compat_function` (`scheduler_lease.py:42-50`, callers `:77`, `:344`, `:382`, `:394`, `:398`) is pinned by `tests/test_production_scheduler.py:1352`.
   - Other readers:
     - `tests/test_orchestrator_first_import.py:49-57` has `FIRST_IMPORT_ALLOWLIST` entries for `scheduler_candidate_runtime` and `scheduler_compat_runtime`. Both reasons cite "scheduler.py reads its EXPORTS".
@@ -2555,7 +2559,7 @@ Slice triage (F2-5, #3273, tasks 11.2, 11.3/11.4/11.5 scheduler side):
 - Out of scope:
   - the chain side (done, #3333);
   - inventories beyond the Guard Hook Seed rows (F3);
-  - `scheduler_candidate_runtime`'s own namespace copy and `__module__` values;
+  - `scheduler_candidate_runtime`'s own namespace copy and `__module__` values (the copy was removed later, outside this change, by #3365);
   - unifying the lease lookup with `_facade_seam`, and teaching the F1 guard the seam literals. Both are deferred to F3 (#3274) with `.workplans/3292/carry-overs.md` #1-#2.
 - Risk packs: legacy compatibility (import and monkeypatch surface); import-time ordering (first import, mid-import snapshot); runtime rebinding (state wrappers removed). Not selected: DB, Slurm, evidence schema.
 - Required evidence (`.workplans/3273/`):
@@ -2665,7 +2669,7 @@ Slice triage (F3-1, #3274, tasks 12.1-12.5):
   6. **Carry-over docstrings.** `tests/test_facade_name_resolution.py`'s module docstring does not mention the inventories or the facade guard; confirm this, and no change is expected. Also confirm that `entropy-budget.md:15`'s "compatibility facade" names the audit script and not an inventory, so it stays. Carry-over #2 of `.workplans/3270/carry-overs.md` (silent synthetic forms, zero sites at HEAD) is closed by adding one docstring sentence that names those forms as uncollected. No code change.
 - Out of scope, filed as one follow-up issue by the orchestrator:
   - the runtime carry-overs from #3292 and #3273: unify `scheduler_lease._scheduler_facade_function` with `_facade_seam`; teach the F1 guard `_facade_seam` literals; the aggregator-patch combination; and stating the two-seam boundary in the spec;
-  - `scheduler_candidate_runtime`'s seven values that no longer have a reader, and its namespace copy;
+  - `scheduler_candidate_runtime`'s seven values that no longer have a reader, and its namespace copy (both removed later by #3365; the seam unification above by #3364; all under #3335);
   - the chain imports that are kept only so their names resolve;
   - test names that still contain "compat".
 - Must preserve:
@@ -2763,7 +2767,8 @@ Slice triage (J0, #3275, tasks 13.1-13.3):
 
 - [x] 14.1 Move C18 (Appendix B) into `services/orchestrator/file_journal_retention.py` as a mixin that the class composes. The retention dataclasses stay importable from the facade. Update the cluster map. J0, `tests/test_file_journal_late_lookup_seams.py` and `tests/test_scheduler_journal_retention_archive.py` stay unchanged and green.
   - J1-J5 carry-over from J0 (#3275): set 1 renders a `_UNSET` default as `=facade._UNSET`, and set 4 requires every pinned 4(a) name (e.g. `FileJournalRetentionCycle*`, `OperatorBindReceipt`, `PERMANENT_FAILURE_SOURCE_STATUSES`) to keep resolving on the facade. When a slice moves such a name, or the last class-body use of `_UNSET`, out of the facade, the facade keeps the re-import with `# noqa: F401`. Adding it to `__all__` is not an option: `tests/test_file_orchestration_journal_facade.py` requires every `__all__` name to have a consumer. Facade-only imports (`COHORT_MEMBERSHIP_*`, `journal_read_lane`) may be dropped under F401 without touching set 4, whose live side counts only sibling imports already pinned as 4(a).
-- [ ] 14.2 Verification: CI, then node-22 batch per D5.
+- [x] 14.2 Verification: CI, then node-22 batch per D5.
+  - Evidence: CI green at merge; #3338 is in group 3 (deploy of `2e701e1d2` on w3, 2026-11-24T12:18:57Z; idle pass `scheduler_2026112412_7947a4a993bd`, root preflight `ready`; submitting pass `scheduler_2026112422_477019b84333`, 132 submitted, 0 failed), posted on #3276.
 
 Suggested fixture level: expanded - moves persisted-state writer code.
 Minimal mergeable slice: atomic - one cluster, pure move.
@@ -2818,7 +2823,8 @@ Slice triage (J1, #3276, tasks 14.1-14.2):
 
 - [x] 15.1 Move C17 into `file_journal_events.py`. A mixin with public methods carries `@_install_public_read_attribution`. J0 stays unchanged.
 - [x] 15.2 Move C15 into `file_journal_release.py`. J0 stays unchanged.
-- [ ] 15.3 Verification: CI, then node-22 batch per D5.
+- [x] 15.3 Verification: CI, then node-22 batch per D5.
+  - Evidence: CI green at merge; #3339 and #3340 are in group 3 (deploy of `2e701e1d2` on w3, 2026-11-24T12:18:57Z; idle pass `scheduler_2026112412_7947a4a993bd`, root preflight `ready`; submitting pass `scheduler_2026112422_477019b84333`, 132 submitted, 0 failed), posted on #3277 and #3278.
 
 Suggested fixture level: expanded - moves persisted-state writer code.
 Minimal mergeable slice: 15.1 alone; 15.2 is its own PR.
@@ -2958,7 +2964,8 @@ Slice triage (J2b, #3278, tasks 15.2, 15.3):
 - [x] 16.1 Move C12 into `file_journal_reclaim.py`.
 - [x] 16.2 Move C14 into `file_journal_operator.py`. The receipt dataclasses stay importable from the facade.
 - [x] 16.3 Move C16 into `file_journal_cohort.py`, with `project_forecast_cohort_tasks` moved whole.
-- [ ] 16.4 Verification: CI, then node-22 batch per D5. J0 stays unchanged after each PR.
+- [x] 16.4 Verification: CI, then node-22 batch per D5. J0 stays unchanged after each PR.
+  - Evidence: CI green at merge; #3341, #3342 and #3346 are in group 3 (deploy of `2e701e1d2` on w3, 2026-11-24T12:18:57Z; idle pass `scheduler_2026112412_7947a4a993bd`, root preflight `ready`; submitting pass `scheduler_2026112422_477019b84333`, 132 submitted, 0 failed), posted on #3279, #3280 and #3281.
 
 Suggested fixture level: expanded - moves persisted-state writer code.
 Minimal mergeable slice: 16.1 alone; 16.2 and 16.3 are their own PRs.
@@ -3256,7 +3263,7 @@ Slice triage (J3c, #3281, tasks 16.3, 16.4):
     - every test file that scans `services/**` or `tests/**` and names the facade or `file_journal_`.
   - node-27: a fresh-process import check over all `integration`-marked files, then `-m integration` over the files that import the facade or `file_journal_cohort`, on throwaway `nhms_it_*` DBs. Expected: all pass and 0 leftover DBs.
   - CI: the full suite.
-  - Compute node: the D5 pure-move batch (16.4), taken by the orchestrator after merge, not by the implementer. Owner decision 2026-11-23 (#3345; it supersedes closed #3343): production compute left node-22 for w3 (control) and w2. The production checkout keeps its path, `/scratch/frd_muziyao/NWM`, now on w3 (`ssh nwm-w3` logs in as `laoban`; the checkout is owned by `frd_muziyao`, reached with `sudo -iu frd_muziyao`), and is deployed by `git pull --ff-only` at a pass boundary exactly as D5 describes for node-22. Only the host changes; the cadence (one idle and one submitting pass per batch of at most three merged PRs or one day) does not.
+  - Compute node: the D5 pure-move batch (16.4), taken by the orchestrator after merge, not by the implementer. Owner decision 2026-11-23 (#3345; it supersedes closed #3343): production compute left node-22 for w3 (control) and w2. The production checkout keeps its path, `/scratch/frd_muziyao/NWM`, now on w3 (owned by the production user `frd_muziyao`), and is deployed by `git pull --ff-only` at a pass boundary exactly as D5 describes for node-22. Only the host changes; the cadence (one idle and one submitting pass per batch of at most three merged PRs or one day) does not.
 
 D5 backlog deploy (owner decision 2026-11-23, recorded here because it deviates from design.md D5; decision record: https://github.com/DankerMu/SHUD-NWM/issues/3227#issuecomment-7111001268):
 - node-22 could not run passes from 2026-11-22 16:47 UTC and production compute moved to w3/w2 on 2026-11-23 (#3345). When the scheduler timer resumed on w3 the production checkout was still at 649f4ee8b, with 19 merged PRs undeployed: #3323, #3324, #3325, #3327 (R series), #3328-#3334, #3336, #3337 (F series and J0) and #3338-#3342, #3346 (J1-J3c).
@@ -3270,7 +3277,8 @@ D5 backlog deploy (owner decision 2026-11-23, recorded here because it deviates 
 ## 17. J4 — Submit-lifecycle mixin
 
 - [x] 17.1 Move C13, including `permit_*_retry`, into `file_journal_submit.py`. The back-edges from C11 and C14 resolve through `self`. J0 stays unchanged.
-- [ ] 17.2 Verification: CI, then node-22 batch per D5.
+- [x] 17.2 Verification: CI, then node-22 batch per D5.
+  - Evidence: CI green at merge; #3348 is in group 3 (deploy of `2e701e1d2` on w3, 2026-11-24T12:18:57Z; idle pass `scheduler_2026112412_7947a4a993bd`, root preflight `ready`; submitting pass `scheduler_2026112422_477019b84333`, 132 submitted, 0 failed), posted on #3282.
 
 Suggested fixture level: expanded - moves persisted-state writer code.
 Minimal mergeable slice: atomic - one cluster, pure move.
@@ -3373,12 +3381,13 @@ Slice triage (J4, #3282, tasks 17.1, 17.2):
     - every test file that scans `services/**` or `tests/**` and names the facade or `file_journal_`.
   - node-27: `-m integration` over the files that import the facade, on throwaway `nhms_it_*` DBs. Expected: all pass and 0 leftover DBs.
   - CI: the full suite.
-  - Compute node: the D5 pure-move batch (17.2), taken by the orchestrator after merge on w3/w2 (owner decision 2026-11-23, #3345; `ssh nwm-w3` logs in as `laoban`, the checkout `/scratch/frd_muziyao/NWM` is owned by `frd_muziyao`), by `git pull --ff-only` at a pass boundary.
+  - Compute node: the D5 pure-move batch (17.2), taken by the orchestrator after merge on w3/w2 (owner decision 2026-11-23, #3345; the checkout `/scratch/frd_muziyao/NWM` is owned by the production user `frd_muziyao`), by `git pull --ff-only` at a pass boundary.
 
 ## 18. J5 — Reconcile-inventory mixin
 
 - [x] 18.1 Move C7 into `file_journal_reconcile_inventory.py`, keeping the underscore names that `file_orchestration_migration.py` and `journal_scope_census.py` call. J0 stays unchanged.
-- [ ] 18.2 Verification: CI, then node-22 batch per D5.
+- [x] 18.2 Verification: CI, then node-22 batch per D5.
+  - Evidence: CI green at merge; #3351 is in group 3 (deploy of `2e701e1d2` on w3, 2026-11-24T12:18:57Z; idle pass `scheduler_2026112412_7947a4a993bd`, root preflight `ready`; submitting pass `scheduler_2026112422_477019b84333`, 132 submitted, 0 failed), posted on #3283.
 
 Suggested fixture level: expanded - moves persisted-state writer code.
 Minimal mergeable slice: atomic - one cluster, pure move.
@@ -3479,12 +3488,69 @@ Slice triage (J5, #3283, tasks 18.1, 18.2):
 
 ## 19. Archive
 
-- [ ] 19.1 In the final push of whichever slice merges last:
+- [x] 19.0 J-series carry-overs (#3350): the origin rule in the late-lookup lint, behavioural seam tests for the repository mixins, the `_cycle_write_owner` guard over the siblings, the status-set identity pin on siblings (#3347), comment fixes in three siblings, and the spec delta for the extraction requirement.
+- [x] 19.1 In the final push of whichever slice merges last:
   - tick every task;
   - give each touched capability spec a real Purpose paragraph where it says TBD;
   - rewrite the `file-orchestration-journal` Purpose (`:4-5`) so it no longer says "contract-tested against the database semantics" (R3-2; Purpose text is outside the delta format);
   - run `openspec archive redesign-orchestration-core --yes`.
-  - The last code slice is J5 (#3283), and its own D5 task (18.2) can only be taken after it is merged and deployed, so the archive cannot ride in #3283's final push. It rides in the final push of the J-series carry-over PR (#3350), opened after the D5 group 3 passes (or #3283's own D5 batch, if #3283 merges after group 3 is deployed) satisfy 18.2. See the J5 deviations.
+  - The last code slice is J5 (#3283), and its own D5 task (18.2) can only be taken after it is merged and deployed, so the archive cannot ride in #3283's final push. It rides in the final push of the J-series carry-over PR (#3350); that final push comes after the D5 passes of 4.6, 9.7, 10.3, 11.6, 14.2, 15.3, 16.4, 17.2 and 18.2 are all collected (18.2 by group 3, or by #3283's own D5 batch if #3283 merges after group 3 is deployed). See the J5 deviations.
 
 Suggested fixture level: none - bookkeeping inside the last slice's PR.
 Minimal mergeable slice: atomic - rides in the last slice's final push.
+
+Slice triage (J close-out, #3350, tasks 19.0, 19.1):
+- Issue type: test-only, plus comment text in three siblings and openspec bookkeeping. Fixture level: standard (agree): no production behaviour changes; the risk is a guard that looks green but pins nothing. Width: one PR. The test work is pushed first; the archive (19.1) rides the PR's final push after the D5 passes of 4.6, 9.7, 10.3, 11.6, 14.2, 15.3, 16.4, 17.2 and 18.2 are all in. The dependency #3283 (J5) is merged.
+- Recon at e36666851:
+  - The late-lookup lint (`late_lookup_problems` in `tests/test_file_journal_cluster_map.py`) flags an import in a sibling only when the bound name or the imported name equals a facade-resident patched name. It does not see a read of the name's origin: `from packages.common.contracts.time_normalization import utc_now` (the facade binds it as `_utcnow`) or `safe_fs.stat_no_follow(…)` through a module alias. The derived `callers` table is per top-level unit, so it turns red only when every site of a name in a mixin bypasses. A partial bypass is caught by neither (`.workplans/3277/carry-overs.md` #1; confirmed by the mutation runs in the PR #3351 review).
+  - The facade binds eight patched names by import. Their origins are: `_utcnow` ← `packages.common.contracts.time_normalization.utc_now`; `list_directory_no_follow_limited`, `read_bytes_limited_no_follow`, `scan_directory_no_follow_limited`, `stat_no_follow`, `unlink_no_follow` ← `packages.common.safe_fs` (same names); `open_lock_file_no_follow` ← `packages.common.safe_fs_lock`; `accepted_submit_candidate_immutable_evidence` ← `services.orchestrator.accepted_submit_identity`. No `file_journal_*.py` sibling reads any of these origins today, by from-import or through a module alias (AST scan), so an origin rule starts with zero hits.
+  - Mixin callers in the cluster map's `patched[*].callers`: `_utcnow` × `events`, `release`, `reclaim`, `operator`, `cohort`, `submit`, `reconcile_inventory`; `stat_no_follow` × `retention`, `reconcile_inventory`; `unlink_no_follow`, `list_directory_no_follow_limited`, `_stat_signature` × `reconcile_inventory`. That is 12 (name, mixin) pairs. `tests/test_file_journal_late_lookup_seams.py` has seven tests, all for the function clusters (`candidates`, `paths`, `retry_helpers`); none drives a repository mixin.
+  - `test_cycle_write_owner_assignments_confined_to_init_and_window` (`tests/test_file_orchestration_journal_read_cache.py`) parses only the facade file. No sibling writes `_cycle_write_owner` today (`file_journal_release.py` names it in a docstring only).
+  - #3347 holds the recon for the status-set identity pin.
+  - Comment sites: `file_journal_reclaim.py` ("Same auto-retry isolation contract as the reservation write above"; `reserve_pipeline_job` stayed in the facade) and `file_journal_operator.py` ("Lazy import: ``reconcile`` imports this module at load time.", two sites; `reconcile` imports the facade). The `file_journal_release.py` module docstring names `_record_identity_released_signal_failure` but does not say that this facade method also calls `_append_pipeline_job_event_unlocked` (it does); add that clause. `reconcile` reaches the facade through `reconcile_reserved`, and the reworded operator comment should say so.
+- Changes (implementer):
+  1. Origin rule in the late-lookup lint. For every patched name whose map entry has `binding: import`, derive the origin name from the facade's own import statement (do not hard-code the table). In every `file_journal_*.py` sibling, at any depth, report:
+     - a from-import of an origin name, from any module and under any alias (this also covers a re-export of `utc_now` through a third module);
+     - an attribute read `<base>.<origin name>` whose base is not a name bound to the facade module in that scope. That covers `safe_fs.stat_no_follow`, `import packages.common.safe_fs as s; s.stat_no_follow` and the unaliased dotted form `packages.common.safe_fs.stat_no_follow`.
+
+     All 29 attribute reads of an origin name in the siblings at HEAD go through `file_orchestration_journal`, so the rule starts with zero hits; other names from the origin modules (`SafeFilesystemError`, `format_cycle_time`, the `accepted_submit_identity` constants) stay allowed. The message names the sibling, the line and the facade name. Facade aliases are bound inside function bodies, so collect them per unit, as the existing `_facade_import_aliases` does. `test_siblings_never_bind_patched_names_by_import` stays the entry point (or gains a sibling test).
+
+     Synthetic-tree tests: the existing synthetic facade binds only `stat_no_follow` and the synthetic map lists only `_stat_signature`, and the old lint already flags a from-import whose name equals the facade name. So the new tests need a synthetic facade that binds `from packages.common.contracts.time_normalization import utc_now as _utcnow` and a synthetic map that lists `_utcnow` with `binding: import`. Cover: `from … import utc_now` (plain and aliased, including from a third module); the three attribute forms above; and two allowed neighbours (another name from the same origin module; the facade-alias read).
+
+     Accepted limits, stated in the test module's docstring: `getattr`/`importlib` reads; a name that is imported as the facade in one method and rebound to another module in a different method of the same top-level unit (facade aliases are collected per unit, by name; a plainly reassigned alias such as `s = safe_fs; s.stat_no_follow` is reported); and patched names the facade defines itself (`binding: def`, such as `_stat_signature`), which have no origin. The seam tests of item 2 are the guard for the last group.
+  2. Behavioural seam tests in a new file `tests/test_file_journal_mixin_seams.py` (`tests/test_file_journal_late_lookup_seams.py` stays as it is). One driver per pair above, on a real `FileOrchestrationJournalRepository` under `tmp_path`.
+     - Oracle. "The stub was called" is not enough: every mixin write also goes through the facade's append path and `_journal_record_for_write`, which read `_utcnow` themselves, and `paths` and facade code also call the IO names. So the stub records the module of its caller (`sys._getframe(1).f_globals["__name__"]`) and delegates to the real callable; each test asserts that `services.orchestrator.file_journal_<cluster>` is among the recorded callers.
+     - Shape. One parametrized test over `PAIR_DRIVERS: dict[tuple[str, str], Callable]` keyed by `(patched name, cluster)`, plus a completeness test asserting `set(PAIR_DRIVERS)` equals the pairs derived from `tests/fixtures/file_journal_cluster_map.json` (every caller cluster of a patched name whose members are a `_FileJournal…Mixin`). Equality, so a missing pair and a stale pair both fail.
+     - The file patches only names that are already in the map's `patched` table; otherwise the map's scanner test fails on the frozen fixture.
+     - Cheap drivers (suggestions): retention: `discover_retention_cycles()` on an empty root; reconcile inventory: `list(repo._iter_reconcile_pipeline_job_records())` on a fresh root (marker `completed_at`, directory listing), with a seeded job for `_stat_signature` and a planted migration temp residue for `unlink_no_follow`; operator and cohort: reuse `tests/orchestrator_demote_reserved_job_helpers.py` and the seeds of `tests/test_cohort_member_charge.py`.
+  3. `_cycle_write_owner` guard: scan the facade plus every `services/orchestrator/file_journal_*.py`. The allowed set becomes file-qualified, `{(facade, "__init__"), (facade, "_locked_cycle_write")}`, so a sibling method with one of those names does not pass; each site carries its own file's path and tree (`_enclosing_function_for_line` works per tree); the non-vacuity assertion stays global. Also make `_is_setattr_owner` match the bare `setattr(self, "_cycle_write_owner", …)` call, which the docstring claims but the helper misses (`func` is a `Name` there).
+  4. #3347: the AST-discovered status-set identity pin over every sibling top-level binding, discovered by bound name (not only by the `scheduler_state_types` import), and the comment block without line numbers or site counts, as that issue specifies. Three siblings bind the set today (`file_journal_operator.py`, `file_journal_cohort.py`, `file_journal_submit.py`); the non-vacuity floor is those three. Function-local bindings stay out of reach, as the issue says.
+  5. Comment text in `file_journal_reclaim.py`, `file_journal_operator.py` and `file_journal_release.py`. No code change: `ast.dump` of each file is equal before and after, the module docstring constant of `file_journal_release.py` aside (compare with that docstring blanked in both trees).
+- Changes (orchestrator, openspec):
+  - a MODIFIED delta for "Journal responsibility clusters SHALL be extracted behind a stable facade" (`orchestrator-structural-burndown`): the extraction order names the eight repository-mixin clusters, the patched-seam rule no longer claims that every patched name has a facade call site, and it states the origin rule; two scenarios are added (origin bypass rejected; mixin callers reach the facade seam);
+  - 19.1's sub-bullet says "whose final push comes after" instead of "opened after";
+  - in the final push: every remaining tick with its evidence (the D5 passes of 4.6, 9.7, 10.3, 11.6, 14.2, 15.3, 16.4, 17.2 and 18.2 must all be in before it), the Purpose paragraphs, `openspec archive redesign-orchestration-core --yes`.
+- Must preserve:
+  - No production behaviour change. The only production-file edits are comment and docstring text in the three siblings.
+  - The J0 data file and test, `tests/test_file_journal_late_lookup_seams.py` and `tests/fixtures/file_journal_cluster_map.json` are unchanged.
+  - No existing assertion is weakened or removed.
+- Deviations, recorded in the PR body:
+  - two pushes, against the CI cost rule that the last push is the complete end state: the archive depends on compute-node passes that only exist a day after the test work is ready, so the test push and the archive push each cost one full CI run; nothing else is pushed between the two;
+  - this PR closes #3347 although it also edits comment text in three production files (#3347's own criterion says "No production file changes"; the comment edits belong to #3350's scope item 4 and change no AST);
+  - one driven method per (name, mixin) pair instead of the method list in #3350's body (three events methods, the release and recover writers, retention member removal): the origin rule covers the other sites of the import-bound names statically. `_stat_signature` is facade-defined and has no origin, so its pair (`reconcile_inventory`) is site-complete instead: the recorded call lines must equal the call sites derived from the mixin's AST (round-1 review, P2);
+  - the seam oracle: #3350's body asks for a counting stub and for the stub's timestamp to reach the written record. The tests use a recorder of the caller's module and assert that the mixin's module is among the callers, with no value assertion, because the facade's own append path also reads `_utcnow` and writes `created_at`, so both of the issue's assertions hold even when the mixin's site bypasses the facade. The cost: the value a mixin writes after reading the clock is not checked here;
+  - the origin rule decides by name, so it also rejects a reassigned facade alias and the same attribute name on an unrelated object (fail-closed, zero hits today); its limits are in the spec delta and in the test module's docstring.
+- Out of scope: per-site seam tests for the import-bound names (the origin rule covers partial bypass of those statically); moving more code; narrowing the facade's per-file-ignores row; splitting the larger siblings; refreshing stale `file.py:NNN` references in test docstrings other than the block #3347 names.
+- Required evidence (`.workplans/3350/`):
+  1. `red-runs.log`, each a temporary edit reverted afterwards (restore verified by sha256):
+     - origin rule: in the events mixin, which has several `_utcnow` sites, replace one `file_orchestration_journal._utcnow()` site with a direct `utc_now()` behind `from packages.common.contracts.time_normalization import utc_now`; and in the reconcile-inventory mixin replace one `stat_no_follow` site with `safe_fs.stat_no_follow(…)` behind `from packages.common import safe_fs`. The lint fails and names the sibling; record that `test_patched_callers_match_the_ast` stays green for both (this is the partial bypass the old guards missed);
+     - seam tests: for each of the 11 pairs with an import-bound name, a bypass at the site the driver reaches turns that pair's seam test red (the origin rule is red too; record both). For `_stat_signature` × `reconcile_inventory` (a facade-defined name with no origin) the mutation is a module-local copy of `_stat_signature` called at the driven site; only the seam test is expected red;
+     - completeness: removing one driver makes the completeness test fail and name the pair, and so does adding a stale pair;
+     - `_cycle_write_owner`: a write planted in an ordinary sibling method, and one planted in a sibling method named `__init__`, each make the guard fail and name the sibling;
+     - #3347's two red runs.
+  2. `ast-equal.md`: `ast.dump` equality of the three siblings before and after the comment edits (for `file_journal_release.py` with the module docstring blanked in both trees).
+  3. `checks.log`: `uv run --no-sync ruff check . --no-cache`, `git diff --check`, `openspec validate redesign-orchestration-core --strict --no-interactive` (on both pushes), and the local test list.
+- Verification:
+  - Locally: `tests/test_file_journal_*.py`, `tests/test_file_orchestration_journal_read_cache.py`, `tests/test_hydro_status_set_parity.py`, `tests/test_status_literal_scan.py`, `tests/test_status_vocab_parity.py`, and every test file that names one of the three edited siblings.
+  - node-27: `tests/test_hydro_status_set_parity.py tests/test_status_literal_scan.py tests/test_status_vocab_parity.py` (#3347's verification line) in a temporary worktree.
+  - CI: the full suite, on the test push and again on the final (archive) push.

@@ -1,8 +1,10 @@
 # scheduler-discovery-evidence-owner-compat Specification
 
 ## Purpose
-TBD - created by archiving change scheduler-discovery-evidence-owner-compat. Update Purpose after archive.
+Record the conditions under which source-discovery evidence code was moved into its own module: unchanged behaviour for every accepted input and error, and the names and seams callers reach through the scheduler facade kept working.
+
 ## Requirements
+
 ### Requirement: Discovery evidence extraction preserves owner compatibility
 
 The scheduler SHALL permit source-discovery evidence implementations to be
@@ -32,10 +34,11 @@ distinguishing result.
 
 WHEN existing code consumes discovery helpers or the resource-limit error
 through `services.orchestrator.scheduler`, `scheduler_candidates`,
-`scheduler_candidate_runtime`, `scheduler_compat_runtime`, `scheduler_runtime`,
+`scheduler_candidate_runtime`, `scheduler_runtime`,
 `scheduler_backfill_predecessor`, `scheduler_core`, or `scheduler_models`
 THEN every existing name MUST remain importable with its prior runtime signature
-and import-time or runtime binding semantics
+and import-time or runtime binding semantics, through an explicit import or
+alias line
 AND scheduler facade aliases MUST retain identity with the corresponding
 `scheduler_discovery` owner object.
 

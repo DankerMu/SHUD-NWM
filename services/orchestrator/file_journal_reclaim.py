@@ -191,8 +191,9 @@ class _FileJournalReclaimMixin:
                     "finished_at": None,
                     "exit_code": None,
                     # Same auto-retry isolation contract as the reservation write
-                    # above: a reclaimed reservation that is later released must
-                    # still classify as non-retriable (spec:
+                    # in the facade's ``reserve_pipeline_job``: a reclaimed
+                    # reservation that is later released must still classify as
+                    # non-retriable (spec:
                     # candidate-projection-stage-attempt-retention).
                     "error_code": None,
                     "error_message": None,

@@ -1,16 +1,15 @@
 # file-orchestration-journal Specification
 
 ## Purpose
-Let the node-22 scheduler run DB-free on a file-backed orchestration journal that is contract-tested against the
-database semantics, including exactly-once reconciliation of accepted forecast cohort submissions.
+Let the compute-role scheduler keep all of its orchestration state in a file-backed journal, the only orchestration repository: contract-tested scheduler semantics, exactly-once reconciliation of accepted forecast cohort submissions, writes the journal's own reader accepts, and one repository class surface across the responsibility modules.
 
 ## Requirements
 
 ### Requirement: Scheduler can use a file-backed orchestration journal
 
 The system SHALL provide a file-backed implementation of the scheduler's
-active/completed/candidate/job/event state responsibilities currently supplied
-by `PsycopgOrchestratorRepository`.
+active/completed/candidate/job/event state responsibilities; the file journal
+is the only orchestration repository.
 
 #### Scenario: File journal preserves active pipeline detection
 
@@ -45,8 +44,10 @@ by `PsycopgOrchestratorRepository`.
   append-only journal truth is committed, so append failure cannot leave a
   direct-only reservation blocker
 - **AND** reservation, binding, job-status, event insertion, forecast/hydro
-  status, retry, and permanent-failure writes preserve the existing DB-backed
-  repository semantics.
+  status, retry, and permanent-failure writes follow the journal's own pinned
+  repository semantics: a unique conflict on job id or idempotency key is a
+  clean reservation loss, a dead unbound reservation is reclaimable, and a
+  permanent failure stays sticky.
 
 #### Scenario: Read-side journal schemas are explicit
 
@@ -107,8 +108,8 @@ by `PsycopgOrchestratorRepository`.
 #### Scenario: DB-free mode uses file-backed retry state
 
 - **WHEN** DB-free mode constructs a production orchestrator
-- **THEN** it uses a file-journal retry service instead of DB-backed
-  `_retry_service_from_env()` or SQLAlchemy `PipelineStore`
+- **THEN** it uses the file-journal retry service, never a DB-backed retry
+  service or SQLAlchemy `PipelineStore`
 - **AND** retry attempts, retry-limit exhaustion, manual repair markers, and
   permanent-failure state are represented in append-only file journal records.
 - **AND** manual repair markers that unblock scheduler retry decisions require
@@ -150,9 +151,8 @@ by `PsycopgOrchestratorRepository`.
 
 - **WHEN** file-backed rows are materialized into candidate state with job or
   event limits
-- **THEN** rows are pre-limited using the same DB ordering as
-  `PsycopgOrchestratorRepository`, including `job_id DESC` for jobs and
-  `event_id DESC` for events when timestamps tie
+- **THEN** rows are pre-limited using the journal's fixed ordering, including
+  `job_id DESC` for jobs and `event_id DESC` for events when timestamps tie
 - **AND** file input order cannot decide equal-timestamp candidate state.
 
 #### Scenario: Blocked query evidence is public-safe
@@ -165,7 +165,8 @@ by `PsycopgOrchestratorRepository`.
 ### Requirement: File journal is contract-tested against DB semantics
 
 The system SHALL include repository contract tests that verify file-backed
-orchestration state behavior against existing scheduler semantics.
+orchestration state behavior against the scheduler semantics the file journal
+is the only implementation of.
 
 #### Scenario: Contract fixtures cover critical repository methods
 
@@ -175,16 +176,16 @@ orchestration state behavior against existing scheduler semantics.
   lifecycle writes, reservation/bind, job status updates, event insertion,
   retry supersession, permanent failure guards, historical migration, and query
   helpers
-- **AND** DB-backed repository semantics remain covered by existing
-  `PsycopgOrchestratorRepository` tests.
+- **AND** the file journal is the only orchestration repository those fixtures
+  exercise; no DB-backed orchestration repository exists to compare against.
 
 #### Scenario: Read-side contract fixtures cover scheduler planning
 
 - **WHEN** #833 focused tests run without `DATABASE_URL`
 - **THEN** they prove file-backed active/completed/candidate/active-Slurm
   decisions are visible to scheduler planning
-- **AND** DB-backed active/orchestrator repository factories are not called in
-  DB-free read-side construction.
+- **AND** no DB-backed active/orchestrator repository factory exists for
+  read-side construction to call.
 
 ### Requirement: Accepted forecast cohort submission is reconciled exactly once
 
@@ -306,7 +307,7 @@ New accepted-submit master and candidate rows MUST carry an explicit contract
 version. Marker-free historical cohort-shaped rows MUST retain the legacy
 read/replay contract and MUST NOT be rejected for missing accepted-submit
 fields. Global accounting-visibility proof MUST be applied only to versioned
-accepted-submit cohorts, not to generic or non-DB-free reconciliation.
+accepted-submit cohorts, not to generic reconciliation.
 
 #### Scenario: Forecast cohort reservation precedes the Gateway call
 
@@ -647,7 +648,7 @@ accepted-submit cohorts, not to generic or non-DB-free reconciliation.
 
 #### Scenario: Existing reconcile callers remain compatible
 
-- **WHEN** generic repository or non-DB-free reconcile processes a legacy row
+- **WHEN** generic repository reconcile processes a legacy row
   without the additive cohort/member fields
 - **THEN** its existing status and identity contract remains valid
 - **AND** DB-free-only cohort fields are not made mandatory for that caller.
@@ -815,3 +816,28 @@ The latest materializer and the latest reader SHALL agree on which job rows belo
 - **THEN** the read is blocked with the same identity blocker as before this requirement
 - **AND** a row naming A with the exact cycle run id but a wrong `cycle_id` is blocked as
   `file_journal_cycle_id_mismatch`
+
+### Requirement: The journal repository keeps one class surface across responsibility modules
+
+`FileOrchestrationJournalRepository` SHALL keep these stable while its leaf
+responsibilities live in separate mixin modules:
+
+- its import path and class name;
+- its public and private method names and their signatures;
+- its read attribution;
+- the module-level names importable from
+  `services.orchestrator.file_orchestration_journal`;
+- its on-disk formats.
+
+#### Scenario: A responsibility cluster moves to a mixin
+
+- **WHEN** a cluster of methods moves from `file_orchestration_journal.py` into
+  a `file_journal_*` mixin module
+- **THEN** the characterization guard's pinned sets are unchanged:
+  - the method names resolvable on the class, with their signatures;
+  - the attribution-wrapped public methods;
+  - the private methods called by the named external modules;
+  - the public module-level names importable from the facade module.
+- **AND** module-level patch points are still read off
+  `services.orchestrator.file_orchestration_journal` at call time, and the
+  cluster-map late-lookup lint covers the new mixin module.
