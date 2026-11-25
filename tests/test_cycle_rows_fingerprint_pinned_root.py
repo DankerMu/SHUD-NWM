@@ -266,8 +266,14 @@ def _cycle_rows(repository: FileOrchestrationJournalRepository) -> Any:
     return repository._cycle_rows(source_id="gfs", cycle_time=CYCLE_TIME, model_id="model_a")
 
 
-def _cache_entries(repository: FileOrchestrationJournalRepository) -> dict[Any, int]:
-    return {key: id(entry) for key, entry in repository._cycle_rows_cache.items()}
+def _cache_entries(repository: FileOrchestrationJournalRepository) -> dict[Any, Any]:
+    # The entry objects themselves, not their ids: holding the references keeps
+    # a replaced entry alive, so a new entry can never reuse its id.
+    return dict(repository._cycle_rows_cache)
+
+
+def _same_entries(left: dict[Any, Any], right: dict[Any, Any]) -> bool:
+    return left.keys() == right.keys() and all(left[key] is right[key] for key in left)
 
 
 def test_symlink_swap_after_a_stored_read_fails_loud_as_a_cold_read(tmp_path: Path) -> None:
@@ -285,7 +291,7 @@ def test_symlink_swap_after_a_stored_read_fails_loud_as_a_cold_read(tmp_path: Pa
     assert first.hydro_run is not None and first.pipeline_jobs, "the cycle must be populated"
 
     _cycle_rows(repository)
-    assert _cache_entries(repository) == stored, "the second read must be a hit"
+    assert _same_entries(_cache_entries(repository), stored), "the second read must be a hit"
 
     journal_source = root / "journal" / "gfs"
     copy = tmp_path / "journal_gfs_copy"
@@ -300,13 +306,18 @@ def test_symlink_swap_after_a_stored_read_fails_loud_as_a_cold_read(tmp_path: Pa
     assert type(warm.value) is type(cold.value)
     assert isinstance(warm.value, journal_module.FileOrchestrationJournalError)
     assert warm.value.reason == cold.value.reason
-    assert _cache_entries(repository) == stored, "the faulted read must store nothing"
+    assert _same_entries(_cache_entries(repository), stored), "the faulted read must store nothing"
 
     # Restore the content (the copy has new inodes, so the fingerprint moves
     # and the next read recomputes and stores instead of hitting).
     journal_source.unlink()
     copy.rename(journal_source)
     restored = _cycle_rows(repository)
-    assert _cache_entries(repository) != stored, "the read after the restore must store again"
+    after = _cache_entries(repository)
+    assert after.keys() == stored.keys(), "the read after the restore must store under the same keys, not drop them"
+    for key, entry in after.items():
+        assert entry is not stored[key], f"{key}: the read after the restore hit instead of storing again"
+        assert entry[0] != stored[key][0], f"{key}: the stored fingerprint did not move with the restored tree"
+        assert entry[0] is not journal_module._FINGERPRINT_CONTAINMENT_FAULT
     assert restored.hydro_run == first.hydro_run
     assert restored.pipeline_jobs == first.pipeline_jobs

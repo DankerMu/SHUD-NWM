@@ -381,6 +381,32 @@ def test_no_descriptor_of_the_tree_survives_many_blocks(tmp_path: Path) -> None:
     assert not leaked, f"descriptors still refer to tree directories: {leaked}"
 
 
+def test_failed_duplicate_of_the_pin_is_an_io_refusal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Task 1.2: an ``OSError`` from ``os.dup`` of the pin is ``SafeFilesystemError(kind="io")``.
+
+    The path's parent is below the root, so the duplicate of the pin is the
+    only ``os.dup`` of the call.  ``safe_fs.os`` is the real ``os`` module, so
+    the replacement is undone right after the one call.
+    """
+
+    root, paths = _five_files(tmp_path)
+    tree = _tree_directories(tmp_path / "top")
+
+    def no_descriptors_left(_fd: int) -> int:
+        raise OSError(errno.EMFILE, "Too many open files")
+
+    with pinned_containment_root(root):
+        with monkeypatch.context() as patch:
+            patch.setattr(safe_fs.os, "dup", no_descriptors_left)
+            with pytest.raises(SafeFilesystemError) as info:
+                stat_no_follow(paths[0], containment_root=root)
+        assert info.value.kind == "io"
+        assert isinstance(info.value.__cause__, OSError) and info.value.__cause__.errno == errno.EMFILE
+        assert _outcome(paths[1], root) == ("ok", _identity(os.lstat(paths[1])))
+    leaked = tree & _open_descriptor_identities()
+    assert not leaked, f"descriptors still refer to tree directories: {leaked}"
+
+
 # --- 3.5 races: a change between two calls of one block -----------------------
 
 
@@ -484,11 +510,19 @@ def test_race_root_renamed_away(tmp_path: Path) -> None:
 def test_same_root_nesting_reuses_the_outer_pin(tmp_path: Path, opens: list[Path]) -> None:
     root, paths = _five_files(tmp_path)
     with pinned_containment_root(root):
+        outer = _PINNED_CONTAINMENT_ROOT.get()
+        outer_fd = _pinned_fd()
         with pinned_containment_root(root):
+            assert _PINNED_CONTAINMENT_ROOT.get() is outer
             stat_no_follow(paths[0], containment_root=root)
+        assert len(opens) == 1, "the inner block for the same root must reuse the outer pin"
+        assert _PINNED_CONTAINMENT_ROOT.get() is outer
+        assert _pinned_fd() == outer_fd, "the inner block must not clear the outer pin"
+        os.fstat(outer_fd)
         assert _outcome(paths[1], root) == ("ok", _identity(os.lstat(paths[1])))
-        assert _PINNED_CONTAINMENT_ROOT.get() is not None
+        assert len(opens) == 1, "the outer block's later stat must still use its own pin"
     assert len(opens) == 1
+    _assert_closed(outer_fd)
 
 
 def test_different_root_nesting_has_one_pin_at_a_time(tmp_path: Path, opens: list[Path]) -> None:
