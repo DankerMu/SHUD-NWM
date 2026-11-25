@@ -334,6 +334,14 @@ _LATEST_VIEW_DEPTH_HEADROOM: Mapping[str, int] = {
     "pipeline_event": 1,
 }
 MAX_FILE_JOURNAL_CYCLE_ROWS_CACHE_ENTRIES = 512
+#: #3236 B2: entries of ``_cycle_segment_records_cache``.  One entry holds the
+#: decoded records of one segment directory (``journal/<source>`` or
+#: ``pipeline-events/<source>``) of one cycle, with the cycle-rows fingerprint
+#: they were read under.  Small on purpose: completion scoring reads every
+#: model of one cycle before it moves on, so only the cycle being scored has to
+#: stay (up to four directories with both source spellings); eight hold two
+#: such cycles while keeping at most eight decoded logs alive per repository.
+MAX_FILE_JOURNAL_CYCLE_SEGMENT_RECORDS_CACHE_ENTRIES = 8
 #: Total attempts (initial plus retries) the journal's cached read chokepoint
 #: makes against a mid-open atomic replacement of the file it is reading.  An
 #: ``os.replace`` leaves the new inode stable immediately, so one re-read
@@ -1328,6 +1336,15 @@ class FileOrchestrationJournalRepository(
         self._cycle_rows_cache: dict[
             tuple[str, str, str | None, tuple[str, ...]],
             tuple[tuple[Any, ...] | None, _CycleRows],
+        ] = {}
+        # #3236 B2: one cycle's decoded segment records, shared by the misses of
+        # its models.  Key (surface, source segment, cycle segment), value
+        # (fingerprint, records); served only to a call whose own fingerprint
+        # equals the stored one (`_shared_cycle_segment_records`).  The records
+        # are read-only: every model's rows reference their nested values.
+        self._cycle_segment_records_cache: dict[
+            tuple[str, str, str],
+            tuple[tuple[Any, ...], list[dict[str, Any]]],
         ] = {}
         self._direct_jobs_cycle_cache: dict[
             tuple[str, str],
@@ -3336,7 +3353,13 @@ class FileOrchestrationJournalRepository(
                             cycle_time=cycle_time,
                             expected_model_id=_safe_segment(path.stem),
                         )
-                for record in self._read_cycle_segments(self.root / "journal" / source_segment, cycle_segment):
+                for record in self._shared_cycle_segment_records(
+                    surface="journal",
+                    source_segment=source_segment,
+                    cycle_segment=cycle_segment,
+                    fingerprint=fingerprint,
+                    shareable=not in_write_window and not probe_faulted,
+                ):
                     self._apply_journal_record(
                         rows,
                         record,
@@ -3344,8 +3367,12 @@ class FileOrchestrationJournalRepository(
                         cycle_time=cycle_time,
                         expected_model_id=model_id,
                     )
-                for record in self._read_cycle_segments(
-                    self.root / "pipeline-events" / source_segment, cycle_segment
+                for record in self._shared_cycle_segment_records(
+                    surface="pipeline-events",
+                    source_segment=source_segment,
+                    cycle_segment=cycle_segment,
+                    fingerprint=fingerprint,
+                    shareable=not in_write_window and not probe_faulted,
                 ):
                     self._apply_journal_record(
                         rows,
@@ -3661,6 +3688,49 @@ class FileOrchestrationJournalRepository(
             if cache_key not in self._cycle_rows_cache and len(self._cycle_rows_cache) >= cache_limit:
                 self._cycle_rows_cache.pop(next(iter(self._cycle_rows_cache)), None)
             self._cycle_rows_cache[cache_key] = entry
+
+    def _shared_cycle_segment_records(
+        self,
+        *,
+        surface: str,
+        source_segment: str,
+        cycle_segment: str,
+        fingerprint: tuple[Any, ...] | None,
+        shareable: bool,
+    ) -> list[dict[str, Any]]:
+        """Decoded records of one cycle segment directory, shared between models.
+
+        #3236 B2.  A call that may share (outside its write window, with a
+        fingerprint that is not the containment-fault marker) takes the stored
+        records only when they were stored under a fingerprint equal to its
+        own: that fingerprint covers every slot of both surfaces, so equality
+        proves the files are, now, what the records were decoded from.  Any
+        other call reads the directory itself and neither takes nor stores.
+        A read that raises leaves no entry for its directory (an entry stored
+        under another fingerprint is dropped before the read), so every model's
+        read of a failing directory raises as on a cold repository.  The
+        returned list and its records are shared: callers must not mutate them.
+        """
+        directory = self.root / surface / source_segment
+        if not shareable:
+            return self._read_cycle_segments(directory, cycle_segment)
+        key = (surface, source_segment, cycle_segment)
+        with self._cache_lock:
+            entry = self._cycle_segment_records_cache.get(key)
+            if entry is not None and entry[0] != fingerprint:
+                # Dropped before the read: a read that raises leaves no entry.
+                self._cycle_segment_records_cache.pop(key, None)
+                entry = None
+        if entry is not None:
+            return entry[1]
+        records = self._read_cycle_segments(directory, cycle_segment)
+        cache_limit = max(int(MAX_FILE_JOURNAL_CYCLE_SEGMENT_RECORDS_CACHE_ENTRIES), 1)
+        with self._cache_lock:
+            self._cycle_segment_records_cache.pop(key, None)
+            if len(self._cycle_segment_records_cache) >= cache_limit:
+                self._cycle_segment_records_cache.pop(next(iter(self._cycle_segment_records_cache)), None)
+            self._cycle_segment_records_cache[key] = (fingerprint, records)
+        return records
 
     def _latest_paths(self, source_segment: str, cycle_segment: str, *, model_id: str | None) -> list[Path]:
         directory = self.root / "latest" / source_segment / cycle_segment
