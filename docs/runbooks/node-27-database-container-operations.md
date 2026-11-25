@@ -167,7 +167,7 @@ current commands. Archive and issue closeout are being completed in this PR.
 顺带记一笔：`local`/`127.0.0.1` 的 `trust` 意味着**任何能 `docker exec` 的人无需口令即可进库**。
 这是现有运维模型的一部分，不是本文要改的东西，但要知道它在那儿。
 
-## 6. 已知未处置
+## 已知未处置
 
 - **应用以 superuser 连库**。superuser 可以 `COPY ... FROM PROGRAM`，即在容器内执行命令；
   这不是"能读写数据"而是命令执行。最小权限改造另行立单。
@@ -288,6 +288,8 @@ python scripts/node27_integration_pg.py stop
 - `run` 存活期间 `stop` 会拒绝（旁边的 `nhms-it-pg.lock` 文件锁）；确认无人在用后才用 `stop --force`。
 - 工具只会删除带自己标签的 `nhms-it-db` 容器和带自己哨兵文件的目录；对 `nhms-db` 只做一次取镜像 ID 的 `inspect`。
 - 实例可以在多次运行之间留着（占用以上表为限）；主机重启后它不会自启，重新 `start` 即可。
+  对已在跑的实例，`start` 会先核对它的镜像仍等于生产容器当前的镜像、端口与所要的一致、并探测一次就绪，
+  任何一项不符就拒绝并要求先 `stop`（例如生产容器换过镜像之后）。
 - `tests/conftest.py` 另有一道拦截：会话会跑 integration 且 URL 的端口是 `55432`（或 URL 没写端口而
   `PGPORT=55432`）时，pytest 以 usage error 直接结束，不跑任何测试。它拦的是文档化的生产入口，
   不是隔离手段：别手工把 integration URL 指向生产实例的任何地址。

@@ -81,17 +81,21 @@ class Refusal(Exception):
         self.code = code
 
 
+class DockerFailure(Refusal):
+    """docker itself did not answer as expected: the state of ``nhms-it-db`` is unknown."""
+
+
 # --- docker -----------------------------------------------------------------
 
 
 def _docker(*args: str, timeout: float = DOCKER_TIMEOUT_SEC) -> subprocess.CompletedProcess[str]:
     binary = shutil.which("docker")
     if binary is None:
-        raise Refusal("docker not found on PATH")
+        raise DockerFailure("docker not found on PATH")
     try:
         return subprocess.run([binary, *args], capture_output=True, text=True, timeout=timeout, check=False)
     except subprocess.TimeoutExpired:
-        raise Refusal(f"docker {args[0]} did not answer within {timeout:g} s") from None
+        raise DockerFailure(f"docker {args[0]} did not answer within {timeout:g} s") from None
 
 
 def _last_line(text: str) -> str:
@@ -112,14 +116,15 @@ def _instance_container() -> tuple[bool, str | None] | None:
     """(running, label value) of ``nhms-it-db``, or None when it does not exist."""
     result = _docker("inspect", CONTAINER, "--format", "{{.State.Running}} {{json .Config.Labels}}")
     if result.returncode:
-        if "no such" in result.stderr.lower():
+        stderr = result.stderr.lower()
+        if "no such object" in stderr or "no such container" in stderr:
             return None
-        raise Refusal(f"docker inspect {CONTAINER} failed ({_last_line(result.stderr)})")
+        raise DockerFailure(f"docker inspect {CONTAINER} failed ({_last_line(result.stderr)})")
     try:
         running, labels_json = result.stdout.strip().split(" ", 1)
         labels = json.loads(labels_json) or {}
     except ValueError:
-        raise Refusal(f"unreadable docker inspect answer for {CONTAINER}") from None
+        raise DockerFailure(f"unreadable docker inspect answer for {CONTAINER}") from None
     return running == "true", labels.get(LABEL_KEY)
 
 
@@ -136,7 +141,7 @@ def remove_container(root: Path) -> bool:
         raise Refusal(f"{CONTAINER} does not carry the label {LABEL_KEY}={root}; not this instance's, left in place")
     result = _docker("rm", "-f", CONTAINER)
     if result.returncode:
-        raise Refusal(f"docker rm -f {CONTAINER} failed ({_last_line(result.stderr)})")
+        raise DockerFailure(f"docker rm -f {CONTAINER} failed ({_last_line(result.stderr)})")
     return True
 
 
@@ -336,20 +341,41 @@ def _create(root: Path, port: int, image: str, ready_timeout: float) -> None:
 
 
 def _cleanup_after_failure(root: Path) -> None:
-    for remove in (remove_container, remove_directory):
-        try:
-            remove(root)
-        except (Refusal, OSError) as error:
-            print(f"node27_integration_pg: cleanup: {_describe(error)}", file=sys.stderr)
+    # The directory is left when the container could not be removed: it may still be bind-mounted.
+    try:
+        remove_container(root)
+        remove_directory(root)
+    except (Refusal, OSError) as error:
+        print(f"node27_integration_pg: cleanup incomplete: {_describe(error)}", file=sys.stderr)
+
+
+def _hand_out_running(root: Path, image: str, port: int | None, ready_timeout: float) -> int:
+    """Idempotent start: report the running instance only after checking it; never removes anything."""
+    sentinel = _read_sentinel(root)
+    if sentinel["image"] != image:
+        raise Refusal(
+            f"the running instance uses image {_short_image(sentinel['image'])}, "
+            f"{PRODUCTION_CONTAINER} uses {_short_image(image)}; run stop first"
+        )
+    if port is not None and port != int(sentinel["port"]):
+        raise Refusal(f"the running instance listens on port {sentinel['port']}, not {port}; run stop first")
+    try:
+        _wait_ready(ready_timeout)
+    except DockerFailure:
+        raise
+    except Refusal as error:
+        raise Refusal(f"the running instance failed its readiness check ({error}); run stop first") from None
+    return _report_running(root, "already running")
 
 
 def cmd_start(args: argparse.Namespace) -> int:
-    if args.port == PRODUCTION_PORT or not 1024 <= args.port <= 65535:
-        raise Refusal(f"port {args.port} refused: it must be in 1024..65535 and not {PRODUCTION_PORT}")
+    port = DEFAULT_PORT if args.port is None else args.port
+    if port == PRODUCTION_PORT or not 1024 <= port <= 65535:
+        raise Refusal(f"port {port} refused: it must be in 1024..65535 and not {PRODUCTION_PORT}")
     root = _resolve_root(args.root)
     image = _production_image()
     if _assess(root) == "running":
-        return _report_running(root, "already running")
+        return _hand_out_running(root, image, args.port, args.ready_timeout)
     lock = _try_lock(root, fcntl.LOCK_EX)
     if lock is None:
         raise Refusal(
@@ -358,13 +384,13 @@ def cmd_start(args: argparse.Namespace) -> int:
     try:
         plan = _assess(root)
         if plan == "running":
-            return _report_running(root, "already running")
+            return _hand_out_running(root, image, args.port, args.ready_timeout)
         if plan in {"container", "both"}:
             remove_container(root)
         if plan in {"directory", "both"}:
             remove_directory(root)
         try:
-            _create(root, args.port, image, args.ready_timeout)
+            _create(root, port, image, args.ready_timeout)
         except BaseException:
             _cleanup_after_failure(root)
             raise
@@ -463,6 +489,8 @@ def cmd_stop(args: argparse.Namespace) -> int:
         try:
             if remove_container(root):
                 removed.append(f"container {CONTAINER}")
+        except DockerFailure:
+            raise
         except Refusal as error:
             failures.append(str(error))
         try:
@@ -503,7 +531,12 @@ def _parser() -> argparse.ArgumentParser:
 
     start = sub.add_parser("start", help="start the instance from the image of nhms-db")
     start.add_argument("--root", default=DEFAULT_ROOT, help=root_help)
-    start.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"loopback port (default {DEFAULT_PORT})")
+    start.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help=f"loopback port (default {DEFAULT_PORT}); a running instance on another port is refused",
+    )
     start.add_argument(
         "--ready-timeout",
         type=float,

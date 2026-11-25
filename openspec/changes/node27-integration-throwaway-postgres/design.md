@@ -60,8 +60,14 @@ removes a directory.
    exit non-zero, nothing created.
 3. Existing `nhms-it-db` (inspected with `--format` for state and label):
    - label missing or naming another directory: refuse, nothing changed;
-   - running, and the sentinel and env file exist: print that it is running,
-     exit 0 (idempotent);
+   - running, and the sentinel and env file exist: the instance is checked
+     before it is handed out again. The sentinel's image must equal the
+     production image id just read (the production container may have been
+     rebuilt on another image since), an explicitly given `--port` must
+     equal the sentinel's, and the readiness probe of step 7 must succeed
+     once (an earlier `start` may have been killed before it probed). Any of
+     these failing is a refusal that removes nothing and asks for `stop`
+     first. Otherwise print that it is running, exit 0 (idempotent);
    - running without them: refuse and say so;
    - not running: remove it through the container function, continue as a
      fresh start.
@@ -167,7 +173,9 @@ a skipped integration run reads as a green run.
 
 | Situation | Behaviour |
 |---|---|
-| `start` twice in a row | second prints "running", exit 0 |
+| `start` twice in a row | second probes the instance once, prints "running", exit 0 |
+| `start` while the running instance is from another image than production's, or on another port than the one asked for | refused, nothing removed: `stop` first |
+| docker cannot be reached | every subcommand fails; "the container is absent" is concluded only from docker's own no-such-container answer |
 | `start` after a host reboot (container exited, directory present) | container removed, directory removed by sentinel, fresh start |
 | `start` with a foreign non-empty directory | refused, untouched |
 | `start` meets a container named `nhms-it-db` without the label for this root | refused, untouched |

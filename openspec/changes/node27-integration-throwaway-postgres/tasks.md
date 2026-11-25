@@ -41,6 +41,11 @@ tool or written into the repository, an issue or a PR.
   goes on without it.
 - [ ] 1.6 Readiness is probed over TCP inside the container, with the
   password taken from the container's own environment by a fixed script.
+- [ ] 1.7 (review) An instance that is already running is checked before
+  `start` reports it: sentinel image against the production image, an
+  explicit `--port` against the sentinel's, one readiness probe. "The
+  container is absent" is concluded only from docker's no-such-container
+  answer, never from another inspect failure.
 
 ## 2. Tripwire (`tests/conftest.py`)
 
@@ -57,10 +62,10 @@ tool or written into the repository, an issue or a PR.
   section describe the new convention; the "until #3376 lands" bullet goes;
   the three amendments (sweep bound from `pg_control_checkpoint()`, the
   identification query needs the superuser, mechanism confirmed by the
-  2026-11-25 restart) are applied; a numbered section documents the tool
-  (the file has two sections numbered 6 today: the numbering is repaired
-  without changing any anchor another document links to, or the links are
-  updated in the same change).
+  2026-11-25 restart) are applied; section 8 documents the tool. The file
+  had two sections numbered 6: the second one ("已知未处置") loses its number,
+  so sections 7, 7.1 and 8, which other documents and issues cite, keep
+  theirs.
 - [ ] 3.3 `docs/runbooks/production-ops/oncall-sql.md` (the integration
   rule), `docs/runbooks/tier-node27-timeseries-storage.md` (the paragraph on
   throwaway-database fixtures), `docs/runbooks/ci-test-routing.md` (the
@@ -166,6 +171,15 @@ that each call naming `nhms-db` is exactly `inspect nhms-db --format
     and nothing collected with the opt-in and a 55432 URL; exit code 0
     without them.
 
+- [ ] 4.10 (review) `start` with only a stale container, and with only a
+  stale directory; refusal cases assert the reason in the message and the
+  foreign-label case can be refused by the label check alone; `--root /`
+  refused; `run` refused for a container labelled for another directory; a
+  round on port 55443 (URL and status use the sentinel's port); the four
+  cases of 1.7; an inspect failure that is not "no such container" removes
+  nothing on `stop`. The fake's `run -d` fails on a name clash, and the
+  finaliser also fails on any call the fake did not know.
+
 ## 5. Evidence
 
 - [ ] 5.1 Red first, recorded in `.workplans/3376/red-runs.log`: 4.9's
@@ -193,7 +207,13 @@ that each call naming `nhms-db` is exactly `inspect nhms-db --format
     dump -> 4.5 red (the listing recorded at the dump call);
   - M14 the directory function resolves the root before checking and
     removing it -> 4.6 red (symbolic-link root);
-  - M15 the tripwire ignores `PGPORT` -> 4.9 red.
+  - M15 the tripwire ignores `PGPORT` -> 4.9 red;
+  - M16-M24 (review): stale container or stale directory removed only when
+    both are stale; the label check of `start` removed; `run` not comparing
+    the label; a root of `/` accepted; `run` using the default port instead
+    of the sentinel's; the image comparison and the readiness probe of 1.7
+    removed; "absent" concluded from any inspect failure. Each is red at a
+    test added for it (4.10).
 - [ ] 5.3 Local: the two test files; `tests/test_integration_gate.py`
   whole; `tests/test_conftest_grib_preflight.py`; the governance tests the
   new script or the changed documents touch (named in the report);
@@ -210,8 +230,10 @@ that each call naming `nhms-db` is exactly `inspect nhms-db --format
   - `start` (duration recorded), `status`;
   - `--collect-only -m integration` count on that commit;
   - through `run`: the whole integration selection, `pytest -m integration
-    -rs`: passed plus xfailed equals the collected count, no test skipped
-    for the integration opt-in, the count recorded;
+    -rs`: passed plus xfailed plus the listed skips for other reasons (the
+    node-27 docker oracle opt-in, the real-basins precondition, runtime
+    skips of single tests) equals the collected count, and no skip names
+    `NHMS_RUN_INTEGRATION` or `NHMS_INTEGRATION_DATABASE_URL`;
   - the instance's log shows `CREATE DATABASE` / `DROP DATABASE` for
     `nhms_it_` names, count above zero; `docker logs --since <start> nhms-db`
     contains no `nhms_it_`;
@@ -222,10 +244,10 @@ that each call naming `nhms-db` is exactly `inspect nhms-db --format
     `max(last_autovacuum)` advanced, production `nhms_it_%` count unchanged.
 
 Deviation from the issue's `Verification:`, stated in the PR: "the pass count
-equals the count before the change" is replaced by "passed plus xfailed
-equals the collected count with no integration skip", because a baseline
-run on the production postmaster would recreate the race this change
-removes.
+equals the count before the change" is replaced by "passed, xfailed and the
+listed skips for other reasons add up to the collected count, with no skip
+for the integration opt-in", because a baseline run on the production
+postmaster would recreate the race this change removes.
 
 Owed on #3376 after merge, not a merge gate: the next natural governance
 tick on node-27 does not report `AUTOVACUUM_OUTPUT_STALLED`.

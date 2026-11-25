@@ -60,6 +60,8 @@ state = json.loads(state_path.read_text())
 keys = ("inspect nhms-db", "inspect nhms-it-db", "run --rm", "run -d", "exec", "rm")
 key = next((k for k in keys if argv[: len(k.split())] == k.split()), None)
 if key is None:
+    with open(base / "unknown.jsonl", "a") as unknown:
+        unknown.write(json.dumps(argv) + "\n")
     sys.stderr.write("fake docker: unexpected call\n")
     sys.exit(99)
 
@@ -79,6 +81,10 @@ if key == "run --rm" and config.get("listing_dir"):
     listing = sorted(os.listdir(config["listing_dir"]))
     with open(base / "listings.jsonl", "a") as handle:
         handle.write(json.dumps(listing) + "\n")
+
+if key == "run -d" and state["container"] is not None:
+    sys.stderr.write('docker: Error response from daemon: Conflict. The container name "/nhms-it-db" is in use.\n')
+    sys.exit(125)
 
 override = config["responses"].get(key)
 if override is not None:
@@ -149,9 +155,11 @@ class Harness:
         self.configure()
         self.set_container(None)
 
-    def configure(self, responses: dict | None = None, listing_dir: Path | None = None) -> None:
+    def configure(
+        self, responses: dict | None = None, listing_dir: Path | None = None, image: str = IMAGE
+    ) -> None:
         config = {
-            "image": IMAGE,
+            "image": image,
             "passwd": IMAGE_PASSWD,
             "group": IMAGE_GROUP,
             "responses": responses or {},
@@ -218,8 +226,9 @@ def harness(tmp_path: Path) -> Iterator[Harness]:
     harness = Harness(tmp_path)
     yield harness
     for call in harness.calls():
-        if "nhms-db" in call:
+        if any("nhms-db" in arg for arg in call):
             assert call == PRODUCTION_INSPECT, call
+    assert not (harness.fake / "unknown.jsonl").exists(), (harness.fake / "unknown.jsonl").read_text()
 
 
 @contextmanager
@@ -347,6 +356,10 @@ def _production_inspect_fails(harness: Harness) -> list[str]:
 
 
 def _foreign_label(harness: Harness) -> list[str]:
+    harness.root.mkdir(mode=0o700)
+    sentinel = {"container": "nhms-it-db", "port": 55442, "image": IMAGE}
+    (harness.root / SENTINEL).write_text(json.dumps(sentinel) + "\n")
+    (harness.root / ENV_FILE).write_text("POSTGRES_USER=postgres\nPOSTGRES_PASSWORD=" + "ab" * 24 + "\n")
     harness.set_container({"running": True, "label": str(harness.tmp / "elsewhere")})
     return ["start", "--root", str(harness.root)]
 
@@ -357,19 +370,21 @@ def _running_without_sentinel(harness: Harness) -> list[str]:
 
 
 REFUSALS = {
-    "production-port": lambda h: ["start", "--root", str(h.root), "--port", "55432"],
-    "port-out-of-range": lambda h: ["start", "--root", str(h.root), "--port", "80"],
-    "relative-root": lambda h: ["start", "--root", "home/nhms-it-pg"],
-    "foreign-directory": _foreign_directory,
-    "production-inspect-fails": _production_inspect_fails,
-    "foreign-label": _foreign_label,
-    "running-without-sentinel": _running_without_sentinel,
+    "production-port": (lambda h: ["start", "--root", str(h.root), "--port", "55432"], "port 55432 refused"),
+    "port-out-of-range": (lambda h: ["start", "--root", str(h.root), "--port", "80"], "port 80 refused"),
+    "relative-root": (lambda h: ["start", "--root", "home/nhms-it-pg"], "absolute path"),
+    "file-system-root": (lambda h: ["start", "--root", "/"], "file system root"),
+    "foreign-directory": (_foreign_directory, f"has no {SENTINEL}"),
+    "production-inspect-fails": (_production_inspect_fails, "image id of nhms-db"),
+    "foreign-label": (_foreign_label, f"without the label {LABEL_KEY}="),
+    "running-without-sentinel": (_running_without_sentinel, "lacks its sentinel"),
 }
 
 
 @pytest.mark.parametrize("case", sorted(REFUSALS))
 def test_start_refusals_change_nothing(harness: Harness, case: str) -> None:
-    args = REFUSALS[case](harness)
+    setup, reason = REFUSALS[case]
+    args = setup(harness)
     before = snapshot(harness.root)
     container = harness.container()
 
@@ -377,6 +392,7 @@ def test_start_refusals_change_nothing(harness: Harness, case: str) -> None:
 
     assert result.returncode == 1, result.stdout + result.stderr
     assert result.stderr.startswith("node27_integration_pg: ")
+    assert reason in result.stderr
     assert harness.runs() == []
     assert harness.removals() == []
     assert snapshot(harness.root) == before
@@ -388,7 +404,7 @@ def test_start_refuses_while_the_lock_is_held(harness: Harness) -> None:
         result = harness.start()
 
     assert result.returncode == 3, result.stderr
-    assert "lock" in result.stderr
+    assert "lock is held" in result.stderr
     assert harness.runs() == []
     assert snapshot(harness.root) is None
 
@@ -396,30 +412,74 @@ def test_start_refuses_while_the_lock_is_held(harness: Harness) -> None:
 # --- 4.4 idempotence and stale state -------------------------------------------------------
 
 
-def test_start_twice_is_idempotent(harness: Harness) -> None:
+def test_start_twice_checks_and_hands_out_the_running_instance(harness: Harness) -> None:
     assert harness.start().returncode == 0
+    before = len(harness.calls())
     with held(harness.lock, fcntl.LOCK_SH):
         again = harness.start()
 
     assert again.returncode == 0, again.stderr
     assert again.stdout.startswith("already running: nhms-it-db on 127.0.0.1:55442")
+    added = harness.calls()[before:]
+    assert [call[:2] for call in added if call[:1] == ["exec"]] == [["exec", "nhms-it-db"]]
+    assert not any(call[:1] in (["run"], ["rm"]) for call in added)
+
+
+def _refused_running(harness: Harness, result: subprocess.CompletedProcess[str], reason: str) -> None:
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert reason in result.stderr
+    assert "run stop first" in result.stderr
+    assert result.stdout == ""
     assert len(harness.runs()) == 1
+    assert harness.removals() == []
+    assert harness.container() == {"running": True, "label": harness.label}
+    assert (harness.root / SENTINEL).is_file() and (harness.root / ENV_FILE).is_file()
 
 
-def test_start_after_reboot_replaces_the_stale_instance(harness: Harness) -> None:
+def test_start_refuses_a_running_instance_on_another_image(harness: Harness) -> None:
     assert harness.start().returncode == 0
-    old_password = harness.password()
-    (harness.root / "pgdata" / "PG_VERSION").write_text("15\n")
-    harness.set_container({"running": False, "label": harness.label})
+    harness.configure(image="sha256:" + "1" * 64)
+
+    _refused_running(harness, harness.start(), f"uses image {SHORT_IMAGE}")
+
+
+def test_start_refuses_an_explicit_port_other_than_the_running_one(harness: Harness) -> None:
+    assert harness.start().returncode == 0
+
+    _refused_running(harness, harness.start("--port", "55443"), "listens on port 55442, not 55443")
+
+
+def test_start_refuses_a_running_instance_that_fails_readiness(harness: Harness) -> None:
+    assert harness.start().returncode == 0
+    harness.configure({"exec": {"code": 2, "stderr": "psql: connection refused\n"}})
+
+    _refused_running(harness, harness.start("--ready-timeout", "0.3"), "readiness check")
+
+
+@pytest.mark.parametrize("stale", ["container-and-directory", "container-only", "directory-only"])
+def test_start_replaces_a_stale_instance(harness: Harness, stale: str) -> None:
+    if stale != "container-only":
+        assert harness.start().returncode == 0
+        (harness.root / "pgdata" / "PG_VERSION").write_text("15\n")
+    if stale == "directory-only":
+        harness.set_container(None)
+    else:
+        harness.set_container({"running": False, "label": harness.label})
+    before = len(harness.calls())
 
     result = harness.start()
 
     assert result.returncode == 0, result.stderr
-    calls = harness.calls()
-    rm_at = calls.index(["rm", "-f", "nhms-it-db"])
-    assert any(call[:2] == ["run", "-d"] for call in calls[rm_at + 1 :])
+    added = harness.calls()[before:]
+    runs = [index for index, call in enumerate(added) if call[:2] == ["run", "-d"]]
+    removals = [index for index, call in enumerate(added) if call == ["rm", "-f", "nhms-it-db"]]
+    assert len(runs) == 1
+    if stale == "directory-only":
+        assert removals == []
+    else:
+        assert len(removals) == 1 and removals[0] < runs[0]
     assert not (harness.root / "pgdata" / "PG_VERSION").exists()
-    assert harness.password() != old_password
+    assert (harness.root / SENTINEL).is_file()
     assert harness.container() == {"running": True, "label": harness.label}
 
 
@@ -551,6 +611,23 @@ def test_stop_with_nothing_there_says_so(harness: Harness) -> None:
     assert harness.removals() == []
 
 
+def test_stop_keeps_the_directory_when_docker_cannot_be_asked(harness: Harness) -> None:
+    assert harness.start().returncode == 0
+    before = snapshot(harness.root)
+    daemon_down = (
+        "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?: "
+        "dial unix /var/run/docker.sock: connect: no such file or directory\n"
+    )
+    harness.configure({"inspect nhms-it-db": {"code": 1, "stderr": daemon_down}})
+
+    result = harness.tool("stop", "--root", str(harness.root))
+
+    assert result.returncode == 1
+    assert "docker inspect nhms-it-db failed" in result.stderr
+    assert harness.removals() == []
+    assert snapshot(harness.root) == before
+
+
 # --- 4.7 run ----------------------------------------------------------------------------------------
 
 
@@ -591,11 +668,14 @@ def test_run_hands_the_url_to_the_command_and_holds_the_lock(harness: Harness) -
     assert seen["exclusive_available"] is False
 
 
-@pytest.mark.parametrize("instance", ["absent", "container-stopped"])
+@pytest.mark.parametrize("instance", ["absent", "container-stopped", "container-of-another-directory"])
 def test_run_without_a_running_instance_does_not_execute(harness: Harness, instance: str) -> None:
     if instance == "container-stopped":
         assert harness.start().returncode == 0
         harness.set_container({"running": False, "label": harness.label})
+    elif instance == "container-of-another-directory":
+        assert harness.start().returncode == 0
+        harness.set_container({"running": True, "label": str(harness.tmp / "elsewhere")})
 
     result, out = _run_child(harness)
 
@@ -636,3 +716,21 @@ def test_status_reports_running_stopped_and_absent(harness: Harness) -> None:
     for result in (absent, running, stopped):
         assert password not in result.stdout + result.stderr
         assert "postgresql://" not in result.stdout + result.stderr
+
+
+def test_a_non_default_port_flows_from_start_to_run_and_status(harness: Harness) -> None:
+    started = harness.start("--port", "55443")
+    assert started.returncode == 0, started.stderr
+    assert pairs(harness.runs()[0], "-p") == ["127.0.0.1:55443:5432"]
+
+    again = harness.start()
+    assert again.returncode == 0, again.stderr
+    assert again.stdout.startswith("already running: nhms-it-db on 127.0.0.1:55443")
+
+    result, out = _run_child(harness)
+    assert result.returncode == 7
+    assert urlsplit(json.loads(out.read_text())["env"]["NHMS_INTEGRATION_DATABASE_URL"]).port == 55443
+
+    status = harness.tool("status", "--root", str(harness.root))
+    assert status.returncode == 0
+    assert "127.0.0.1:55443" in status.stdout
