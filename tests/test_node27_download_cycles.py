@@ -63,10 +63,14 @@ def _fail_if_called(*_args: object, **_kwargs: object) -> downloader.SourceDownl
     raise AssertionError("download command must not run before preflight passes")
 
 
-def _write_raw_manifest(object_store_root: Path, source: str, compact_cycle: str) -> None:
-    manifest = object_store_root / "raw" / source / compact_cycle / "manifest.json"
-    manifest.parent.mkdir(parents=True, exist_ok=True)
-    manifest.write_text("{}\n", encoding="utf-8")
+def _clear_selection_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the developer's shell from steering automatic selection."""
+    for name in (
+        "NODE27_DOWNLOAD_CONTINUITY_START_TIME",
+        "NODE27_DOWNLOAD_CONTINUITY_LOOKBACK_DAYS",
+        "NHMS_NODE27_DOWNLOAD_SOURCES",
+    ):
+        monkeypatch.delenv(name, raising=False)
 
 
 # Directory spelling the live object store uses; macOS is case-insensitive, so
@@ -122,9 +126,7 @@ def _prepare_selection_env(
 ) -> Path:
     object_store_root, _workspace_root, _log_root, _fake_bin = _prepare_env(monkeypatch, tmp_path)
     monkeypatch.setenv("NODE27_DOWNLOAD_CYCLE_DELAY_HOURS", delay_hours)
-    monkeypatch.delenv("NODE27_DOWNLOAD_CONTINUITY_START_TIME", raising=False)
-    monkeypatch.delenv("NODE27_DOWNLOAD_CONTINUITY_LOOKBACK_DAYS", raising=False)
-    monkeypatch.delenv("NHMS_NODE27_DOWNLOAD_SOURCES", raising=False)
+    _clear_selection_overrides(monkeypatch)
     monkeypatch.delenv("NODE27_DOWNLOAD_CYCLE_TIME", raising=False)
     if object_store_prefix is None:
         monkeypatch.delenv("OBJECT_STORE_PREFIX", raising=False)
@@ -289,6 +291,7 @@ def test_automatic_cycle_selection_without_raw_seed_uses_latest_allowed_cycle_af
 ) -> None:
     _prepare_env(monkeypatch, tmp_path)
     monkeypatch.setenv("NODE27_DOWNLOAD_CYCLE_DELAY_HOURS", "8")
+    _clear_selection_overrides(monkeypatch)
 
     selected = downloader._select_automatic_cycle_time(
         dict(os.environ),
@@ -305,6 +308,7 @@ def test_automatic_cycle_selection_uses_first_raw_continuity_gap(
     object_store_root, _workspace_root, _log_root, _fake_bin = _prepare_env(monkeypatch, tmp_path)
     monkeypatch.setenv("NODE27_DOWNLOAD_CYCLE_DELAY_HOURS", "8")
     monkeypatch.delenv("OBJECT_STORE_PREFIX", raising=False)
+    _clear_selection_overrides(monkeypatch)
 
     _write_complete_cycle(object_store_root, "GFS", "2026062118")
     _write_complete_cycle(object_store_root, "IFS", "2026062118")
@@ -330,6 +334,7 @@ def test_automatic_cycle_selection_treats_any_selected_source_gap_as_missing(
     object_store_root, _workspace_root, _log_root, _fake_bin = _prepare_env(monkeypatch, tmp_path)
     monkeypatch.setenv("NODE27_DOWNLOAD_CYCLE_DELAY_HOURS", "0")
     monkeypatch.delenv("OBJECT_STORE_PREFIX", raising=False)
+    _clear_selection_overrides(monkeypatch)
     _write_complete_cycle(object_store_root, "GFS", "2026062600")
     _write_complete_cycle(object_store_root, "IFS", "2026062600")
     _write_complete_cycle(object_store_root, "GFS", "2026062612")
@@ -349,6 +354,7 @@ def test_automatic_cycle_selection_probes_window_without_raw_directory_scan(
     object_store_root, _workspace_root, _log_root, _fake_bin = _prepare_env(monkeypatch, tmp_path)
     monkeypatch.setenv("NODE27_DOWNLOAD_CYCLE_DELAY_HOURS", "0")
     monkeypatch.delenv("OBJECT_STORE_PREFIX", raising=False)
+    _clear_selection_overrides(monkeypatch)
     _write_complete_cycle(object_store_root, "GFS", "2026062600")
     _write_complete_cycle(object_store_root, "IFS", "2026062600")
     _write_complete_cycle(object_store_root, "GFS", "2026062612")
@@ -672,6 +678,30 @@ def test_pass_summary_lists_not_ready_cycles_of_automatic_selection(
     assert _last_summary(tmp_path)[SELECTION_DETAIL_KEY] == ONE_NOT_READY_DETAIL
 
 
+def test_pass_summary_of_complete_chain_lists_no_not_ready_cycle(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    object_store_root = _prepare_selection_env(monkeypatch, tmp_path)
+    _write_complete_for_both(object_store_root, LATEST_MINUS_3, LATEST_MINUS_2, LATEST_MINUS_1, LATEST)
+    _pin_latest_allowed_cycle(monkeypatch)
+    monkeypatch.setattr(downloader, "run_source_download", _fake_download_ok)
+
+    rc, summary, _rendered = _run_main(capsys, _automatic_main_args(tmp_path, object_store_root))
+
+    expected_detail = {
+        "latest_allowed_cycle_time": "2026-07-02T12:00:00Z",
+        "not_ready_cycle_count": 0,
+        "not_ready_cycles": [],
+    }
+    assert rc == 0
+    assert summary["status"] == "completed"
+    assert summary["cycle_time"] == "2026-07-02T12:00:00Z"
+    assert summary["cycle_time_selection"] == "automatic"
+    assert summary["downloads"]["processed"] == 2
+    assert summary[SELECTION_DETAIL_KEY] == expected_detail
+    assert _last_summary(tmp_path)[SELECTION_DETAIL_KEY] == expected_detail
+
+
 def test_preflight_only_summary_lists_not_ready_cycles_of_automatic_selection(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -815,6 +845,8 @@ def test_one_source_failure_isolated_while_other_source_completes(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     object_store_root, workspace_root, log_root, _fake_bin = _prepare_env(monkeypatch, tmp_path)
+    # The pass runs the default source list; a shell value must not narrow it.
+    monkeypatch.delenv("NHMS_NODE27_DOWNLOAD_SOURCES", raising=False)
 
     def fake_download(source: str, cycle_time: str, _env: dict[str, str]) -> downloader.SourceDownloadResult:
         if source == "GFS":

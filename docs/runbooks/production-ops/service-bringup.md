@@ -16,8 +16,10 @@
 ### 3.1 下载 / 调度器 / ingest
 
 node-27 source download 使用用户级 systemd timer。它不使用 display env，不连
-node-22 DB；未显式设置 `NODE27_DOWNLOAD_CYCLE_TIME` 时自动选择最近的 00/12 UTC
-业务 cycle：
+node-22 DB；未显式设置 `NODE27_DOWNLOAD_CYCLE_TIME` 时自动选择 cycle：一个 cycle 的 raw
+文件对所选的每个 source 都齐全才算下载完成（只有 manifest 不算）；最新允许的 00/12 UTC
+业务 cycle 未完成时先下它，否则补最老的未完成 cycle。pass summary 的
+`cycle_time_selection_detail` 列出未完成的 cycle 及各 source 的状态与原因：
 
 ```bash
 ssh -p 32099 nwm@210.77.77.27

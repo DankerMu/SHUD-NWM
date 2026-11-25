@@ -3,8 +3,10 @@
 #
 # Source infra/env/node27-download.env, then run one GFS/IFS download pass
 # through scripts/node27_download_cycles.py. NODE27_DOWNLOAD_CYCLE_TIME may be
-# set for an explicit backfill; when it is empty, the Python runner selects the
-# latest allowed UTC business cycle after NODE27_DOWNLOAD_CYCLE_DELAY_HOURS.
+# set for an explicit backfill; when it is empty, the Python runner selects
+# automatically: a cycle counts as downloaded when its raw files are complete for
+# every selected source, and the runner serves the latest allowed cycle first when
+# it is incomplete, then the oldest incomplete cycle.
 
 set -u
 
