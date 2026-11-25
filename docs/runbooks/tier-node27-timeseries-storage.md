@@ -7150,6 +7150,10 @@ enforces them.
    and that database, never the one named in the DSN, is what a test migrates;
    running the integration suite from the verify checkout stays allowed. That exemption covers those
    fixtures only, not a migrate entry point started by hand with the same DSN.
+   Since #3376 the server they are pointed at on node-27 is the throwaway instance of
+   `scripts/node27_integration_pg.py`, not this postmaster: per-test `CREATE DATABASE` /
+   `DROP DATABASE` here stalled the autovacuum launcher
+   (`node-27-database-container-operations.md` sections 7.1 and 8).
 
    The entry points that reach the apply loop, none of which may be run that
    way:

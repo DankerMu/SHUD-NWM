@@ -165,9 +165,12 @@ compression / raw-retention 每个 tick 的第一条连接）与
   它们本来就有分钟级的正常时长。要停就停对应的 systemd unit（`systemctl --user stop
   nhms-node27-autopipe.timer` 等）并在日志里留痕；慢查询本身属于容量/计划问题，
   走 issue，不走 cancel。
-- **integration 测试一律经 `NHMS_INTEGRATION_DATABASE_URL`**（`tests/conftest.py`
-  无该 opt-in 时无条件 skip 全部 integration，并且每次建 `nhms_it_<uuid>` throwaway 库
-  再 drop）。不要用裸生产 `DATABASE_URL` 跑 pytest —— 那正是把测试会话和生产 tick
+- **integration 测试不连生产 postmaster。** `tests/conftest.py` 无 opt-in 时无条件 skip 全部
+  integration；opt-in 后每个测试建一个 `nhms_it_<uuid>` 库再 drop。在生产 postmaster 上这样建删库
+  会卡死 autovacuum launcher（#3234 / #3376），所以 node-27 上一律经
+  `scripts/node27_integration_pg.py run -- <pytest 命令>`，库建在一次性实例上
+  （`node-27-database-container-operations.md` §8）。端口为 `55432` 的 integration URL 会被 conftest
+  以 usage error 拒绝。不要用裸生产 `DATABASE_URL` 跑 pytest —— 那正是把测试会话和生产 tick
   混在一张 `pg_stat_activity` 里的起点。
 - **display API 的写入面（`nhms-api-pipeline` / `nhms-api-models`）取消前先看日志。**
   自 #1704 起每个**经过 `error_response()` 的**错误响应都会在 `/tmp/display-api.log` 留一行

@@ -28,6 +28,9 @@
   - 工作集峰值必须对配置 PGDATA 的实际目标设备余量判定（该设备现即 `/home` LV，与 pytest 临时文件等共用余量），冷层仍未启用。
   - 容量核查一律 `df -h / /home` + `psql` 实测，不引用文档里的历史数字（`/` 也要看：#1765 的 `/tmp/pytest-of-nwm` 把根卷塞满过）。
   - node-27 上跑 pytest 前先 `mkdir -p /home/nwm/tmp && export TMPDIR=/home/nwm/tmp`。
+  - node-27 的 integration pytest 一律经 `scripts/node27_integration_pg.py run -- <pytest 命令>` 跑在一次性实例上。
+    **绝不**把 `NHMS_INTEGRATION_DATABASE_URL` 指向生产 postmaster（#3376；conftest 拒绝端口 `55432`）。
+    细则见 `docs/runbooks/node-27-database-container-operations.md` §8。
   - 容器 `nhms-db` 由裸 `docker run` 创建（无 compose/systemd unit），重建流程与存储分层历史见 `docs/runbooks/tier-node27-timeseries-storage.md` 与 ADR 0002。
 
 ### 验证 oracle 路由（改了什么 -> 在哪验）
