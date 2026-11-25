@@ -17,7 +17,7 @@ import shutil
 import subprocess
 import sys
 from collections.abc import Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -36,6 +36,7 @@ DOWNLOAD_PREFLIGHT_SCHEMA = "nhms.node27_download.preflight.v1"
 PREFLIGHT_BLOCKED_RC = 2
 LOCK_BLOCKED_RC = 2
 DEFAULT_ALLOWED_DB_ENDPOINTS = "127.0.0.1:55432,localhost:55432"
+CYCLE_DELAY_KEY = "NODE27_DOWNLOAD_CYCLE_DELAY_HOURS"
 DEFAULT_AUTOMATIC_CYCLE_DELAY_HOURS = 8
 DEFAULT_AUTOMATIC_CONTINUITY_LOOKBACK_DAYS = 14
 SELECTION_DETAIL_KEY = "cycle_time_selection_detail"
@@ -377,17 +378,28 @@ def _allowed_cycle_hours(env: dict[str, str]) -> tuple[int, ...]:
     return hours
 
 
-def _automatic_cycle_delay(env: dict[str, str]) -> timedelta:
-    raw = (env.get("NODE27_DOWNLOAD_CYCLE_DELAY_HOURS") or "").strip()
+def _cycle_delay_from_key(env: dict[str, str], key: str) -> timedelta:
+    raw = (env.get(key) or "").strip()
     if not raw:
         return timedelta(hours=DEFAULT_AUTOMATIC_CYCLE_DELAY_HOURS)
     try:
         hours = float(raw)
     except ValueError as error:
-        raise ValueError("NODE27_DOWNLOAD_CYCLE_DELAY_HOURS must be numeric.") from error
+        raise ValueError(f"{key} must be numeric.") from error
     if hours < 0 or hours > 72:
-        raise ValueError("NODE27_DOWNLOAD_CYCLE_DELAY_HOURS must be in the range 0..72.")
+        raise ValueError(f"{key} must be in the range 0..72.")
     return timedelta(hours=hours)
+
+
+def _automatic_cycle_delay(env: dict[str, str], sources: Sequence[str]) -> timedelta:
+    """Largest delay among the sources: each source's own key, else the shared key, else the default."""
+    delays = []
+    for source in sources:
+        key = f"{CYCLE_DELAY_KEY}_{source}"
+        if not (env.get(key) or "").strip():
+            key = CYCLE_DELAY_KEY
+        delays.append(_cycle_delay_from_key(env, key))
+    return max(delays)
 
 
 def _automatic_continuity_lookback(env: dict[str, str]) -> timedelta:
@@ -403,12 +415,18 @@ def _automatic_continuity_lookback(env: dict[str, str]) -> timedelta:
     return timedelta(days=days)
 
 
-def _latest_allowed_cycle(env: dict[str, str], *, now: datetime | None = None) -> datetime:
+def _latest_allowed_cycle(
+    env: dict[str, str],
+    *,
+    now: datetime | None = None,
+    sources: Sequence[str] | None = None,
+) -> datetime:
     allowed_hours = _allowed_cycle_hours(env)
+    selected_sources = tuple(sources or _normalize_sources(None, env))
     reference = now or datetime.now(UTC)
     if reference.tzinfo is None:
         reference = reference.replace(tzinfo=UTC)
-    reference = reference.astimezone(UTC) - _automatic_cycle_delay(env)
+    reference = reference.astimezone(UTC) - _automatic_cycle_delay(env, selected_sources)
     candidate_day = reference.date()
     for day_offset in range(0, 3):
         day = candidate_day - timedelta(days=day_offset)
@@ -529,8 +547,8 @@ def _select_automatic_cycle(
     cycle.
     """
     allowed_hours = _allowed_cycle_hours(env)
-    latest_allowed = _latest_allowed_cycle(env, now=now)
     selected_sources = tuple(sources or _normalize_sources(None, env))
+    latest_allowed = _latest_allowed_cycle(env, now=now, sources=selected_sources)
     not_ready: list[dict[str, Any]] = []
     detail = {"latest_allowed_cycle_time": _format_cycle_time(latest_allowed), "not_ready_cycles": not_ready}
     object_store_root_value = (env.get("OBJECT_STORE_ROOT") or "").strip()
@@ -671,6 +689,10 @@ def preflight_download_config(
             "blockers": blockers,
         }
     )
+
+
+def _source_lock_path(lock_path: str, source: str) -> str:
+    return f"{lock_path}.{source.lower()}"
 
 
 @contextmanager
@@ -994,8 +1016,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         _emit_json_summary(summary)
         return 0
 
-    with download_lock(args.lock_path) as acquired:
+    # One lock per source: passes for different sources run side by side, passes
+    # that share a source exclude each other. A blocked pass gives back what it took.
+    with ExitStack() as locks:
+        acquired = all(
+            locks.enter_context(download_lock(_source_lock_path(args.lock_path, source))) for source in sources
+        )
         if not acquired:
+            locks.close()
             summary = {
                 "schema": DOWNLOAD_SUMMARY_SCHEMA,
                 "status": "lock_blocked",

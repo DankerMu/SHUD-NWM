@@ -7,9 +7,9 @@
 
 - node-27 是当前 active production service host：本机 PostgreSQL `:55432`、
   source download、systemd-driven ingest、display API 和前端公网入口都在 27。
-- node-27 source download 由用户级 systemd timer
-  `nhms-node27-download.timer` 驱动，调用
-  `scripts/node27_download_once.sh`，自动选择 00/12 UTC 业务 cycle 并把 raw
+- node-27 source download 由用户级 systemd timer 驱动，每个 source 一个实例
+  （`nhms-node27-download@GFS.timer`、`nhms-node27-download@IFS.timer`），调用
+  `scripts/node27_download_once.sh <SOURCE>`，自动选择 00/12 UTC 业务 cycle 并把 raw
   manifest 写入共享 NFS object-store。
 - node-27 每 10 分钟通过用户级 systemd timer
   `nhms-node27-autopipe.timer` 调用
@@ -34,7 +34,7 @@
 | 面 | 位置 | 当前职责 | 关键入口 |
 | --- | --- | --- | --- |
 | node-27 DB | node-27 `127.0.0.1:55432/nhms` | active PostgreSQL/PostGIS/TimescaleDB | writer `DATABASE_URL` from node-27 ingest env; display uses readonly `display.env` only |
-| node-27 download | node-27 `/home/nwm/NWM` | 自动下载 GFS/IFS 00/12 UTC raw source cycles 到共享 object-store | `infra/env/node27-download.env` -> `nhms-node27-download.timer` -> `scripts/node27_download_once.sh` |
+| node-27 download | node-27 `/home/nwm/NWM` | 自动下载 GFS/IFS 00/12 UTC raw source cycles 到共享 object-store | `infra/env/node27-download.env` -> `nhms-node27-download@<SOURCE>.timer` -> `scripts/node27_download_once.sh <SOURCE>` |
 | node-27 ingest | node-27 `/home/nwm/NWM` | 扫描 object-store runs、seed registry、register、parse、publish、refresh coverage | `infra/env/node27-ingest.env` -> `nhms-node27-autopipe.timer` -> `scripts/node27_autopipe_cron.sh` -> `scripts/node27_autopipeline.py` |
 | node-27 display API | node-27 `127.0.0.1:8080` | display_readonly FastAPI, `/health`, `/api/v1/*`, frontend backend | `infra/systemd/nhms-display-api.service` -> `scripts/ops/start-display-api.sh` |
 | node-27 public entry | `https://test.nwm.ac.cn` | nginx reverse proxy to local display API | `/etc/nginx/conf.d/test.nwm.ac.cn.conf` |

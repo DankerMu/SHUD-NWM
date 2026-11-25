@@ -1,0 +1,11 @@
+[Unit]
+Description=Run NHMS node-27 raw %i source download every 30 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=30min
+Persistent=false
+Unit=nhms-node27-download@%i.service
+
+[Install]
+WantedBy=timers.target

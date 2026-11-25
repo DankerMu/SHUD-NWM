@@ -15,24 +15,57 @@
 
 ### 3.1 下载 / 调度器 / ingest
 
-node-27 source download 使用用户级 systemd timer。它不使用 display env，不连
+node-27 source download 使用用户级 systemd timer，每个 source 一个实例
+（`nhms-node27-download@GFS`、`nhms-node27-download@IFS`）：各自的 timer、各自的锁
+（`NODE27_DOWNLOAD_LOCK_PATH` 后加 `.gfs` / `.ifs`）、各自的 log 与 summary，一个 source
+下载慢不会挡住另一个。它不使用 display env，不连
 node-22 DB；未显式设置 `NODE27_DOWNLOAD_CYCLE_TIME` 时自动选择 cycle：一个 cycle 的 raw
 文件对所选的每个 source 都齐全才算下载完成（只有 manifest 不算）；最新允许的 00/12 UTC
 业务 cycle 未完成时先下它，否则补最老的未完成 cycle。pass summary 的
-`cycle_time_selection_detail` 列出未完成的 cycle 及各 source 的状态与原因：
+`cycle_time_selection_detail` 列出未完成的 cycle 及各 source 的状态与原因。
+"最新允许"按 source 计算：`NODE27_DOWNLOAD_CYCLE_DELAY_HOURS_<SOURCE>` 优先，否则用共享的
+`NODE27_DOWNLOAD_CYCLE_DELAY_HOURS`（模板：GFS 6 小时，其余 8 小时）：
 
 ```bash
 ssh -p 32099 nwm@210.77.77.27
-systemctl --user status nhms-node27-download.timer nhms-node27-download.service --no-pager
-tail -n 160 /home/nwm/node27-download-logs/download.log
+systemctl --user status 'nhms-node27-download@*.timer' 'nhms-node27-download@*.service' --no-pager
+tail -n 160 /home/nwm/node27-download-logs/download-gfs.log
+tail -n 160 /home/nwm/node27-download-logs/download-ifs.log
 ```
 
 期望：
 
-- `nhms-node27-download.timer` 为 `active (waiting)`。
+- `nhms-node27-download@GFS.timer` 与 `nhms-node27-download@IFS.timer` 为 `active (waiting)`。
+- 每个实例的 summary 在 `last-summary-gfs.json` / `last-summary-ifs.json`；
+  `last-summary.json` 只由不带 source 的手工 pass 更新。
 - `infra/env/node27-download.env` mode 为 `0600`。
 - 下载 summary 的 `cycle_time_selection` 为 `automatic`，cycle hour 在 `0,12`
   之内。
+
+从单一 unit（`nhms-node27-download.{service,timer}`，#3237 之前）切到按 source 的实例，
+顺序不能换：旧代码的 pass 锁的是 `NODE27_DOWNLOAD_LOCK_PATH` 本身，新代码锁的是它派生出的
+`.gfs` / `.ifs`，两者互不排斥，所以必须等旧 pass 结束再让新代码跑。
+
+```bash
+ssh -p 32099 nwm@210.77.77.27
+systemctl --user disable --now nhms-node27-download.timer
+# 等到 inactive 再继续；activating 表示还有 pass 在跑
+systemctl --user is-active nhms-node27-download.service
+cd /home/nwm/NWM && git status --porcelain && git pull --ff-only
+rm -f ~/.config/systemd/user/nhms-node27-download.service ~/.config/systemd/user/nhms-node27-download.timer
+install -m 644 'infra/systemd/nhms-node27-download@.service' 'infra/systemd/nhms-node27-download@.timer' ~/.config/systemd/user/
+# 在未跟踪的 infra/env/node27-download.env 里加一行 NODE27_DOWNLOAD_CYCLE_DELAY_HOURS_GFS=6（见模板）
+systemctl --user daemon-reload
+systemctl --user enable --now nhms-node27-download@GFS.timer nhms-node27-download@IFS.timer
+systemctl --user list-timers 'nhms-node27-download@*' --no-pager
+```
+
+- 旧 timer 留着不停的后果：它调用不带 source 的 wrapper，一个 pass 同时占两把锁、串行下两个
+  source，两个实例每次被挡都以 rc=2 结束。
+- 停用某个 source 的办法是停它的实例 timer。实例总是带 `--source` 运行，
+  `NHMS_NODE27_DOWNLOAD_SOURCES` 只影响不带 source 的手工 pass。
+- 手工 pass（`scripts/node27_download_once.sh [SOURCE]`）与同一 source 的实例 pass 互斥：
+  后到的一方以 `lock_blocked` 结束；不带 source 的手工 pass 需要两把锁都空闲。
 
 node-27 ingest 使用用户级 systemd timer 周期性启动 bounded autopipe pass：
 
