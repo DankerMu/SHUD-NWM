@@ -96,9 +96,6 @@ def test_entropy_baseline_writer_preserves_v1_trend_semantics_for_current_repo()
     assert write_entropy_baseline._baseline_path_is_v1_summary_source_counted("services/api/main.py")
     assert modules["apps/frontend"]["file_count"] == _expected_apps_frontend_file_count()
     assert _apps_frontend_baseline_counted_path_exists("apps/frontend/src/App.tsx")
-    assert modules["services/production_closure"]["file_count"] == _expected_module_file_count(
-        "services/production_closure"
-    )
     assert modules["services/slurm_gateway"]["file_count"] == _expected_module_file_count(
         "services/slurm_gateway"
     )
@@ -125,7 +122,12 @@ def test_entropy_baseline_writer_preserves_v1_trend_semantics_for_current_repo()
         "hotspots": ["services/orchestrator/scheduler.py", "services/orchestrator/chain.py"],
     }
     assert (REPO_ROOT / "services/orchestrator/scheduler_lease.py").is_file()
-    assert baseline["summary"]["modules_with_high_entropy"] >= 2
+    # #3233 D4: the orchestrator is the one structural hotspot the overlay pins;
+    # services/production_closure scored high only through an overlay entry that
+    # no longer exists, so it either has no row or is not high on structure.
+    assert modules["services/orchestrator"]["structure"]["score"] == "high"
+    production_closure = modules.get("services/production_closure")
+    assert production_closure is None or production_closure["structure"]["score"] != "high"
 
     patterns = {
         pattern["description"]: pattern

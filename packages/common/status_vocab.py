@@ -274,11 +274,9 @@ SLURM_TERMINAL_FAILURE = frozenset(
     {"FAILED", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY", "NODE_FAIL", "PREEMPTED", "BOOT_FAIL", "DEADLINE"}
 )
 
-# --- QC verdicts and readiness items ------------------------------------------------
+# --- QC verdicts --------------------------------------------------------------------
 
 QC_VERDICTS = frozenset({"passed", "failed", "blocked"})
-# Production-closure readiness item statuses: a distinct vocabulary, not QC verdicts.
-READINESS_ITEM_STATUSES = frozenset({"passed", "failed", "blocked", "not_executed", "release_blocked"})
 
 _QC_VERDICT_SPELLINGS: dict[str, str] = {
     "pass": "passed",

@@ -88,14 +88,6 @@ STRUCTURAL_HOTSPOT_MODULES: dict[str, dict[str, object]] = {
         "protocol": {"score": "medium"},
         "control": {"score": "medium"},
     },
-    "services/production_closure": {
-        "priority": "P1",
-        "structure": {"score": "high"},
-        "behavior": {"score": "medium"},
-        "context": {"score": "medium"},
-        "protocol": {"score": "medium"},
-        "control": {"score": "medium"},
-    },
 }
 
 STRUCTURAL_HIGH_SPREAD_PATTERNS = (
