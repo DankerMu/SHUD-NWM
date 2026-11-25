@@ -167,15 +167,13 @@ current commands. Archive and issue closeout are being completed in this PR.
 顺带记一笔：`local`/`127.0.0.1` 的 `trust` 意味着**任何能 `docker exec` 的人无需口令即可进库**。
 这是现有运维模型的一部分，不是本文要改的东西，但要知道它在那儿。
 
-## 6. 已知未处置
+## 已知未处置
 
 - **应用以 superuser 连库**。superuser 可以 `COPY ... FROM PROGRAM`，即在容器内执行命令；
   这不是"能读写数据"而是命令执行。最小权限改造另行立单。
 - **`ssl = off`**。口令走 SCRAM 不会明文暴露，但查询与结果集明文过网；收到回环后风险大降。
 - autovacuum 在统计不再被反复清零之后是否恢复正常，需要等有机 churn 把计数器累积到阈值之上
   才能验证，见 #1770。（2026-09-13 只读探针已见输出恢复；持续检查见 §7。）
-- **测试库建在生产 postmaster 上**。node-27 真实 DB pytest 逐测试建删 `nhms_it_<uuid>` 库，
-  与 worker 启动竞态时会让 autovacuum launcher 永久停转（§7.1）；移出生产实例由 #3376 跟踪。
 
 ## 7. autovacuum / autoanalyze 输出新鲜度检查（#1769）
 
@@ -222,18 +220,24 @@ worker 随后以 `database "…" does not exist` / `It seems to have just been d
 launcher 的轮转名单对"仍有统计项"的库一律保留，于是这个已删除的库永久留在名单上；
 它轮到队尾后，launcher 每 `autovacuum_naptime / 名单长度` 空转一次，不再向任何已有的库派 worker。
 停转期间只有新建的库（不在名单上）还会被派到 worker，所以共享目录可能仍在被处理，容易误判为"在跑"。
-触发源是在同一个 postmaster 上频繁建删库，即 node-27 真实 DB pytest 的 `nhms_it_<uuid>` 库；
-根治见 #3376。
+触发源是在同一个 postmaster 上频繁建删库。2026-11 的六次竞态全部来自 node-27 真实 DB pytest 的
+`nhms_it_<uuid>` 库（20 天 839 次 `DROP DATABASE`）；自 #3376 起这些库建在一次性实例上（§8），
+本实例上不应再有任何建删库。
 
-**识别（只读）。**
+2026-11-25 的处置确认了这个机制：杀掉 launcher 后 75 秒内有 8 个 worker 进入 `nhms`，
+而六个已删除库的残留统计项仍然在。
+
+**识别（只读，但需 superuser）。** `pg_stat_have_stats` 对 `nhms_display_ro` 不可执行，
+最后一条要用 superuser 连接跑；前三条只读角色即可。
 
 ```sql
 SELECT pg_postmaster_start_time();
 SELECT pid, backend_start, wait_event FROM pg_stat_activity WHERE backend_type = 'autovacuum launcher';
 SELECT max(last_autovacuum), max(last_autoanalyze) FROM pg_stat_user_tables;
--- 已删除库的残留统计项；扫的是 OID 空间，约 200 万个 OID 耗时数秒
+-- 已删除库的残留统计项；扫的是 OID 空间，约 200 万个 OID 耗时数秒。
+-- 上界取全局 OID 计数器：每个测试库消耗约 2,000 个 OID，本库 pg_class 的最大 OID 可能落后很多。
 SELECT g AS dropped_database_oid
-FROM generate_series(1, (SELECT max(oid)::bigint FROM pg_class) + 200000) AS g
+FROM generate_series(1, (SELECT next_oid::bigint FROM pg_control_checkpoint()) + 100000) AS g
 WHERE pg_stat_have_stats('database', g::oid, 0)
   AND NOT EXISTS (SELECT 1 FROM pg_database d WHERE d.oid = g::oid);
 ```
@@ -253,4 +257,41 @@ SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE backend_type = 'aut
   `max(last_autovacuum)` 前移；之后 autovacuum 按现有 cost 限速消化欠账。
 - 最脏的表可以顺手 `ANALYZE`（#2696 的做法），让规划器统计先恢复。
 - **不要**用 `docker restart` 来"顺便重启"（§1）。
-- 在 #3376 落地前，每次 node-27 真实 DB pytest 之后复核一次 `max(last_autovacuum)` 是否仍在前移。
+- 处置后若再次停转，先查 `docker logs nhms-db 2>&1 | grep -c 'nhms_it_'` 在处置之后是否又有增长：
+  有，说明又有 integration 会话指向了本实例（§8 的工具与 `tests/conftest.py` 的拦截被绕过）；
+  没有，则是别的 `DROP DATABASE` 来源，按上面的识别步骤留证后立单。
+
+## 8. integration 测试用一次性 PostgreSQL 实例（#3376）
+
+node-27 上的 integration pytest（`NHMS_RUN_INTEGRATION=1`）逐测试建删 `nhms_it_<uuid>` 库。
+这些库**不得**建在本文的生产实例上（§7.1 的停转就是这样来的），而是建在
+`scripts/node27_integration_pg.py` 起的一次性实例上：
+
+| 项 | 值 |
+|---|---|
+| 容器 | `nhms-it-db`，镜像取自 `docker inspect nhms-db --format '{{.Image}}'`（与生产同一二进制） |
+| 端口 | `127.0.0.1:55442`（`--port` 可改；`55432` 被拒绝） |
+| 数据 | `/home/nwm/nhms-it-pg/`（`--root` 可改），`stop` 时整个删除 |
+| 资源 | `--memory 8g --cpus 8 --shm-size 1g`，容器日志上限 2 × 20 MB，无 restart 策略 |
+| 设置 | 沿用生产中会影响测试行为的几项（`max_locks_per_transaction=512`、`max_connections=100`、UTC、`shared_preload_libraries=timescaledb`）；持久性关闭（`fsync=off` 等），实例里的一切都是一次性的 |
+
+在 `ci-test-routing.md` 的 detached-worktree lane 的 shell 里（`PATH` / `PYTHONPATH` / `TMPDIR` 已按该节设好）：
+
+```bash
+python scripts/node27_integration_pg.py start
+python scripts/node27_integration_pg.py run -- python -m pytest -q -m integration -rs
+python scripts/node27_integration_pg.py stop
+```
+
+- `run --` 把 `NHMS_RUN_INTEGRATION=1` 和指向该实例的 `NHMS_INTEGRATION_DATABASE_URL` 只放进子进程的环境，
+  自己不打印任何东西；口令每次 `start` 重新生成，只存在实例目录里 `0600` 的 env 文件中。
+- `run` 存活期间 `stop` 会拒绝（旁边的 `nhms-it-pg.lock` 文件锁）；确认无人在用后才用 `stop --force`。
+- 工具只会删除带自己标签的 `nhms-it-db` 容器和带自己哨兵文件的目录；对 `nhms-db` 只做一次取镜像 ID 的 `inspect`。
+- 实例可以在多次运行之间留着（占用以上表为限）；主机重启后它不会自启，重新 `start` 即可。
+  对已在跑的实例，`start` 会先核对它的镜像仍等于生产容器当前的镜像、端口与所要的一致、并探测一次就绪，
+  任何一项不符就拒绝并要求先 `stop`（例如生产容器换过镜像之后）。
+- `tests/conftest.py` 另有一道拦截：会话会跑 integration 且 URL 的端口是 `55432`（或 URL 没写端口而
+  `PGPORT=55432`）时，pytest 以 usage error 直接结束，不跑任何测试。它拦的是文档化的生产入口，
+  不是隔离手段：别手工把 integration URL 指向生产实例的任何地址。
+- 口令并非对主机上所有人保密（docker 组成员可 `docker inspect`；pytest 的长 traceback 可能打印 fixture 值）。
+  贴 receipt 前先在其中搜一遍口令。

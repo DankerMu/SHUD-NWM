@@ -94,6 +94,28 @@ def pytest_configure(config: pytest.Config) -> None:
         "markers",
         "node27_docker: disposable Docker oracle; opt in only with NHMS_RUN_NODE27_DOCKER=1",
     )
+    if _integration_skip_reason() is None:
+        _refuse_production_postmaster(_integration_database_url())
+
+
+def _refuse_production_postmaster(url: str) -> None:
+    """#3376: integration tests create and drop databases; never on the node-27 production port.
+
+    A port check on the documented production endpoint, not containment. The URL and the
+    parser's error text are never put in the message: either may carry the password.
+    """
+    try:
+        parsed = psycopg2.extensions.parse_dsn(url)
+    except Exception:  # noqa: BLE001 - an unparsable URL keeps today's behaviour; its text is never shown
+        return
+    ports = parsed.get("port") or os.environ.get("PGPORT") or "5432"
+    if "55432" in [port.strip() for port in ports.split(",")]:
+        raise pytest.UsageError(
+            "the integration URL names port 55432, the node-27 production postmaster; integration "
+            "tests create and drop databases and must run against the throwaway instance: "
+            "scripts/node27_integration_pg.py start, then scripts/node27_integration_pg.py run -- "
+            "<the pytest command> (#3376)"
+        )
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:

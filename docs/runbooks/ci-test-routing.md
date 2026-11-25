@@ -210,6 +210,23 @@ python -m pytest -q <files> | tee $HOME/wt-<sha>-pytest.log
 For grib files, also export the four GRIB runtime lines from the lane above
 before pytest.
 
+For integration tests, never export `NHMS_INTEGRATION_DATABASE_URL` by hand
+on node-27. The tests create and drop one database each, and doing that on
+the production postmaster stalls its autovacuum launcher (#3376). Run them
+through the throwaway instance instead; `run --` puts the opt-in and the
+instance URL into the command's environment only:
+
+```bash
+python scripts/node27_integration_pg.py start
+python scripts/node27_integration_pg.py run -- python -m pytest -q -m integration -rs | tee $HOME/wt-<sha>-integration.log
+python scripts/node27_integration_pg.py stop
+```
+
+`tests/conftest.py` ends a session with a usage error when it would run
+integration tests against port 55432. The instance, its limits and the
+tool's refusals are described in
+`node-27-database-container-operations.md` section 8.
+
 Why each line is there:
 
 - `WT=$(realpath -m ...)` canonicalises the path. node-27's `HOME` is
