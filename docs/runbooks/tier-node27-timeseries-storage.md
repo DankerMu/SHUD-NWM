@@ -7039,6 +7039,69 @@ them only while holding the lifecycle flock
 (`/tmp/nhms-node27-timeseries-lifecycle.lock`, e.g. `flock -n` around the
 `psql` call) or with the compression and retention timers stopped.
 
+#### Relation-lock timeout of the compress statement (`#3380`)
+
+The fence orders compression against **fenced writers**. It does nothing about
+any other session that holds a lock on the chunk. After `compress_chunk` has
+rewritten the data it takes `AccessExclusiveLock` on the uncompressed chunk; an
+unfinished transaction that holds `ACCESS SHARE` on the chunk or on its
+hypertable (a long read, a session left idle in a transaction) makes that
+request wait, and **every reader that arrives afterwards queues behind the
+waiting request**.
+
+- 2026-11-19: the river chunk's rewrite finished after about eight minutes;
+  the statement then waited until `statement_timeout` cancelled it at
+  05:25:00Z, 52 minutes later. Seven read queries were cancelled by their own
+  statement timeouts during that wait (04:47, 05:00, 05:02, 05:17Z); on the
+  days around it the log has no such line at all. Who held the lock is not
+  known: `log_lock_waits` is off on this instance.
+- Reproduced on TimescaleDB 2.10.2 (throwaway instance, 2026-11-25): with a
+  reader transaction open, `SET lock_timeout = 3000` makes the statement end
+  after about 3.8 s with `canceling statement due to lock timeout` (55P03),
+  the chunk stays uncompressed, and the queued reader returns at once.
+
+So the compress statement runs under its own short `lock_timeout`:
+
+| Key | Default | Rule |
+|---|---|---|
+| `NODE27_TIMESERIES_COMPRESSION_LOCK_TIMEOUT_MS` | 5000 (in code; a live env file without the key keeps working) | positive integer, strictly less than `compress_timeout_ms - fence_wait_ms` |
+
+It is not the fence wait. The fence is an advisory lock that blocks nobody,
+so it can wait fifteen minutes; a relation-lock wait stalls readers for as
+long as it lasts, and the display role's own `statement_timeout` is 30 s.
+
+**How it reads in a receipt (schema 2.3).** `budget.lock_timeout_ms` records
+the value. A chunk whose compress statement hit the lock timeout is recorded
+after the usual read-only reconcile as `mutation_state: "deferred_contended"`
+with `contended_on: "relation_lock"`, without an `error`; the tick goes on to
+its next chunk and, if nothing failed, ends `deferred` with exit 0. Every
+`deferred_contended` chunk now says why: `fence`, `relation_lock` or
+`tick_deadline`. A statement timeout is still a failure
+(`failed_before_mutation`, `QueryCanceled`, outcome `partial`, non-zero exit).
+
+**What it costs.** The rewrite before the lock request is thrown away (about
+eight minutes for a river chunk). A lock that conflicts at the start of
+`compress_chunk` (an anti-wraparound autovacuum on the chunk, a manual
+`VACUUM`) also ends as a `relation_lock` deferral, with nothing lost.
+
+**When it repeats.** One `relation_lock` deferral needs no action. The chunk
+is no longer the newest eligible one the next day, so whether it is selected
+again depends on the per-tick bound (§4 "Per-tick capacity"; the selection gap
+is tracked in `#3380`). If the same hypertable shows `relation_lock` on
+consecutive ticks, find the blocker while the tick runs:
+
+```sql
+SELECT a.pid, a.usename, a.application_name, a.state, a.xact_start, left(a.query, 80)
+FROM pg_locks w
+JOIN pg_locks h ON h.relation = w.relation AND h.granted AND h.pid <> w.pid
+JOIN pg_stat_activity a ON a.pid = h.pid
+WHERE NOT w.granted
+  AND w.pid IN (SELECT pid FROM pg_stat_activity WHERE application_name = 'nhms-ts-compression');
+```
+
+Ending that session is an operator decision (`oncall-sql.md`); the runner
+never cancels another session.
+
 ### 4.12 Forcing contract: migration `000066` (`#1993`) — EXECUTED 2026-11-06
 
 **Status: EXECUTED on node-27, 2026-11-06T00:39:35Z**, owner-approved, on the
@@ -8552,6 +8615,27 @@ before a receipt exists.
    `nhms-node27-resource-governance.service` are what the `#1765`
    `OnFailure=` change needs. Until they are run, the deployed units keep
    their old lanes no matter what the repo says.
+
+   **Compression unit (`#3380`).** `nhms-node27-timeseries-compression.service`
+   declares the same `OnFailure=`. The alert template is already installed and
+   in use by the retention and governance units, so only the unit itself is
+   installed, and the smoke start is skipped (the channel is live, and the
+   start sends real mail):
+
+   ```
+   install -m 0644 ~/NWM/infra/systemd/nhms-node27-timeseries-compression.service \
+     ~/.config/systemd/user/
+   systemctl --user daemon-reload
+   systemctl --user show nhms-node27-timeseries-compression.service -p OnFailure
+   ```
+
+   Do this away from the 04:25Z tick, and **never** `systemctl --user start`
+   the compression unit to test the wiring: that is a live enforcing tick.
+   This unit keeps `StandardError=append:` to
+   `/home/nwm/node27-timeseries-compression-logs/systemd.err`, so the alert
+   mail's journal excerpt holds only systemd's own lines; read the error in
+   that file and in the receipt. A tick that ends `deferred` exits 0 and sends
+   no mail.
 9. **Root-volume discipline for this host (#1765).** A two-day pytest run on
    node-27 filled `/` (98 GB) with 27 GB of `/tmp/pytest-of-nwm`. Two halves,
    both required:

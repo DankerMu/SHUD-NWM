@@ -24,15 +24,18 @@ _default_compress_chunk(..., *, compress_timeout_ms, fence_wait_ms, lock_timeout
     SET lock_timeout = lock_timeout_ms                   # new, after the fence's RESET
     try:
         SELECT compress_chunk(chunk)
-    except psycopg2.Error as error:                      # only this statement
-        if error.pgcode == "55P03":                      # the test the fence uses for its own wait
+    except Exception as error:                           # only this statement
+        if getattr(error, "pgcode", None) == "55P03":    # the test the fence uses for its own wait
             raise RelationLockContended(chunk.hypertable_key, fence_wait_elapsed_ms) from None
         raise
 ```
 
 `RelationLockContended` is defined in the runner. It is not a subclass of
 `FenceContended`: the fence arm of the loop comes first and does not
-reconcile. Its arm sits after the fence arm and before `except Exception`.
+reconcile. It is handled inside the generic `except Exception` arm, which
+already holds the one reconcile block: a second `except` clause would copy
+that block. The translation tests `pgcode` as the fence does and does not
+name `psycopg2.Error`, so a driver stand-in without that class still works.
 
 The setting cannot disturb the rest of the session: a `SET` inside the
 transaction is rolled back with it on failure, and after a commit it only
@@ -44,18 +47,18 @@ beside it, and is bound in `main()` by the same `functools.partial`.
 ```text
 tick loop, per selected chunk:
     except FenceContended:             deferred_contended, contended_on = "fence"            (as today + the field)
-    except RelationLockContended:      reconcile (read-only catalog query, as for any failure)
+    except Exception:                  reconcile (read-only catalog query), as today
         reconcile raises            -> indeterminate, error text as today
         compressed after all        -> committed "...after lost acknowledgement", as today
-        not compressed              -> deferred_contended, contended_on = "relation_lock",
+        not compressed, and the error is RelationLockContended
+                                    -> deferred_contended, contended_on = "relation_lock",
                                        fence_wait_elapsed_ms from the exception,
                                        deferred_contended_count += 1, no error, no poison
-    except Exception:                  unchanged
+        not compressed, any other   -> failed_before_mutation, as today
 tick deadline reached:                 deferred_contended, contended_on = "tick_deadline"    (as today + the field)
 ```
 
-The three reconcile outcomes are shared with the generic arm; the lock
-timeout only changes the label of the "not compressed" case.
+The lock timeout only changes the label of the "not compressed" case.
 
 ## Configuration
 

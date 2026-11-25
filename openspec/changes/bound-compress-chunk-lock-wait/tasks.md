@@ -37,11 +37,11 @@ in the report).
   `FenceContended`). `main()` binds the value with the existing
   `functools.partial`. The stale comments named in `design.md` are
   rewritten.
-- [ ] 1.3 Tick loop: the `RelationLockContended` arm of `design.md`
+- [ ] 1.3 Tick loop: the `RelationLockContended` handling of `design.md`
   (reconcile first; three outcomes; the not-compressed case is a deferral
   with `contended_on = "relation_lock"`, counted, without error and without
-  poisoning `after_bytes`); the arm sits after the fence arm and before
-  `except Exception`. The fence arm and the tick-deadline branch add
+  poisoning `after_bytes`), as a branch of the generic arm after its
+  reconcile. The fence arm and the tick-deadline branch add
   `contended_on` (`fence`, `tick_deadline`).
 - [ ] 1.4 Receipt: `SCHEMA_VERSION = "2.3"`, `budget.lock_timeout_ms`.
 
