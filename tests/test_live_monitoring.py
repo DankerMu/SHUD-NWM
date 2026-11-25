@@ -3,13 +3,22 @@ from __future__ import annotations
 import builtins
 import json
 import os
-from datetime import UTC, datetime
+import re
+import subprocess
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from services.orchestrator.monitoring import MonitorConfig, _alerts, _scheduler_summary, run_monitor
+from services.orchestrator.monitoring import (
+    MonitorConfig,
+    _alerts,
+    _cycle_summary,
+    _scheduler_summary,
+    _slurm_summary,
+    run_monitor,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -264,3 +273,168 @@ class _FixedDatetime(datetime):
     @classmethod
     def now(cls, tz=None):  # type: ignore[override]
         return datetime(2026, 6, 7, 0, 0, tzinfo=tz or UTC)
+
+
+# --------------------------------------------------------------------------- #
+# The "Raised when" column is produced by the summary builders: drive them with
+# the system boundary (squeue subprocess, environment, database) faked.
+# --------------------------------------------------------------------------- #
+
+
+def _fake_squeue(monkeypatch: pytest.MonkeyPatch, outcome: Any) -> list[list[str]]:
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr("services.orchestrator.monitoring.subprocess.run", fake_run)
+    return commands
+
+
+@pytest.mark.parametrize(
+    ("outcome", "expected_error"),
+    [
+        (FileNotFoundError(2, "No such file or directory", "squeue"), "No such file or directory"),
+        (
+            subprocess.CompletedProcess(["squeue"], 1, stdout="", stderr="slurm_load_jobs error: Unable to contact\n"),
+            "slurm_load_jobs error: Unable to contact",
+        ),
+        (subprocess.CompletedProcess(["squeue"], 2, stdout="", stderr=""), "squeue exited 2"),
+    ],
+    ids=["squeue_raises", "squeue_nonzero_with_stderr", "squeue_nonzero_silent"],
+)
+def test_unreadable_squeue_raises_only_slurm_monitor_unavailable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, outcome: Any, expected_error: str
+) -> None:
+    commands = _fake_squeue(monkeypatch, outcome)
+
+    slurm = _slurm_summary()
+
+    assert commands and commands[0][0] == "squeue"
+    assert slurm["status"] == "unavailable"
+    summaries = _quiet_summaries()
+    summaries["slurm"] = slurm
+    alerts = _alerts(_limits_config(tmp_path), **summaries)
+    assert [alert["alert"] for alert in alerts] == ["slurm_monitor_unavailable"]
+    assert expected_error in alerts[0]["observed"]
+    assert "threshold" not in alerts[0]
+
+
+def test_readable_squeue_above_the_limit_raises_only_slurm_queue_backlog(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    job_count = _MAX_ACTIVE_SLURM_JOBS + 2
+    stdout = "".join(f"{1000 + index}|nhms_forecast|RUNNING|0:{index:02d}|node-w2\n" for index in range(job_count))
+    _fake_squeue(monkeypatch, subprocess.CompletedProcess(["squeue"], 0, stdout=stdout, stderr=""))
+
+    slurm = _slurm_summary()
+
+    assert slurm["status"] == "ok"
+    assert slurm["active_count"] == job_count
+    summaries = _quiet_summaries()
+    summaries["slurm"] = slurm
+    alerts = _alerts(_limits_config(tmp_path), **summaries)
+    assert [alert["alert"] for alert in alerts] == ["slurm_queue_backlog"]
+    assert alerts[0]["observed"] == job_count
+    assert alerts[0]["threshold"] == _MAX_ACTIVE_SLURM_JOBS
+
+
+def test_monitor_config_reads_each_limit_from_its_own_env_key(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setenv("DATABASE_URL", "postgresql://example.invalid/nhms")
+    monkeypatch.setenv("NHMS_MONITORING_LOOKBACK_HOURS", "71")
+    monkeypatch.setenv("NHMS_MONITORING_MAX_ACTIVE_SLURM_JOBS", "13")
+    monkeypatch.setenv("NHMS_MONITORING_MAX_FAILED_CYCLES", "7")
+    monkeypatch.setenv("NHMS_MONITORING_MAX_STALE_MINUTES", "29")
+
+    config = MonitorConfig.from_env(output_dir=tmp_path / "monitoring")
+
+    assert config.lookback_hours == 71
+    assert config.max_active_slurm_jobs == 13
+    assert config.max_failed_cycles == 7
+    assert config.max_stale_minutes == 29
+
+
+class _RecordingCursor:
+    def __init__(self, failed_rows: list[dict[str, Any]], counts: dict[str, int]) -> None:
+        self.failed_rows = failed_rows
+        self.counts = counts
+        self.executed: list[tuple[str, tuple[Any, ...]]] = []
+
+    def __enter__(self) -> _RecordingCursor:
+        return self
+
+    def __exit__(self, *_exc: Any) -> None:
+        return None
+
+    def execute(self, sql: str, params: tuple[Any, ...]) -> None:
+        self.executed.append((sql, params))
+
+    def fetchall(self) -> list[dict[str, Any]]:
+        return list(self.failed_rows)
+
+    def fetchone(self) -> dict[str, int]:
+        return dict(self.counts)
+
+
+class _RecordingConnection:
+    def __init__(self, cursor: _RecordingCursor) -> None:
+        self._cursor = cursor
+
+    def __enter__(self) -> _RecordingConnection:
+        return self
+
+    def __exit__(self, *_exc: Any) -> None:
+        return None
+
+    def cursor(self, **_kwargs: Any) -> _RecordingCursor:
+        return self._cursor
+
+
+def test_cycle_summary_bounds_the_failed_cycle_query_and_feeds_the_alert(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = _limits_config(tmp_path)
+    now = datetime(2026, 6, 7, 12, 0, tzinfo=UTC)
+    failed_rows = [
+        {
+            "cycle_id": f"gfs_20260607{hour:02d}",
+            "source_id": "gfs",
+            "cycle_time": datetime(2026, 6, 7, hour, tzinfo=UTC),
+            "status": "failed_download",
+            "error_code": "DOWNLOAD_TIMEOUT",
+            "error_message": "timed out",
+        }
+        for hour in range(_MAX_FAILED_CYCLES + 1)
+    ]
+    cursor = _RecordingCursor(failed_rows, {"complete": 3, "incomplete": 2, "total": 5})
+    connected: list[str] = []
+
+    def fake_connect(database_url: str) -> _RecordingConnection:
+        connected.append(database_url)
+        return _RecordingConnection(cursor)
+
+    monkeypatch.setattr("services.orchestrator.monitoring.psycopg2.connect", fake_connect)
+
+    cycles = _cycle_summary(config, now)
+
+    assert connected == [config.database_url]
+    expected_cutoff = now - timedelta(hours=config.lookback_hours)
+    (failed_sql, failed_params), (_counts_sql, counts_params) = cursor.executed
+    assert failed_params == (expected_cutoff,)
+    assert counts_params == (expected_cutoff,)
+    assert re.search(r"\bLIMIT\s+50\b", failed_sql), failed_sql
+    assert re.search(r"\bcycle_time\s*>=\s*%s", failed_sql), failed_sql
+    assert cycles["cutoff"] == expected_cutoff.isoformat()
+    assert cycles["counts"] == {"complete": 3, "incomplete": 2, "total": 5}
+    assert [row["cycle_id"] for row in cycles["failed_cycles"]] == [row["cycle_id"] for row in failed_rows]
+
+    summaries = _quiet_summaries()
+    summaries["cycles"] = cycles
+    alerts = _alerts(config, **summaries)
+    assert [alert["alert"] for alert in alerts] == ["failed_cycles"]
+    assert alerts[0]["observed"] == _MAX_FAILED_CYCLES + 1
+    assert alerts[0]["threshold"] == _MAX_FAILED_CYCLES
