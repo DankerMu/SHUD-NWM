@@ -526,6 +526,15 @@
       },
       "cluster": "facade"
     },
+    "pinned_containment_root": {
+      "binding": "import",
+      "callers": {
+        "facade": [
+          "FileOrchestrationJournalRepository"
+        ]
+      },
+      "cluster": "facade"
+    },
     "read_bytes_limited_no_follow": {
       "binding": "import",
       "callers": {
