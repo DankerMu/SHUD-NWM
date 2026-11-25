@@ -34,7 +34,7 @@ stay green unedited.
 
 ## 2. Gateway (`services/slurm_gateway/real_backend.py`)
 
-- [ ] 2.1 `RealSlurmGateway.resolve_resource_profile(model_id, job_type=None)`
+- [ ] 2.1 `RealSlurmGateway.resolve_resource_profile(model_id, *, job_type=None)`
   passes the job type through.
 - [ ] 2.2 The array submit resolves with its job type; the single-job
   render resolves with the job type it was called with. Any other caller of
@@ -130,7 +130,13 @@ Resolver tests go in `tests/test_job_array.py`; rendered-script tests in
     `produce_forcing_array` -> 5.5 red;
   - M11 the loader accepts `cpus_per_task` without `shud_threads` -> 5.2
     red;
-  - M12 the loader does not validate entry values -> 5.2 red.
+  - M12 the loader does not validate entry values -> 5.2 red;
+  - M13 the array submit resolves with the stage name -> 5.3 red;
+  - M14 the single-job render resolves with the manifest's stage name ->
+    5.4 red;
+  - M15 the pair check runs before the closed-key-set check -> 5.2 red
+    (the spec's literal `cpus_per_task` + `max_concurrent` entry);
+  - M16 the job-type key matched by prefix or substring -> 5.1 red.
 - [ ] 6.3 Local: `tests/test_job_array.py`, `tests/test_real_slurm_gateway.py`,
   `tests/test_orchestration_chain.py`, the profile and split tests of
   `tests/test_production_scheduler.py` (`-k "resource_profile or cohort"`);
