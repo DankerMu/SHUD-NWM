@@ -94,9 +94,13 @@ readiness scope, less their own overhead: an idle pass of roughly 120-130 s.
 - Within one cycle's scoring the 66 states share one readiness snapshot. A raw
   file that changes during those seconds is seen by all or none of them; today
   it could be seen by some.
-- The caches hold sanitiser inputs and outputs in memory for the life of the
-  process. The inputs are values the process already holds; the outputs are
-  the public form.
+- The caches hold sanitiser inputs and outputs in memory until they are
+  evicted. In the scheduler, a one-pass process, the inputs are values it
+  already holds. In the display API, a long-running process, an unsanitised
+  error text that used to live for one request (a gateway error naming a
+  credential, for example) now stays as a cache key until it is evicted, at
+  most 8192 entries per text cache later. Nothing is disclosed by it: a hit
+  returns the sanitised output.
 - About 30 % of the pass (cycle rows and fingerprint) remains.
 
 ## Impact

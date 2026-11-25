@@ -192,10 +192,41 @@ def test_a_new_scope_computes_again(lane: Path, computed: list[dict[str, Any]]) 
         raw.nfs_raw_manifest_readiness_from_env("gfs", _CYCLE)
     assert len(computed) == 1
     with raw.nfs_raw_manifest_readiness_scope():
-        raw.nfs_raw_manifest_readiness_from_env("gfs", _CYCLE)
+        fresh = raw.nfs_raw_manifest_readiness_from_env("gfs", _CYCLE)
     assert len(computed) == 2
+    unscoped = raw.nfs_raw_manifest_readiness_from_env("gfs", _CYCLE)
+    assert len(computed) == 3
+    assert fresh is not None and fresh["reason"] == "raw_files_missing"
+    assert fresh == unscoped
+
+
+def test_scope_left_by_an_exception_leaves_no_memo_active(
+    lane: Path, computed: list[dict[str, Any]]
+) -> None:
+    """(d)/(e) when the body of the scope raises: the scope is reset all the same."""
+
+    with pytest.raises(RuntimeError, match="scoring failed"):
+        with raw.nfs_raw_manifest_readiness_scope():
+            raw.nfs_raw_manifest_readiness_from_env("gfs", _CYCLE)
+            raise RuntimeError("scoring failed")
+    assert len(computed) == 1
+    raw.nfs_raw_manifest_readiness_from_env("gfs", _CYCLE)
     raw.nfs_raw_manifest_readiness_from_env("gfs", _CYCLE)
     assert len(computed) == 3
+
+    with raw.nfs_raw_manifest_readiness_scope():
+        outer = raw.nfs_raw_manifest_readiness_from_env("gfs", _CYCLE)
+        assert len(computed) == 4
+        with pytest.raises(RuntimeError, match="inner scoring failed"):
+            with raw.nfs_raw_manifest_readiness_scope():
+                raw.nfs_raw_manifest_readiness_from_env("gfs", _CYCLE)
+                assert len(computed) == 5
+                raise RuntimeError("inner scoring failed")
+        again = raw.nfs_raw_manifest_readiness_from_env("gfs", _CYCLE)
+        assert len(computed) == 5
+        assert again == outer
+    raw.nfs_raw_manifest_readiness_from_env("gfs", _CYCLE)
+    assert len(computed) == 6
 
 
 def test_nested_scope_starts_empty_and_restores_the_outer(
@@ -360,6 +391,10 @@ def test_completion_scoring_computes_readiness_once_per_cycle(
     assert _completion_status(scheduler, _SECOND) == "complete"
     assert len(calls) == 2
     assert len(states) == 6
+    second = [state["nfs_raw_manifest"] for state in states[3:]]  # type: ignore[index]
+    assert second[0] is not None and second[0]["status"] == "ready"
+    assert second[0]["cycle_time"] == _SECOND
+    assert second[0] == second[1] == second[2]
 
     # A candidate-state read outside completion scoring computes on its own and
     # carries the same readiness as the scored states (no reuse involved).
@@ -375,6 +410,18 @@ def test_completion_scoring_computes_readiness_once_per_cycle(
     )
     assert len(calls) == 3
     assert direct is not None and direct["nfs_raw_manifest"] == readiness[0]
+    # The same, outside any scope, for the second cycle.
+    later = _dt(_SECOND)
+    direct_second = repository.candidate_state(
+        source_id="gfs",
+        cycle_time=later,
+        model_id="model_c",
+        run_id=f"fcst_gfs_{later:%Y%m%d%H}_model_c",
+        forcing_version_id=f"forc_gfs_{later:%Y%m%d%H}_model_c",
+        candidate_id=f"gfs:{later.isoformat()}:model_c:forecast_gfs_deterministic",
+    )
+    assert len(calls) == 4
+    assert direct_second is not None and direct_second["nfs_raw_manifest"] == second[0]
 
 
 # --- 3.7 state parity on the real file journal ----------------------------------
@@ -455,13 +502,35 @@ def test_candidate_state_is_the_same_with_cold_warm_and_bypassed_caches(
 
     assert cold is not None
     assert cold == warm == bypassed
+    # The job row the sanitiser changes is in the compared state, at named places.
+    public_error = "upload failed: Authorization: Bearer [redacted] at [local-path]"
+    assert cold["error_message"] == public_error
+    assert len(cold["pipeline_jobs"]) == 1
+    public_job = cold["pipeline_jobs"][0]
+    assert public_job["job_id"] == job["job_id"]
+    assert public_job["error_message"] == public_error
+    assert public_job["details"] == {
+        "workspace": "[local-path]",
+        "artifact": "[object-uri]",
+        "note": "see [object-uri] for details",
+    }
+    assert public_job["runtime_roots"] == {"workspace_root": "[local-path]", "object_store_root": "[local-path]"}
     rendered = json.dumps(cold, sort_keys=True)
-    # The sanitiser did change this state, so parity is not vacuous.
-    assert "abcdef0123456789" not in rendered
-    assert "/srv/nhms" not in rendered
-    assert "s3://nhms/runs/run_1" not in rendered
-    assert "[object-uri]" in rendered
-    assert "[local-path]" in rendered
+    for raw_value in (
+        "abcdef0123456789",
+        "/srv/nhms/ws",
+        "/srv/nhms/workspace/run_1",
+        "s3://nhms/runs/run_1/out.nc",
+        "s3://nhms/runs/run_1",
+        "/secret/workspace",
+        "/secret/object-store",
+        "s3://nhms/runs/run_1/output/",
+        "published://logs/GFS/2026062800/run_1/job.out",
+        "s3://nhms/states/model_a/2026062800.tar",
+        "/srv/nhms",
+        "s3://",
+    ):
+        assert raw_value not in rendered, raw_value
     assert cold["hydro_run"]["output_uri"] == "[object-uri]"
     assert cold["hydro_run"]["log_uri"] == "[object-uri]"
     assert cold["run_manifest_initial_state"]["state_uri"] == "[object-uri]"
