@@ -10,7 +10,7 @@
 
 ### Requirement: popup 源解析与 honest-display 不变量
 
-**Reason**: 两个曲线窗都固定加载 GFS 与 IFS，不存在以 `best` 解析单一源的路径；`productReady` 门控在前端已不存在。
+**Reason**: 两个曲线窗都固定加载 GFS 与 IFS，不存在以 `best` 解析单一源的路径；`productReady` 门控在两个曲线窗中已不存在。
 
 **Migration**: 源的选择见 "Curve windows SHALL NOT offer a forecast-source switch"；严格身份校验见河段与代站两条 requirement；代站窗的等待空态见下面的 "代站曲线窗在源未解析时不发请求"。
 
@@ -24,7 +24,8 @@
 `validateHydroMetRiverForecastForChart` 拉取并校验 `q_down` forecast-series。
 通过校验的源各画一条曲线（echarts `ForecastChart`）；任一步失败的源 MUST NOT 画曲线（不画假曲线红线），并保留一条
 `<源>：<原因>` 形式的原因。至少一个源通过时曲线窗 SHALL 渲染图表，并在图表下方列出未通过的源的原因；
-两个源都未通过时 SHALL 显示逐条列出原因的空态，不绘制任何曲线。
+两个源都未通过时 SHALL 显示逐条列出原因的空态，不绘制任何曲线。曲线窗标题为河段显示名
+（`formatRiverSegmentDisplayName`），在有图表和空态时都显示。
 该河段曲线容器 MUST use the same curve-window contract as other M11 curve windows — draggable in desktop form
 (viewport at least 768 CSS px wide and at least 500 CSS px high), a non-draggable sheet in mobile form — rather than
 a MapLibre geographic `Popup` container; "popup" below names that curve window.
@@ -46,6 +47,7 @@ a MapLibre geographic `Popup` container; "popup" below names that curve window.
 
 - **WHEN** 两个源都缺身份字段、horizon/point 预算不符或请求失败
 - **THEN** popup 显示空态（`m11-river-panel-empty`），逐条列出两个源的原因，不绘制任何 q_down 曲线
+- **AND** 窗口标题仍为河段显示名
 
 #### Scenario: 所选起报时次已不可用
 
@@ -55,11 +57,11 @@ a MapLibre geographic `Popup` container; "popup" below names that curve window.
 
 ### Requirement: 代站曲线窗在源未解析时不发请求
 
-代站曲线窗（`apps/frontend/src/components/map/M11StationForcingPopup.tsx`）在页面尚未给出已解析的源时 SHALL 显示
-等待空态，MUST NOT 请求 station-series。源解析后它固定加载 GFS 与 IFS 两个源。
+代站曲线窗（`apps/frontend/src/components/map/M11StationForcingPopup.tsx`）已有所属流域而页面尚未给出已解析的源时
+SHALL 显示等待空态，MUST NOT 请求 latest-product 或 station-series。源解析后它固定加载 GFS 与 IFS 两个源。
 
 #### Scenario: 源未解析
 
-- **WHEN** 代站曲线窗打开而页面的源尚未解析
+- **WHEN** 代站曲线窗打开，已有所属流域，而页面的源尚未解析
 - **THEN** 窗内显示 `等待 GFS/IFS 源解析后加载 station-series`
-- **AND** 不发出 station-series 请求
+- **AND** 不发出 latest-product 或 station-series 请求

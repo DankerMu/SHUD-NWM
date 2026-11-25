@@ -45,7 +45,7 @@ inventory no longer describes deleted modules as live.
 - [ ] 4.1 Strip the stray `---` separator lines from
   `openspec/specs/forecast-frontend/spec.md` so that archive can retire
   the capability (it refuses while the file holds content outside its
-  requirements).
+  requirements), and from `openspec/specs/multi-source-comparison-ui/spec.md`.
 - [ ] 4.2 After the archive, write the Purposes of `national-overview-page`
   and `analysis-forecast-curve-splicing` and correct the Purpose of
   `multi-source-comparison-ui`.
@@ -56,7 +56,7 @@ inventory no longer describes deleted modules as live.
 - [ ] 5.2 `openspec validate triage-pre-single-map-frontend-specs --strict
   --no-interactive` before the archive; after it, the five capabilities
   pass `openspec validate --specs` (four specs; `forecast-frontend` is
-  gone), `git grep -n forecast-frontend -- openspec/specs docs` shows no
+  gone), `git grep -n forecast-frontend -- openspec/specs openspec/project-profile.md openspec/glossary.md docs scripts tests` shows no
   dangling reference, and the entropy hard gate and its tests are at the
   baseline.
 - [ ] 5.3 In the inventory, no line outside history describes

@@ -161,7 +161,7 @@ templates and `hindcast.sbatch` (a minimal smoke template was part of it until #
 - `services/orchestrator/cli.py` and `services/orchestrator/chain.py` import `services.tile_publisher`; `infra/sbatch/publish_tiles.sbatch` invokes `nhms-pipeline publish-tiles`.
 - `apps/api/routes/flood_alerts.py` imports `services.tiles.mvt` and owns `/api/v1/tiles/flood-return-period`, hydro, national hydro, and river-network tile routes.
 - `services/tiles/mvt.py` provides MVT cache, metadata, SQL, and tile URL-template helpers for the display routes.
-- `apps/frontend/src/components/map` renders the GeoJSON/MVT display layers. (Historical: `apps/frontend/src/components/flood` was named here as a consumer of flood-return-period tile metadata; #432 (`1710375b1`) deleted that directory.)
+- `apps/frontend/src/components/map` renders the GeoJSON/MVT display layers. (Historical: `apps/frontend/src/components/flood` was named here as a consumer of flood-return-period tile metadata; #432 (`1710375b1`) deleted all of it except `alertLevels.ts`, which `b97c16e28` removed.)
 
 `D9` originally confirmed `.github/workflows/ci.yml` contained the paused
 `frontend-m15-visual` job. Issue #366 removed that hidden-disabled job from
@@ -252,7 +252,7 @@ path.
 | `infra/sbatch/publish_tiles.sbatch` | `production` | `slurm_gateway` | `services/slurm_gateway/config.py` maps `publish_tiles` to this template; `tests/test_slurm_array_contract.py` covers the publish command path. | Active Slurm entry for tile publication. | Retain active path; no retirement action. | `D1`, `D6`, `D7` |
 | `apps/api/routes/flood_alerts.py` | `production` | `display_readonly` | Implements display flood alert and tile API routes used by frontend flood/map surfaces. | Active display API counterpart for legacy tile-publisher placeholder claims. | Retain active path; no retirement action. | `D7` |
 | `services/tiles` | `production` | `display_readonly` | Provides tile helpers used by `apps/api/routes/flood_alerts.py`. | Active display tile implementation counterpart. | Retain active path; no retirement action. | `D2`, `D7` |
-| `apps/frontend/src/components/flood` | `archived` | `display_readonly` | Frontend flood alert components; the directory no longer exists. | Deleted by #432 (`1710375b1`). | None; the row is kept as history. | `D7` |
+| `apps/frontend/src/components/flood` | `archived` | `display_readonly` | Frontend flood alert components; the directory no longer exists. | Deleted by #432 (`1710375b1`); `alertLevels.ts` by `b97c16e28`. | None; the row is kept as history. | `D7` |
 | `apps/frontend/src/components/map` | `production` | `display_readonly` | Map components render active display layers and MVT/GeoJSON overlays. | Active display frontend counterpart. | Retain active path; no retirement action. | `D7` |
 
 ## Follow-Up Ownership

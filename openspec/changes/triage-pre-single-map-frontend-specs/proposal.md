@@ -29,11 +29,11 @@ behaviour.
 |---|---|---|
 | Map initialization | Stale: `/forecast` is a redirect (`App.tsx:61`); the map opens on China bounds (`components/map/m11MapRuntime.tsx:38-44`) | Removed. Extent: `national-overview-page` "Overview map displays national basin context". Zoom control per form: `mobile-map-overlay-layout` "Map zoom controls are hidden in mobile form", `mobile-viewport-shell`. Scale bar and attribution: dropped as a stated requirement (they exist, `components/map/M11MapLibreSurface.tsx:407-410`) |
 | River network layer | Stale: a vector-tile branch exists (`components/map/m11MapBuilders.ts:35,147-152`); no `stream_order` anywhere, width and colour follow `Type` or the value | Removed. Owner: `frontend-mvt-layer-consumption`, `hydromet-multibasin-display` (which retires `stream_order`) |
-| Segment hover interaction | Highlight duplicated by `m11-river-hover-highlight`; no tooltip exists (`pages/OverviewPage.tsx:630-639` only prefetches) | Removed. Owner: `m11-river-hover-highlight`. Tooltip and pointer cursor: dropped as stated requirements |
+| Segment hover interaction | Highlight duplicated by `m11-river-hover-highlight`; no tooltip exists (`pages/OverviewPage.tsx:630-639` only prefetches) | Removed. Owner: `m11-river-hover-highlight` (highlight and pointer cursor). Hover tooltip: dropped |
 | Segment click interaction | Superseded. Clicking empty map does not close the window: `onMapClick` only folds the launchers (`pages/OverviewPage.tsx:298`); the window closes by its close button, a layer change, or the one-window rule in mobile form | Removed. Owner: `map-feature-popups` (river window), `mobile-curve-sheet` |
 | Forecast chart display | Stale: the only consumer renders the compact variant, no title, no echarts legend (`components/charts/ForecastChart.tsx:228-240`); colours are fixed per source | Removed. Owner: `multi-source-comparison-ui`, rewritten below (axes and tooltip carried there) |
 | Chart-API integration | Stale: the query carries the full identity, one scenario and `include_analysis=false` (`lib/hydroMet/riverForecast.ts:120-128`), one request per source; the error string and `request_id` are not rendered | Removed. Owner: `map-feature-popups` (river window), `hydromet-multibasin-display` (strict identity) |
-| Loading and error states | Stale: none of the three texts exists; no retry control | Removed. Owner: `map-feature-popups` (river window, rewritten below); map-source failure: `national-overview-page` (rewritten below) |
+| Loading and error states | Stale: `加载中...`, `网络连接失败`, `河网数据加载失败` and the retry control do not exist; `暂无预报数据` survives only as the chart's no-series fallback | Removed. Failure and empty states of the window: `map-feature-popups` (rewritten below). The loading text is not specified (D3). Map-source failure: `national-overview-page` (rewritten below). The window title (segment name) is carried into the river requirement |
 
 ### `national-overview-page`
 
@@ -42,7 +42,7 @@ behaviour.
 | National overview is the default operational entry | Stale; contradicts `single-map-shell-routing` (no top navigation). No side panels, one breakpoint pair (`hooks/useMobileForm.ts:12`) | Removed. Owner: `single-map-shell-routing`, `map-first-layout-conformance`, `mobile-viewport-shell` |
 | Basin tree controls national map visibility | Stale: no tree, no checkbox; every basin is always visible | Removed, dropped |
 | Overview map displays national basin context | Keep | Unchanged |
-| Right-side summaries provide operational links | Stale: no summary card; the only ops entry is `M11OpsLink` | Removed, dropped. Ops entry: `single-map-shell-routing` |
+| Right-side summaries provide operational links | Stale: no summary card; the only ops entry is `M11OpsLink` | Removed, dropped. Ops entry: `mobile-map-overlay-layout` "The ops entry joins the launcher column", `ops-display-downgrade` |
 | Overview handles degraded data states | Partly stale: the empty state is a floating notice, not a left panel; no basin row, no summary card, no retry control | Removed; replaced by "Overview reports missing data in floating notices" |
 | Header brand identity for V2.0 | Keep | Unchanged |
 | The basemap-unavailable status SHALL NOT be cleared by overview data settling | Keep (`components/map/m11MapRuntime.tsx:282-312`) | Unchanged |
@@ -69,7 +69,7 @@ behaviour.
 | Requirement | Verdict | What happens to it |
 |---|---|---|
 | 点击河段要素弹出 q_down 预报曲线 | Partly stale: scenario "身份不符不画曲线" blanks the window on any `ok:false`; the window degrades per source | Removed; replaced by "点击河段要素弹出按源独立加载的 q_down 预报曲线窗", which carries the per-source degraded display (issue section 2) |
-| popup 源解析与 honest-display 不变量 | Stale for both windows: each always loads GFS and IFS (`components/map/M11RiverForecastPanel.tsx:34,251`, `components/map/M11StationForcingPopup.tsx:63,167`); no `best` request exists; `productReady` / `availability.ready` have no hit in non-test source | Removed. Source choice: "Curve windows SHALL NOT offer a forecast-source switch". Strict identity: the river and station requirements. The one live remnant, the station window's waiting state, becomes "代站曲线窗在源未解析时不发请求" |
+| popup 源解析与 honest-display 不变量 | Stale for both windows: each always loads GFS and IFS (`components/map/M11RiverForecastPanel.tsx:34,251`, `components/map/M11StationForcingPopup.tsx:63,167`); no `best` request exists; neither window reads `productReady` / `availability.ready` | Removed. Source choice: "Curve windows SHALL NOT offer a forecast-source switch". Strict identity: the river and station requirements. The one live remnant, the station window's waiting state, becomes "代站曲线窗在源未解析时不发请求" |
 
 ## What changes
 
@@ -91,11 +91,11 @@ behaviour.
   silently.
 - **D2 Normative text names files, not lines.** Line numbers are evidence
   in this proposal only.
-- **D3 Incidental behaviour gets no SHALL.** Not specified: the 600 ms
-  delay before the loading text, the pending placeholder, the `暂无
-  latest-product` reason (the fetch throws instead of returning nothing),
-  and which source's cycle labels the chart when no issue time is selected
-  (the first source that succeeded).
+- **D3 Incidental behaviour gets no SHALL.** Not specified: the river
+  window's loading text, its 600 ms delay and the pending placeholder; the
+  `暂无 latest-product` reason (the fetch throws instead of returning
+  nothing); and what the issue-time selector shows when no issue time is
+  selected (the first entry of the first source that returned a list).
 - **D4 A rewritten requirement is REMOVED plus ADDED under a new title.**
   `openspec` refuses a MODIFIED requirement that drops a scenario.
 - **D5 Every added scenario has a test that can go red.** The issue rules
@@ -110,5 +110,7 @@ behaviour.
   station rows and a right-side chart area; it is not in the issue and is
   reported as a finding.
 - Findings reported, not specified (D3): when no issue time is selected,
-  GFS and IFS each resolve their own latest cycle and the chart is
-  labelled with the first successful source's; no test covers it.
+  GFS and IFS each resolve their own latest cycle, which may differ, and
+  the selector shows one value; no test covers it.
+- `forecast-migration` ("same center as legacy") is pre-single-map text of
+  the same kind; not in the issue, reported as a finding.
