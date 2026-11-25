@@ -39,7 +39,7 @@ resolve_model_resource_profile(profiles, model_id, *, job_type=None, partition_o
 
 `job_type` is keyword-only and defaults to `None` (no job-type entry
 applied), so a caller that does not know a job type resolves as before.
-`RealSlurmGateway.resolve_resource_profile(model_id, job_type=None)` passes
+`RealSlurmGateway.resolve_resource_profile(model_id, *, job_type=None)` passes
 it through. The array submit passes its normalised job type; the single-job
 render passes the `job_type` it was called with.
 
