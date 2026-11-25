@@ -5,7 +5,8 @@
 - `nhms-monitor` links this runbook from two alerts, both carrying `alert`, `severity` and `runbook`:
   `scheduler_evidence_missing` (`observed` = the evidence status, no `threshold`) and
   `scheduler_stale` (`observed` = age of the latest evidence in minutes, with `threshold`).
-- Neither names a source or a cycle: read the latest scheduler evidence to see which source the scheduler is waiting on.
+- Neither names a source or a cycle. For `scheduler_stale`, read the latest scheduler evidence to see which source the scheduler is waiting on.
+- `scheduler_evidence_missing` means the monitor found no scheduler evidence file at all: check that the evidence directory exists and that the scheduler timer is running before looking at any source.
 
 ## Recovery Steps
 

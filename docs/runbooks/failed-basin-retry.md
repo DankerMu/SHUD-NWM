@@ -2,7 +2,8 @@
 
 ## Preconditions
 
-- Confirm the alert is `failed_cycles` from `nhms-monitor` (payload fields: `alert`, `severity`, `observed` = number of failed cycles, `threshold`, `runbook`). The payload names no basin, job or run: find them in the monitor's cycle summary and the scheduler evidence.
+- Confirm the alert is `failed_cycles` from `nhms-monitor` (payload fields: `alert`, `severity`, `observed` = number of failed cycles, `threshold`, `runbook`).
+- The payload names no basin, job or run: the monitor's cycle summary gives the failed cycle, source and error; the basin, job and run are in that cycle's scheduler evidence.
 - Preserve stdout, stderr, manifest, and QC evidence before retrying.
 
 ## Commands
