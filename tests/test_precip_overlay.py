@@ -1864,8 +1864,8 @@ def test_display_example_documents_the_mirror_root_as_a_comment() -> None:
     text = (REPO_ROOT / "infra" / "env" / "display.example").read_text(encoding="utf-8")
 
     assert "# NHMS_PRECIP_MIRROR_ROOT=/home/ghdc/nwm/object-store" in text
-    # A comment line is not read by `docker_runtime.parse_env_file`, so the
-    # example stays a documentation hint rather than a configured value.
+    # The mirror root appears only as a comment line, never as an assignment, so
+    # the template documents it without configuring a value.
     assert f"\n{MIRROR_ROOT_ENV}=" not in text
     # The compute-side variable the display_readonly profile forbids is never
     # ASSIGNED here (it is only named in prose explaining why).

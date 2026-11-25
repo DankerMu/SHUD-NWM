@@ -101,6 +101,7 @@ SCAN_SKIP_PREFIXES = (".nhms-",)
 TEXT_EXTENSIONS = frozenset(
     {
         ".cfg",
+        ".conf",
         ".css",
         ".env",
         ".example",
@@ -114,8 +115,10 @@ TEXT_EXTENSIONS = frozenset(
         ".mjs",
         ".py",
         ".rst",
+        ".service",
         ".sh",
         ".sql",
+        ".timer",
         ".toml",
         ".ts",
         ".tsx",
@@ -186,7 +189,7 @@ STRUCTURAL_SOURCE_EXTENSIONS = frozenset(
 )
 
 
-STRUCTURAL_SOURCE_FILENAMES = frozenset({"Makefile", ".dockerignore", ".gitignore"})
+STRUCTURAL_SOURCE_FILENAMES = frozenset({"Makefile", ".gitignore"})
 
 
 STRUCTURAL_SOURCE_ROOTS = frozenset(

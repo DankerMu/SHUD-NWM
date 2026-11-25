@@ -364,7 +364,6 @@ def _topology_display_env_context_is_allowed(context: str) -> bool:
         "readonly",
         "read-only",
         "start-display-api",
-        "compose.display",
         "display runtime",
         "只读",
         "展示",

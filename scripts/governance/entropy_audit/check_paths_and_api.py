@@ -442,7 +442,6 @@ def _check_agent_artifact_ownership(root: Path) -> list[FindingSpec]:
         ".codex/evidence/",
         "apps/frontend/artifacts/**",
         "Root `artifacts/`",
-        ".dockerignore",
     )
     text = _read_repo_text(root, doc_status) if doc_status.exists() else ""
     for term in required_terms:
@@ -466,17 +465,8 @@ def _check_agent_artifact_ownership(root: Path) -> list[FindingSpec]:
                 )
             )
     ignore_text = _read_repo_text(root, root / ".gitignore")
-    dockerignore_text = _read_repo_text(root, root / ".dockerignore")
-    ignore_expectations = {
-        ".codex/": ignore_text,
-        "artifacts/": ignore_text,
-        "apps/frontend/artifacts/": ignore_text,
-        ".agents": dockerignore_text,
-        ".codex": dockerignore_text,
-        "apps/frontend/artifacts": dockerignore_text,
-    }
-    for token, haystack in ignore_expectations.items():
-        if token not in haystack:
+    for token in (".codex/", "artifacts/", "apps/frontend/artifacts/"):
+        if token not in ignore_text:
             findings.append(
                 FindingSpec(
                     check_id="agent-artifact-ignore-policy",
@@ -484,9 +474,7 @@ def _check_agent_artifact_ownership(root: Path) -> list[FindingSpec]:
                     axis="control",
                     governance_face="entropy automation/control",
                     role="shared_contract",
-                    evidence_path=(
-                        ".gitignore" if "artifacts" in token or token.startswith(".codex") else ".dockerignore"
-                    ),
+                    evidence_path=".gitignore",
                     severity="medium",
                     priority="P2",
                     owner_area="repo hygiene",

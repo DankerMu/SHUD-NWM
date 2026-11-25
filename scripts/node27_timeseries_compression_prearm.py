@@ -128,8 +128,7 @@ def _read_bytes_no_follow(path: Path, *, limit: int, label: str) -> tuple[bytes,
 def parse_env_file(path: Path) -> dict[str, str]:
     """Strict ``KEY=VALUE`` parser for the replay env file.
 
-    Mirrors ``scripts/validate_two_node_docker_runtime.py`` and additionally
-    refuses a symlinked file, a mode other than ``0600`` and duplicate keys: the
+    Refuses a symlinked file, a mode other than ``0600`` and duplicate keys: the
     file carries the DB password and the pinned expected-stale digest.
     """
 

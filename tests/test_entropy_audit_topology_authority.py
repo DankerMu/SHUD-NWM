@@ -296,37 +296,42 @@ def test_entropy_audit_topology_guardrails_do_not_allow_active_openspec_meta_hea
     assert all(finding["gate_eligible"] is True for finding in findings)
 
 
-def test_entropy_audit_topology_guardrails_scan_infra_readme_without_non_current_banner(
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        "infra/systemd/nhms-example.service",
+        "infra/systemd/nhms-example.timer",
+        "infra/systemd/node22/nhms-example.service.d/override.conf",
+    ],
+)
+def test_entropy_audit_topology_guardrails_scan_systemd_units_without_non_current_banner(
     tmp_path: Path,
+    relative_path: str,
 ) -> None:
+    # #3231: the scan reads infra/systemd, and the unit suffixes are scannable names.
     _write(
-        tmp_path / "infra" / "README.two-node-docker.md",
+        tmp_path / relative_path,
         """
-        # Two-node operator runbook
-
-        Current NHMS production says node-22 is the active database writer.
+        [Unit]
+        Description=Current NHMS production says node-22 is the active database writer.
         """,
     )
 
     findings = _findings_by_check(tmp_path, "production-topology-node22-db-writer")
 
-    assert [(finding["evidence_path"], finding["line"]) for finding in findings] == [
-        ("infra/README.two-node-docker.md", 3)
-    ]
+    assert [(finding["evidence_path"], finding["line"]) for finding in findings] == [(relative_path, 2)]
 
 
-def test_entropy_audit_topology_guardrails_skip_infra_readme_with_non_current_banner(
+def test_entropy_audit_topology_guardrails_skip_systemd_unit_with_non_current_banner(
     tmp_path: Path,
 ) -> None:
     _write(
-        tmp_path / "infra" / "README.two-node-docker.md",
+        tmp_path / "infra" / "systemd" / "nhms-example.service",
         """
-        # Two-node Docker runbook
-
-        This document preserves M22 design intent only and is not current
-        production topology. Current deployment facts differ.
-
-        Current NHMS production says node-22 is the active database writer.
+        # This file preserves M22 design intent only and is not current
+        # production topology. Current deployment facts differ.
+        [Unit]
+        Description=Current NHMS production says node-22 is the active database writer.
         """,
     )
 
