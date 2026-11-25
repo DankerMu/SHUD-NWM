@@ -488,7 +488,7 @@ retest_command: |-
 `mock`. A live retry receipt must use the real Slurm backend, show an
 accounting-visible Slurm job id, and write back job/status/log/accounting.
 
-#3246 chose the guard at the scheduler's probe, not a refusal at gateway
+Issue #3246 chose the guard at the scheduler's probe, not a refusal at gateway
 start-up: a scheduler configured for the `slurm` backend treats a remote
 gateway whose health body names any other backend as unhealthy and not
 submit-capable, and the pass carries `SLURM_GATEWAY_UNAVAILABLE` with the
