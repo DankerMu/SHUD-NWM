@@ -31,8 +31,11 @@ _shared_cycle_segment_records(surface, source_segment, cycle_segment,
                               fingerprint, shareable)
   if not shareable:                       # owner, or faulted fingerprint
       return _read_cycle_segments(directory, cycle_segment)
-  with _cache_lock: entry = cache.get(key)
-  if entry is not None and entry[0] == fingerprint:
+  with _cache_lock:
+      entry = cache.get(key)
+      if entry is not None and entry[0] != fingerprint:
+          drop it; entry = None           # before the read: a read that raises leaves no entry
+  if entry is not None:
       return entry[1]
   records = _read_cycle_segments(directory, cycle_segment)   # may raise: nothing stored
   with _cache_lock: store (fingerprint, records), evicting the oldest past the cap

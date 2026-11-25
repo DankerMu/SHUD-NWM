@@ -44,7 +44,8 @@ rows and its errors equal those of a repository that shares nothing.
 - **WHEN** a cycle log has a segment gap, a segment past the limit, or a
   malformed line
 - **THEN** every model's read raises the same error and no entry exists for
-  the failing segment directory
+  the failing segment directory, also when an entry had been stored for it
+  before the log became unreadable
 
 #### Scenario: the shared records are not modified by scoring
 
