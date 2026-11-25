@@ -8,7 +8,7 @@ script would fall through to its SIGKILL path. ``kill`` is a bash builtin, so th
 signals are real; only this test's own children are ever listed.
 
 The harness helpers are shared with the preflight cases in
-``tests/test_two_node_docker_runtime.py``.
+``tests/test_start_display_api.py``.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from pathlib import Path
 import pytest
 
 from tests.git_fixture_env import run_fixture_git
-from tests.test_two_node_docker_runtime import (
+from tests.test_start_display_api import (
     REPO_ROOT,
     _assert_detached_fallback_log_in_temp_repo,
     _prepare_start_display_api_harness,

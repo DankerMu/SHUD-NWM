@@ -9,10 +9,10 @@ from fastapi.routing import APIRoute
 from starlette.routing import Mount
 
 from apps.api import runtime_mode
-from scripts import validate_two_node_docker_runtime as docker_runtime
 from services.slurm_gateway.app import create_gateway_app
 from services.slurm_gateway.config import SlurmGatewaySettings
 from tests.production_ops_runbook import combined_text as production_ops_text
+from tests.test_env_templates import parse_env_template
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ROLE_BOUNDARY_DOC = REPO_ROOT / "docs/governance/ROLE_BOUNDARY.md"
@@ -30,7 +30,7 @@ DISPLAY_RUNTIME_FORBIDDEN_ENV_KEYS = frozenset(
         *runtime_mode._DISPLAY_FORBIDDEN_COMPUTE_PATH_ENVS,
     }
 )
-DISPLAY_REQUIRED_CONFIG_KEYS = frozenset(docker_runtime.DISPLAY_REQUIRED_ENV)
+DISPLAY_ENV_TEMPLATE = REPO_ROOT / "infra/env/display.example"
 
 QHH_DIAGNOSTIC_TOKENS = (
     "run_qhh_cycle",
@@ -87,36 +87,32 @@ class GatewayRouteInventoryEntry:
     is_mount: bool
 
 
-def test_display_env_blockers_align_with_compute_only_static_inventory() -> None:
-    """Runtime and two-node static guards must reject the same display control-plane env keys."""
+def test_display_env_template_is_a_configuration_the_runtime_guard_accepts() -> None:
+    """The display env template sets the display role and trips no display boundary blocker.
 
-    assert DISPLAY_RUNTIME_FORBIDDEN_ENV_KEYS == docker_runtime.DISPLAY_FORBIDDEN_ENV_KEYS
-    assert docker_runtime.COMPUTE_ONLY_PATH_ENV_KEYS <= docker_runtime.DISPLAY_FORBIDDEN_ENV_KEYS
-    assert {"SLURM_GATEWAY_URL", "SLURM_GATEWAY_BACKEND"} <= docker_runtime.DISPLAY_FORBIDDEN_ENV_KEYS
+    #3231: this replaced a comparison with the docker lane validator's key lists. What
+    stays worth pinning is that ``infra/env/display.example`` is a configuration the
+    runtime guard (``apps/api/runtime_mode.py``) accepts, with the role, auth and
+    file-log switches written out here.
+    """
 
-    allowed_display_required = {
-        "NHMS_SERVICE_ROLE",
-        "NHMS_REQUIRE_SERVICE_ROLE",
-        "NHMS_AUTH_MODE",
-        "NHMS_DISPLAY_DISABLE_CONTROL_MUTATIONS",
-        "NHMS_DISPLAY_ALLOW_LOCAL_FILE_LOGS",
-        "OBJECT_STORE_ROOT",
-    }
-    assert DISPLAY_REQUIRED_CONFIG_KEYS == allowed_display_required
-    shared_required_role_keys = DISPLAY_REQUIRED_CONFIG_KEYS & set(docker_runtime.COMPUTE_REQUIRED_ENV)
-    assert shared_required_role_keys == {"NHMS_SERVICE_ROLE", "NHMS_REQUIRE_SERVICE_ROLE"}
-    assert docker_runtime.DISPLAY_REQUIRED_ENV["NHMS_SERVICE_ROLE"] == "display_readonly"
-    assert docker_runtime.COMPUTE_REQUIRED_ENV["NHMS_SERVICE_ROLE"] == "compute_control"
-    assert docker_runtime.DISPLAY_REQUIRED_ENV["NHMS_REQUIRE_SERVICE_ROLE"] == "true"
-    assert docker_runtime.COMPUTE_REQUIRED_ENV["NHMS_REQUIRE_SERVICE_ROLE"] == "true"
-    assert (
-        DISPLAY_REQUIRED_CONFIG_KEYS - shared_required_role_keys
-    ).isdisjoint(docker_runtime.COMPUTE_REQUIRED_ENV)
-    assert DISPLAY_REQUIRED_CONFIG_KEYS.isdisjoint(docker_runtime.COMPUTE_ONLY_PATH_ENV_KEYS)
-    assert DISPLAY_REQUIRED_CONFIG_KEYS.isdisjoint(docker_runtime.DISPLAY_FORBIDDEN_ENV_KEYS)
-    assert "OBJECT_STORE_ROOT" not in docker_runtime.DISPLAY_FORBIDDEN_ENV_KEYS
-    assert "OBJECT_STORE_ROOT" not in docker_runtime.COMPUTE_ONLY_PATH_ENV_KEYS
-    assert "OBJECT_STORE_ROOT" in docker_runtime.DISPLAY_REQUIRED_ENV
+    template = parse_env_template(DISPLAY_ENV_TEMPLATE.read_text(encoding="utf-8"))
+
+    assert runtime_mode.display_boundary_blockers(template) == ()
+    assert template["NHMS_SERVICE_ROLE"] == "display_readonly"
+    assert template["NHMS_REQUIRE_SERVICE_ROLE"] == "true"
+    assert template["NHMS_AUTH_MODE"] == "production"
+    assert template["NHMS_DISPLAY_DISABLE_CONTROL_MUTATIONS"] == "true"
+    assert template["NHMS_DISPLAY_ALLOW_LOCAL_FILE_LOGS"] == "false"
+    assert template["OBJECT_STORE_ROOT"].strip()
+    assert DISPLAY_RUNTIME_FORBIDDEN_ENV_KEYS.isdisjoint(template)
+
+    # The guard bites: the same assignments plus any one forbidden key yield exactly its blocker.
+    for key in sorted(DISPLAY_RUNTIME_FORBIDDEN_ENV_KEYS):
+        blockers = runtime_mode.display_boundary_blockers({**template, key: "/forbidden"})
+        assert [blocker.env_var for blocker in blockers] == [key], key
+    reopened = runtime_mode.display_boundary_blockers({**template, "NHMS_DISPLAY_DISABLE_CONTROL_MUTATIONS": "false"})
+    assert [blocker.code for blocker in reopened] == ["DISPLAY_CONTROL_MUTATIONS_FORBIDDEN"]
 
 
 def test_standalone_slurm_gateway_exposes_only_gateway_routes() -> None:
