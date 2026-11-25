@@ -27,8 +27,11 @@ master `2f89d325f` (checked with the issue's own whole-word grep loop on
   `productAvailabilityReasons`, `validateLatestProduct`, `baseResult`,
   `settledError`, the `strictIdentity` / `stationLimit` request fields,
   imports that become unused). Its `describe('loadHydroMetBootstrap')` test
-  block goes with it, after the `sanitizeHydroMetMessage` redaction
-  assertions inside it are moved into a direct test of that function.
+  block goes with it, after two sets of assertions inside it that cover
+  live functions are moved into direct tests: the `sanitizeHydroMetMessage`
+  redaction, and the only unit coverage of `fetchHydroMetStationsByIdentity`
+  (query shape, runtime coordinate normalisation, the failure path); every
+  other unit test mocks that function.
 - **A2** the point-budget status branch: `ForecastData.pointBudgetStatus`,
   the chart branch that reads it, `forecastPointBudgetMessage`,
   `isForecastPointOverBudget`, the guard's `status()` and its write-only
@@ -68,19 +71,24 @@ master `2f89d325f` (checked with the issue's own whole-word grep loop on
 - **D2 The guard object is deleted, not slimmed.** At its one call site the
   guard is created, told two numbers nobody reads, and asked once to
   `take` from an array: that is `slice(0, HYDRO_MET_RIVER_FORECAST_LIMIT)`.
-  The call site becomes that slice, with the same handling of a non-array
-  input the guard had if the value can be one at that point.
+  The call site becomes that slice. The value is always an array there
+  (a non-array has already returned `null` a few lines above), so the
+  guard's non-array branch has nothing to carry over.
   `lib/forecastRenderingBudget.ts` keeps `FORECAST_CHART_POINT_BUDGET`,
   which the chart uses. (The issue recommended slimming the guard and
   listed this as the simpler alternative.)
 - **D3 `isAnalysis` and the issue-time divider are deleted.** Production
-  always writes `false`, so the divider can never be drawn. If an analysis
+  always writes `false` (`components/map/M11RiverForecastPanel.tsx`, the
+  chart's only consumer), so the divider can never be drawn. If an analysis
   series returns to the chart, the divider returns with a writer.
 - **D4 The Python source-text tests follow the code.** `tests/test_e2e.py`
   and `tests/test_e2e_ifs.py` assert that legacy colour literals occur in
   `forecastData.ts`. They are changed to assert the two live colours
   there; the assertion that `#2ca02c` occurs in `ForecastChart.tsx` (the
-  live IFS six-day mark line) stays.
+  live IFS six-day mark line) stays. The neighbouring assertions that
+  `markLine` and `起报时间` occur in the chart source stay true for live
+  reasons (the IFS six-day mark line; the title subtext of the non-compact
+  variant) and are left as they are.
 
 ## Must preserve
 
@@ -93,8 +101,9 @@ master `2f89d325f` (checked with the issue's own whole-word grep loop on
 - The rendered output of the river forecast window and chart for every
   input production can produce: same points after the cap, same `capped`
   flag, same series colours, same mark lines.
-- The coverage of `sanitizeHydroMetMessage`: every redaction assertion of
-  the removed block exists afterwards in a direct test.
+- The coverage of `sanitizeHydroMetMessage` and of
+  `fetchHydroMetStationsByIdentity`: every assertion of the removed block
+  about either exists afterwards in a direct test.
 - No backend file, no generated API type, no e2e spec changes.
 
 ## Not in this change
@@ -102,6 +111,15 @@ master `2f89d325f` (checked with the issue's own whole-word grep loop on
 - The backend's full (non-`identity_only`) latest-product mode loses its
   last frontend caller's definition here; whether the backend mode is
   retired is a separate API-contract decision.
+- Two current specs describe what D3 and the colour deletion remove:
+  `analysis-forecast-curve-splicing` ("Frontend Curve Splicing Display":
+  an issue-time divider between an analysis and a forecast segment) and
+  `multi-source-comparison-ui` ("GFS+IFS 双曲线显示": the three legacy
+  colours). Production draws neither today (no analysis series is requested;
+  the live colours differ), so no scenario becomes false through this
+  change that was true before it. Rewriting them belongs to #3243, which
+  already lists both and names this coupling; that issue gets a note with
+  the decision and the shifted line references.
 - A symbol-level unused-export check (knip or similar): the issue marks it
   optional; not adopted here.
 - Renaming `m11*` identifiers; spec triage of pre-single-map frontend
