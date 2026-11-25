@@ -72,7 +72,7 @@ producer/binder 成功不代替它，也不代替独立的生产部署证明。
   `control_mutations_enabled=false`/`slurm_routes_enabled=false` live 确认。
 - **与本清单 C 关系**：M26 receipt 是 **C4 浏览器 e2e**
   在新单页地图形态下的**部分闭合**（单页 shell 的重定向/全屏/诚实 overlay
-  live 已证）， **不替代** C1（生产 docker 部署）/ C2（只读 DB
+  live 已证）， **不替代** C1（部署 receipt）/ C2（只读 DB
   denied-write 矩阵）/ C3（cross-plane identity
   GFS+IFS 双源）——这三项仍须独立产 live receipt。④⑤ popup
   live 点击证据缺口按 2026-09 状态拆分：**river popup**
@@ -151,7 +151,7 @@ C4 producer 已由 #2123 合并并独立保留。#2137 已交付的旧 C1-C3/G8/
 rollout 合同是历史记录，不访问 node-27、也不产 live
 receipt；其冷层 rollout 授权已撤回。以下通用 C1–C4 仍是既有上线/展示 owner 的证据要求，不是 #1895 新任务。
 
-### C1. 部署 receipt（开发期本地起服务，非 docker compose up）
+### C1. 部署 receipt（观察运行中的 systemd unit）
 
 > **部署顺序（migration 先于 display API 重启）**：display API 的 SQL 引用了
 > `db/migrations` 里的列，所以**先把待应用的 migration 全部 apply 到 active
@@ -188,33 +188,49 @@ receipt；其冷层 rollout 授权已撤回。以下通用 C1–C4 仍是既有�
 >   tick、早于任何 bootstrap**。geometry 已完整的网络上它是休眠的（`only_missing=True`
 >   的路径在 bump 之前就返回 0）。
 
-- [ ] **开发期：27 本地起 display API**（不
-      `docker compose up`）：只读派生端口，再启动 wrapper。验证须绑定实际端口、真实运行进程、`/health`、readonly
-      runtime 配置和 `/api/v1/slurm/health` 的 404；start
-      log 不是 receipt。旧 #1895 C1
-      wrapper 待退役；保留的自动观察/身份绑定能力须经 R1 迁到实际 owner，不因撤回冷 rollout 而把日志或静态检查当作运行态 PASS。
+- [ ] **部署（改变生产运行态，须人工确认）**：`scripts/ops/start-display-api.sh`。它安装并重启
+      user unit `nhms-display-api.service`（unit 的 ExecStart 自己加载
+      `infra/env/display.env`，再 exec 本 checkout 的 `.venv/bin/python -m uvicorn apps.api.main:app`），
+      先于它的是上面的 migration 顺序。node-27 没有别的部署方式：docker/compose
+      部署 lane 已退役（#3231）。wrapper 的 start log 不是 receipt。
+
+- [ ] **receipt（只读）**：在 node-27 上以 service 用户的 login shell 跑（Slurm 客户端扫描用的是调用者的 `PATH`，要和 unit 的 `bash -lc` 一致）
 
   ```bash
-  DISPLAY_API_PORT="$(
-    set -a
-    . infra/env/display.env
-    set +a
-    printf '%s' "${NHMS_DISPLAY_API_PORT-8080}"
-  )"
-  DISPLAY_API_BASE_URL="http://127.0.0.1:${DISPLAY_API_PORT}"
-  scripts/ops/start-display-api.sh
+  set -o pipefail  # 否则 $? 是 tee 的，不是脚本的
+  cd /home/nwm/NWM
+  bash scripts/ops/display-c1-receipt.sh | tee "artifacts/c1-display-$(git rev-parse --short HEAD)-$(date -u +%Y%m%dT%H%M%SZ).txt"
   ```
 
-  `NHMS_DISPLAY_API_PORT` 控制 host 端口，未配置时默认
-  `8080`。wrapper 与容器使用同一 `apps.api.main:app` 入口和角色守卫，env 含
-  `NHMS_SERVICE_ROLE=display_readonly`。开发期启动快、无镜像构建、无对外容器；用后按 wrapper 输出 PID 停止。
+  非交互 ssh 没有 user manager 的环境变量，先 `export XDG_RUNTIME_DIR=/run/user/$(id -u)`；缺它时依赖进程的七条会一起
+  `FAIL`（不会误判通过）。
 
-- [ ] 证明 27 无 Slurm CLI/config/socket、无 Docker
-      socket、无禁止 mount/env、`/api/v1/slurm/*`
-      404、published 只读、`GET /api/v1/runtime/config` 返回
-      `display_readonly`：`uv run python scripts/validate_two_node_docker_runtime.py static`（**静态校验 compose/env 而不拉起**，对应 §10.1）+ 对本地服务实机探测（`/health`、`/runtime/config`、`/slurm/health`→404）。
-- [ ] **生产部署（非开发期，human-gated）**：`docker compose --env-file infra/env/display.env -f infra/compose.display.yml up -d`
-      起持久对外容器——难回滚 + 改状态，须显式人工确认/预授权（与 merge 同治理）；`smoke`（镜像构建）归此阶段。
+  最后一行是 `C1=PASS` 且退出码为 0 才算 receipt；任何一条 `FAIL` 都是 NO-GO。脚本不启动、不停止、不重启任何东西，不 source
+  `display.env`，除两个存储根路径外不输出该文件里的任何值。`checkout_head=` 一行就是操作员写给 C4 的批准记录里的 `head_sha`。逐条含义：
+
+  | 输出行 | 证明什么 |
+  |---|---|
+  | `unit_active` | `nhms-display-api.service` active，有主进程 |
+  | `process_of_checkout` | 主进程就是本 checkout 的 uvicorn（`apps.api.main:app`），端口取自它的命令行 |
+  | `checkout_clean` | checkout 里没有被改动的 tracked 文件（untracked 不算） |
+  | `process_loaded_head` | 主进程启动晚于 checkout 的 HEAD 最后一次移动，也晚于 `display.env` 的最后修改（按整秒比较，留一秒取整余量：至少晚两秒才算）：**receipt 只对进程真正加载过的提交和配置有效**。node-27 的 checkout 经常只 pull 不重启（定时器直接跑仓库里的脚本），这种状态下本行 `FAIL`，先走上一条的部署再取 receipt |
+  | `listener_of_unit` | 监听该端口的进程只有主进程和它的子进程（worker）：回答下面三个请求的就是这个 unit，不是占着同一端口的别的服务 |
+  | `health` | `GET /health` 200 |
+  | `runtime_role` | `GET /api/v1/runtime/config` 报 `service_role=display_readonly`、`display_readonly=true`、`slurm_routes_enabled=false`、`control_mutations_enabled=false` |
+  | `slurm_routes_absent` | `GET /api/v1/slurm/health` 是 404 |
+  | `no_slurm_client` | 主机 `PATH` 上没有 Slurm 客户端命令，没有 `/etc/slurm`、`/etc/slurm-llnl`、Munge socket |
+  | `storage_not_writable` | `display.env` 的 `OBJECT_STORE_ROOT` 和 `NHMS_PUBLISHED_ARTIFACT_ROOT` 都存在且 service 用户不可写（说的是这两个根目录本身，不是其下每个文件） |
+
+  **不读进程环境也成立的一条**：display 角色下只要配置了任何 compute 控制面键（`SLURM_GATEWAY_URL`、`SLURM_GATEWAY_BACKEND`、compute-only 路径键），API
+  在启动时就以 `DISPLAY_BOUNDARY_CONFIG_UNSAFE` 拒绝起来（`apps/api/runtime_mode.py`）。所以
+  `runtime_role` 为 `ok` 本身就是「无禁止 env」的证据。
+
+  **不再声明的**（旧 C1 针对容器写的，在 systemd 上要么不成立、要么没有对象）：
+
+  - 「无 Docker socket」：不成立。service 用户要管理本机的数据库容器，主机上有它可写的 Docker socket。
+  - 「无禁止 mount」「HostConfig 隔离」「只读根文件系统」：只对容器有意义。
+  - 「published 只读挂载」：没有只读挂载；现在声明的是上表最后一行的权限事实。
+  - compose / env 模板的静态校验：校验的是没人部署的文件，C1 不再运行它。
 
 ### C2. 只读 DB denied-write receipt（tasks 5.1/5.2/5.4/5.8）
 

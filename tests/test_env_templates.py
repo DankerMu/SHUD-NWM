@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pytest
 
+from services.orchestrator import source_cycle_raw_manifest
 from tests.production_ops_runbook import combined_text as production_ops_text
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -252,3 +253,37 @@ def test_parse_env_template_keeps_a_trailing_comment_like_systemd() -> None:
     text = "# whole-line comment\n; also a comment\nNHMS_SCHEDULER_TIMING_LEVEL=stage  # pass|stage\n"
 
     assert parse_env_template(text) == {"NHMS_SCHEDULER_TIMING_LEVEL": "stage  # pass|stage"}
+
+
+# Moved from ``tests/test_two_node_docker_runtime.py`` (#3231); the template outlives
+# the docker/compose lane. The compose half of the first test stays in that file.
+
+
+def test_node22_db_free_env_template_declares_trusted_nfs_raw_manifest_authority() -> None:
+    env = parse_env_template(
+        (REPO_ROOT / "infra/env/compute.scheduler-dbfree.env.example").read_text(encoding="utf-8")
+    )
+
+    assert env["NHMS_SCHEDULER_REQUIRE_NFS_RAW_MANIFEST"] == "true"
+    canonical_root = str(source_cycle_raw_manifest.NODE22_CANONICAL_NFS_RAW_AUTHORITY_ROOT)
+    assert canonical_root == "/ghdc/data/nwm/object-store"
+    assert env["NHMS_OBJECT_STORE_COPYBACK_ROOT"] == canonical_root
+    assert env["NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT"] == canonical_root
+    assert env["NHMS_SCHEDULER_NFS_RAW_MANIFEST_PREFIX"] == "s3://nhms"
+    assert canonical_root in env["NHMS_SCHEDULER_ALLOWED_ROOTS"].split(":")
+
+
+def test_node22_db_free_env_template_declares_pipeline_runtime_roots() -> None:
+    env = parse_env_template(
+        (REPO_ROOT / "infra/env/compute.scheduler-dbfree.env.example").read_text(encoding="utf-8")
+    )
+
+    for key in ("WORKSPACE_ROOT", "OBJECT_STORE_ROOT", "OBJECT_STORE_PREFIX", "NHMS_BASINS_ROOT"):
+        assert env[key].strip(), f"{key} must be defined non-empty in the db-free template"
+
+    allowed_roots = env["NHMS_SCHEDULER_ALLOWED_ROOTS"].split(":")
+    for key in ("WORKSPACE_ROOT", "OBJECT_STORE_ROOT"):
+        assert env[key] in allowed_roots, (
+            f"{key}={env[key]} must be one of NHMS_SCHEDULER_ALLOWED_ROOTS so"
+            " preflight admits the template's own values"
+        )
