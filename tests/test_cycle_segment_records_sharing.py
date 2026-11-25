@@ -225,8 +225,23 @@ def _rows(repository: FileOrchestrationJournalRepository, model_id: str | None, 
     return repository._cycle_rows(source_id="gfs", cycle_time=cycle_time, model_id=model_id, **kwargs)
 
 
+def _sharing_nothing(repository: FileOrchestrationJournalRepository) -> FileOrchestrationJournalRepository:
+    """Replace the shared helper on this instance by a stand-in that always reads.
+
+    The cold oracle must not run the code under test: a key collision in the
+    helper would otherwise contaminate the expected rows exactly as it does the
+    rows under test.
+    """
+
+    def always_read(*, surface: str, source_segment: str, cycle_segment: str, **_kwargs: Any) -> Any:
+        return repository._read_cycle_segments(repository.root / surface / source_segment, cycle_segment)
+
+    repository._shared_cycle_segment_records = always_read  # type: ignore[method-assign]
+    return repository
+
+
 def _cold(root: Path, model_id: str | None) -> Any:
-    return _rows(FileOrchestrationJournalRepository(root), model_id)
+    return _rows(_sharing_nothing(FileOrchestrationJournalRepository(root)), model_id)
 
 
 def _source_segments(root: Path) -> tuple[str, ...]:
@@ -295,6 +310,13 @@ def test_every_model_reads_what_a_cold_repository_reads(tmp_path: Path, variant:
     if variant != "empty_cycle":
         assert all(cold[model_id].pipeline_jobs for model_id in order), "the fixture must populate every model"
         assert cold["m1"].pipeline_events and cold[None].pipeline_events, "the fixture must carry events"
+    if variant == "both_spellings":
+        # Guard against a silent fall-back to the plain tree: both spellings are
+        # read, and the model-less events written under GFS (journal 401,
+        # pipeline-events 501) reach the cycle-wide rows.
+        assert _source_segments(root) == ("gfs", "GFS")
+        event_ids = {str(event.get("event_id")) for event in cold[None].pipeline_events}
+        assert {"401", "501"} <= event_ids, sorted(event_ids)
 
     for sequence in (order, list(reversed(order))):
         repository = FileOrchestrationJournalRepository(root)
@@ -396,6 +418,30 @@ def test_a_containment_fault_is_never_served_from_the_shared_records(
     assert not any(entry[0] is _FAULT for entry in after.values())
 
 
+def test_a_fault_outside_both_surfaces_stores_neither_decode(
+    root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The by-cycle direct-jobs partition is read after both surfaces, so both
+    # decodes complete under a fingerprint that is the containment-fault marker.
+    partition = root / "pipeline-jobs" / "by-cycle" / "gfs" / CYCLE_SEGMENT
+    copy = tmp_path / "by_cycle_copy"
+    shutil.copytree(partition, copy)
+    partition.rename(tmp_path / "by_cycle_original")
+    partition.symlink_to(copy, target_is_directory=True)
+
+    repository = FileOrchestrationJournalRepository(root)
+    assert (
+        repository._cycle_rows_source_fingerprint(source_segments=_source_segments(root), cycle_segment=CYCLE_SEGMENT)
+        is _FAULT
+    )
+    reads = _count_segment_reads(repository, monkeypatch)
+    for count, model_id in enumerate(("m1", "m2"), start=1):
+        warm = _raises(lambda model_id=model_id: _rows(repository, model_id))
+        _same_error(warm, _raises(lambda model_id=model_id: _cold(root, model_id)))
+        assert Counter(reads) == dict.fromkeys(_cycle_keys(root), count), "both surfaces are decoded on every read"
+        assert _entries(repository) == {}, "a faulted read stored a decode"
+
+
 # --- 3.5 the owner does not share --------------------------------------------------
 
 
@@ -481,6 +527,28 @@ def test_a_failing_events_directory_keeps_the_decoded_journal_entry(
     assert set(entries) == {_key("journal")}
     fresh = FileOrchestrationJournalRepository(root)._read_cycle_segments(root / "journal" / "gfs", CYCLE_SEGMENT)
     assert entries[_key("journal")][1] == fresh
+
+
+def test_a_decode_error_drops_the_older_entry_of_its_directory(root: Path) -> None:
+    repository = FileOrchestrationJournalRepository(root)
+    _rows(repository, "m1")
+    stored = _entries(repository)
+    assert set(stored) == _cycle_keys(root)
+
+    # The appended line moves the fingerprint (size) and makes the journal
+    # surface undecodable; the journal surface is read first, so the events
+    # surface is not reached by the failing read.
+    _malformed_line(root / "journal" / "gfs")
+    error = _raises(lambda: _rows(repository, "m2"))
+    _same_error(error, _raises(lambda: _cold(root, "m2")))
+    assert error.reason == "file_journal_malformed_json"
+
+    after = _entries(repository)
+    assert _key("journal") not in after, "the older entry of the failing directory survived its read error"
+    # Every other directory keeps its older entry untouched: none of them was
+    # looked up by the failing read, and an older entry is never served to a
+    # call whose fingerprint differs.
+    assert _same_entries(after, {key: entry for key, entry in stored.items() if key != _key("journal")})
 
 
 # --- 3.7 bound and key -------------------------------------------------------------
@@ -678,11 +746,8 @@ def test_threads_reading_different_models_of_one_cycle(root: Path) -> None:
 def _attributed_reads(root: Path, monkeypatch: pytest.MonkeyPatch, *, share: bool) -> dict[str, Any]:
     repository = FileOrchestrationJournalRepository(root)
     if not share:
-
-        def always_read(*, surface: str, source_segment: str, cycle_segment: str, **_kwargs: Any) -> Any:
-            return repository._read_cycle_segments(repository.root / surface / source_segment, cycle_segment)
-
-        monkeypatch.setattr(repository, "_shared_cycle_segment_records", always_read)
+        assert callable(repository._shared_cycle_segment_records)
+        _sharing_nothing(repository)
     reset_journal_read_counters()
     for model_id in MODELS:
         _rows(repository, model_id)

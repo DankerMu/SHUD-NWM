@@ -3706,9 +3706,10 @@ class FileOrchestrationJournalRepository(
         own: that fingerprint covers every slot of both surfaces, so equality
         proves the files are, now, what the records were decoded from.  Any
         other call reads the directory itself and neither takes nor stores.
-        A read that raises stores nothing, so every model's read of a failing
-        directory raises as on a cold repository.  The returned list and its
-        records are shared: callers must not mutate them.
+        A read that raises leaves no entry for its directory (an entry stored
+        under another fingerprint is dropped before the read), so every model's
+        read of a failing directory raises as on a cold repository.  The
+        returned list and its records are shared: callers must not mutate them.
         """
         directory = self.root / surface / source_segment
         if not shareable:
@@ -3716,7 +3717,11 @@ class FileOrchestrationJournalRepository(
         key = (surface, source_segment, cycle_segment)
         with self._cache_lock:
             entry = self._cycle_segment_records_cache.get(key)
-        if entry is not None and entry[0] == fingerprint:
+            if entry is not None and entry[0] != fingerprint:
+                # Dropped before the read: a read that raises leaves no entry.
+                self._cycle_segment_records_cache.pop(key, None)
+                entry = None
+        if entry is not None:
             return entry[1]
         records = self._read_cycle_segments(directory, cycle_segment)
         cache_limit = max(int(MAX_FILE_JOURNAL_CYCLE_SEGMENT_RECORDS_CACHE_ENTRIES), 1)
