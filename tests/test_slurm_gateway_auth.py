@@ -402,6 +402,77 @@ def test_release_blocked_live_mode_503_on_reset(monkeypatch) -> None:
     assert response.json()["error"]["code"] == RELEASE_BLOCKED
 
 
+RELEASE_BLOCKED_ACTIONS = {
+    "/api/v1/slurm/jobs": ("slurm.submit_job", "job-submit"),
+    "/api/v1/slurm/job-arrays": ("slurm.submit_job", "job-submit"),
+    "/api/v1/slurm/jobs/mock_4040": ("slurm.cancel_job", "job-cancel"),
+    "/api/v1/slurm/internal/reset": ("slurm.reset_registry", "registry-reset"),
+}
+
+
+def test_release_blocked_503_details_on_all_four_mutations_before_the_gateway(monkeypatch) -> None:
+    """Deferred auth is a release blocker: every registered mutation answers 503
+    RELEASE_BLOCKED with the policy decision, the audit record and the removal
+    criteria, and the gateway is never constructed or called."""
+    import services.slurm_gateway.routes as routes_module
+
+    real_singleton = routes_module.slurm_gateway
+    assert isinstance(real_singleton, routes_module.LazySlurmGateway)
+    original_create_gateway = routes_module.create_gateway
+    constructed = {"count": 0}
+
+    def counting_create_gateway(*args, **kwargs):
+        constructed["count"] += 1
+        return original_create_gateway(*args, **kwargs)
+
+    monkeypatch.setattr(routes_module, "create_gateway", counting_create_gateway)
+    real_singleton.reset_instance()
+    app = _standalone_app()
+    client = _client_for(monkeypatch, app, service_token=None)
+    _env(monkeypatch, AUTH_BACKEND="oidc")
+    try:
+        for method, path, body in ALL_MUTATION_CALLS:
+            request_id = f"req-release-blocked-{method.lower()}-{path.rsplit('/', 1)[-1]}"
+            response = client.request(
+                method,
+                path,
+                json=body,
+                headers={
+                    "X-Request-ID": request_id,
+                    "X-Live-User-ID": "live-ops",
+                    "X-Live-User-Roles": "sys_admin",
+                },
+            )
+            payload = response.json()
+            assert response.status_code == 503, (method, path, response.text)
+            assert payload["error"]["code"] == RELEASE_BLOCKED, (method, path)
+            details = payload["error"]["details"]
+            assert set(details) == {"policy_decision", "audit_record", "removal_criteria"}, (method, path)
+            action_id, target_id = RELEASE_BLOCKED_ACTIONS[path]
+            decision = details["policy_decision"]
+            assert decision["decision"] == "release_blocked", (method, path)
+            assert decision["reason_code"] == RELEASE_BLOCKED, (method, path)
+            assert decision["action_id"] == action_id, (method, path)
+            assert decision["target_id"] == target_id, (method, path)
+            assert decision["no_mutation_expected"] is True, (method, path)
+            audit = details["audit_record"]
+            assert audit["request_id"] == request_id, (method, path)
+            assert audit["decision"] == "release_blocked", (method, path)
+            assert audit["action_id"] == action_id, (method, path)
+            assert audit["target"] == {"type": "slurm_gateway", "id": target_id}, (method, path)
+            assert details["removal_criteria"] == "Configure and prove live backend identity-provider role mapping."
+        assert constructed["count"] == 0
+
+        # Discrimination: the same lazy singleton constructs through the
+        # counting factory as soon as a handler touches it, so the zero above
+        # is the denial short-circuiting, not a counter that cannot see.
+        real_singleton.health()
+        assert constructed["count"] == 1
+    finally:
+        routes_module.create_gateway = original_create_gateway
+        real_singleton.reset_instance()
+
+
 # ---------------------------------------------------------------------------
 # 4.3 - disabled standalone reset: route absent, 404 for every credential
 # ---------------------------------------------------------------------------

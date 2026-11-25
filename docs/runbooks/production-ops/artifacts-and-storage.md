@@ -49,7 +49,7 @@ run discovery.
 |---|---|---|---|
 | `nhms` | **t** | 库/扩展 owner + 迁移；两个 migration-class 例外 lane | `packages/common/migrate.py`；`node27-timeseries-compression-replay.env`（`pg_dump`/`psql --file`/`pg_restore`）；已退役的 archive-rebuild drill（需 `CREATEDB`） |
 | `nhms_ingest_rw` | f | `core`/`hydro`/`met`/`ops`/`map` 全部 relation 的 **owner**（`flood` 曾在此列，已退役，由 `000064` 删除，#2048） + DML + default privileges；ownership 是 `compress_chunk`/`drop_chunks`/chunk `ANALYZE` 与 #1643/#1468 统计守卫两条腿的硬要求 | `node27-ingest.env`、`node27-timeseries-compression.env`、`node27-timeseries-retention.env` |
-| `nhms_download_rw` | f | 仅 `met.*` 的 DML + default privileges（下载链路实测**不连库**，角色存在是为了让模板承诺成立） | `node27-download.env` |
+| `nhms_download_rw` | f | 仅 `met.*` 的 DML + default privileges（下载链路的 `nhms-gfs download` / `nhms-ifs download` 用它 upsert `met.data_source`、读写 `met.forecast_cycle`，不碰其他表） | `node27-download.env` |
 | `nhms_display_ro` | f | 只读；无 INSERT/UPDATE/DELETE | display API (`infra/env/display.env`)、frontier-alert、raw-retention、resource-governance |
 
 选择性 cold runtime、其 env/template、以及 `nhms_cold` 的 source `CREATE` grant/positive audit 已从仓库代码退役；它们不是当前运行指导。此 source retirement 不是已执行的 live `REVOKE`、`DROP` 或生产配置交接声明。

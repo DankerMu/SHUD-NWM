@@ -125,6 +125,17 @@ Notes:
     `compute.env`, not the template).
 - `compute.host.env` is untracked with no committed template. That gap is
   recorded, not fixed, by #1694.
+- The scheduler's lag and lookback keys (`NHMS_SCHEDULER_CYCLE_LAG_HOURS`,
+  `NHMS_SCHEDULER_LOOKBACK_HOURS`) in `compute.host.env` and `compute.replay.env`
+  are inert. Read on the compute control host on 2026-11-25: both files still carry
+  `NHMS_SCHEDULER_CYCLE_LAG_HOURS=16` (lookback 48 and 288), from before the
+  scheduler's own file moved to 10 / 32 (#3225). The scheduler service loads
+  `compute.scheduler-dbfree.env` plus the gateway secret file (table above);
+  `compute.host.env` is loaded by the gateway and the compute API, which read
+  neither key (the gateway does read other `NHMS_SCHEDULER_*` keys from it, so
+  drop only these two). The stale values change nothing; drop those two keys at
+  the next edit of those two host files, and read the scheduler's lag and
+  lookback from `compute.scheduler-dbfree.env` (`#3233`).
 - 部署的单元体与 drop-in 的逐字节副本在 `infra/systemd/node22/`（`MANIFEST.json`，收据 `docs/runbooks/receipts/2026-10-16-node22-live-units-snapshot.md`），本表仍是 EnvironmentFile 权威，`tests/test_node22_unit_tracking.py` 以本表校验那些文件的 `EnvironmentFile=`
 
 ### Where the scheduler's basin configuration actually lives

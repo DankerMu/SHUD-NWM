@@ -223,6 +223,32 @@ def test_non_finite_flow_marks_run_failed_without_writing_rows(tmp_path: Path, b
     assert repository.failures[0][0] == "NON_FINITE_FLOW"
 
 
+@pytest.mark.parametrize("bad_value", ["nan", "Infinity", "-inf", "1e400", "-1e400"])
+def test_non_finite_flow_after_valid_rows_writes_no_row_of_the_file(tmp_path: Path, bad_value: str) -> None:
+    store, parser, repository = _build_parser(tmp_path)
+    store.write_bytes_atomic(
+        "runs/run_001/output/demo.rivqdown",
+        (
+            "time,seg_a,seg_b\n"
+            "2026-05-01T00:00:00Z,86400,172800\n"
+            "2026-05-01T01:00:00Z,43200,86400\n"
+            f"2026-05-01T02:00:00Z,86400,{bad_value}\n"
+        ).encode("utf-8"),
+    )
+
+    with pytest.raises(OutputParsingError) as exc_info:
+        parser.parse_run("run_001")
+
+    assert exc_info.value.error_code == "NON_FINITE_FLOW"
+    assert "Row 3 " in str(exc_info.value)
+    assert repository.rows == {}
+    assert repository.run_identities == []
+    assert repository.qc_results == []
+    assert repository.statuses == ["failed"]
+    assert repository.failures[0][0] == "NON_FINITE_FLOW"
+    assert "Row 3 " in repository.failures[0][1]
+
+
 def test_qc_failures_are_advisory_and_flag_inserted_rows(tmp_path: Path) -> None:
     store, parser, repository = _build_parser(tmp_path, max_flow_m3s=1.0)
     store.write_bytes_atomic(
