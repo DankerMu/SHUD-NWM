@@ -89,11 +89,13 @@ Nothing is deleted from the lane in this change; that is the next one.
   from another checkout against the production one before a merge; the
   receipt prints the root it used.
 - **D6 — staleness is decided on integers**: the process start (now minus
-  `ps -o etimes=`) must be strictly greater than the time of the
+  `ps -o etimes=`) must be later than the time of the
   checkout's last HEAD move (`git log -g -1 --date=unix --format=%gd HEAD`
   prints `HEAD@{<seconds>}`) and than the env file's modification time
-  (`date -r <file> +%s`, which GNU and BSD `date` both have). Strictly,
-  because the start time carries a second of rounding. The systemd on
+  (`date -r <file> +%s`, which GNU and BSD `date` both have). By more
+  than one second: the observation time and the elapsed time are both
+  floored, so their difference can be one second later than the real
+  start (found in code review). The systemd on
   node-27 (249) has no unix timestamp output.
 - **D7 — the listener is tied to the unit through the process tree**:
   `ss -Hltnp` names the processes that hold the port; each must be the

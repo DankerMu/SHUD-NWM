@@ -21,7 +21,7 @@ The script SHALL evaluate every claim below, print one line per claim with
 | `unit_active` | the user unit `nhms-display-api.service` is active and has a main process |
 | `process_of_checkout` | the main process's command line is `<root>/.venv/bin/python -m uvicorn apps.api.main:app` with a `--port` |
 | `checkout_clean` | no tracked file of the checkout is modified, staged or deleted |
-| `process_loaded_head` | the main process started strictly later than the checkout's HEAD last moved and strictly later than `infra/env/display.env` was last modified |
+| `process_loaded_head` | the main process started later than the checkout's HEAD last moved and later than `infra/env/display.env` was last modified, each by more than one second as measured in whole seconds |
 | `listener_of_unit` | at least one socket listens on that port, every listening line names its processes, and each of them is the main process or a child of it |
 | `health` | `GET /health` on the loopback address and that port answers 200 |
 | `runtime_role` | `GET /api/v1/runtime/config` reports `service_role` `display_readonly`, `display_readonly` true, `slurm_routes_enabled` false and `control_mutations_enabled` false |
@@ -31,6 +31,12 @@ The script SHALL evaluate every claim below, print one line per claim with
 
 `storage_not_writable` is a statement about the two root directories
 themselves, not about every file beneath them.
+
+The start time is the observation time minus the elapsed time of the main
+process, both in whole seconds, and can therefore come out one second later
+than the real start. The one-second margin of `process_loaded_head` covers
+that rounding: a process measured exactly one second after the HEAD move or
+the env file change does not pass.
 
 A claim whose input cannot be read SHALL be `FAIL`, never skipped: no main
 process, no port, an empty reflog, an unreadable env file, a storage key that
@@ -45,13 +51,13 @@ that gets no answer.
 
 #### Scenario: A process older than the checkout does not pass
 
-- **WHEN** the checkout's HEAD moved after the main process started, or in the same second
+- **WHEN** the checkout's HEAD moved after the main process started, in the same second, or one measured second before it
 - **THEN** `process_loaded_head` is `FAIL`, the last line is `C1=FAIL`, and the exit status is non-zero
 - **AND** the other claims are still evaluated and printed
 
 #### Scenario: A process older than its env file does not pass
 
-- **WHEN** `infra/env/display.env` was modified after the main process started
+- **WHEN** `infra/env/display.env` was modified after the main process started, in the same second, or one measured second before it
 - **THEN** `process_loaded_head` is `FAIL` and the receipt does not pass
 
 #### Scenario: A modified checkout does not pass

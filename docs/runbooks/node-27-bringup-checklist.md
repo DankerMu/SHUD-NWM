@@ -197,6 +197,7 @@ receipt；其冷层 rollout 授权已撤回。以下通用 C1–C4 仍是既有�
 - [ ] **receipt（只读）**：在 node-27 上以 service 用户的 login shell 跑（Slurm 客户端扫描用的是调用者的 `PATH`，要和 unit 的 `bash -lc` 一致）
 
   ```bash
+  set -o pipefail  # 否则 $? 是 tee 的，不是脚本的
   cd /home/nwm/NWM
   bash scripts/ops/display-c1-receipt.sh | tee "artifacts/c1-display-$(git rev-parse --short HEAD)-$(date -u +%Y%m%dT%H%M%SZ).txt"
   ```
@@ -212,7 +213,7 @@ receipt；其冷层 rollout 授权已撤回。以下通用 C1–C4 仍是既有�
   | `unit_active` | `nhms-display-api.service` active，有主进程 |
   | `process_of_checkout` | 主进程就是本 checkout 的 uvicorn（`apps.api.main:app`），端口取自它的命令行 |
   | `checkout_clean` | checkout 里没有被改动的 tracked 文件（untracked 不算） |
-  | `process_loaded_head` | 主进程启动严格晚于 checkout 的 HEAD 最后一次移动，也严格晚于 `display.env` 的最后修改：**receipt 只对进程真正加载过的提交和配置有效**。node-27 的 checkout 经常只 pull 不重启（定时器直接跑仓库里的脚本），这种状态下本行 `FAIL`，先走上一条的部署再取 receipt |
+  | `process_loaded_head` | 主进程启动晚于 checkout 的 HEAD 最后一次移动，也晚于 `display.env` 的最后修改（按整秒比较，留一秒取整余量：至少晚两秒才算）：**receipt 只对进程真正加载过的提交和配置有效**。node-27 的 checkout 经常只 pull 不重启（定时器直接跑仓库里的脚本），这种状态下本行 `FAIL`，先走上一条的部署再取 receipt |
   | `listener_of_unit` | 监听该端口的进程只有主进程和它的子进程（worker）：回答下面三个请求的就是这个 unit，不是占着同一端口的别的服务 |
   | `health` | `GET /health` 200 |
   | `runtime_role` | `GET /api/v1/runtime/config` 报 `service_role=display_readonly`、`display_readonly=true`、`slurm_routes_enabled=false`、`control_mutations_enabled=false` |
