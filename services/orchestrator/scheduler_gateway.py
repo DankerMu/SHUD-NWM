@@ -120,7 +120,7 @@ def _default_gateway_probe(config: Any) -> dict[str, Any]:
     except Exception:  # noqa: BLE001 - config read must not break the probe.
         mode = ""
 
-    if mode not in {"real", "slurm"}:
+    if mode != "slurm":
         return _scheduler._in_process_gateway_probe(mode)
 
     base_url = str(config.slurm_gateway_url or "").strip()
@@ -170,7 +170,7 @@ def _default_gateway_probe(config: Any) -> dict[str, Any]:
                 "accounting_available": False,
                 "reason": "gateway health returned a non-object body",
             }
-        return _scheduler._interpret_gateway_health(payload, mode=mode)
+        return _scheduler._interpret_gateway_health(payload, mode=mode, required_backend="slurm")
     except Exception as error:  # noqa: BLE001 - probe must be fail-safe, never raise.
         return {
             "mode": mode,

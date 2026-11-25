@@ -146,7 +146,7 @@ def test_preflight_missing_token_fails_submit_ready_clearly(monkeypatch) -> None
     class _Config:
         slurm_gateway_url = "http://gw-node22.internal:8081"
 
-    monkeypatch.setenv("SLURM_GATEWAY_BACKEND", "real")
+    monkeypatch.setenv("SLURM_GATEWAY_BACKEND", "slurm")
     monkeypatch.delenv("SLURM_GATEWAY_SERVICE_TOKEN", raising=False)
     result = _default_gateway_probe(_Config())
     assert result["healthy"] is False
@@ -164,7 +164,7 @@ def test_preflight_non_ascii_token_is_unusable_and_fails_closed(monkeypatch) -> 
     class _Config:
         slurm_gateway_url = "http://127.0.0.1:8090"
 
-    monkeypatch.setenv("SLURM_GATEWAY_BACKEND", "real")
+    monkeypatch.setenv("SLURM_GATEWAY_BACKEND", "slurm")
     monkeypatch.setenv("SLURM_GATEWAY_SERVICE_TOKEN", "tókén-0123456789abcdef")
     result = _default_gateway_probe(_Config())
     assert result["healthy"] is False
@@ -210,7 +210,7 @@ def test_preflight_token_present_probes_health(monkeypatch) -> None:
     class _Config:
         slurm_gateway_url = "http://gw-node22.internal:8081"
 
-    monkeypatch.setenv("SLURM_GATEWAY_BACKEND", "real")
+    monkeypatch.setenv("SLURM_GATEWAY_BACKEND", "slurm")
     monkeypatch.setenv("SLURM_GATEWAY_SERVICE_TOKEN", SERVICE_TOKEN)
     monkeypatch.setattr(httpx, "Client", _FakeHttpClient)
     result = _default_gateway_probe(_Config())

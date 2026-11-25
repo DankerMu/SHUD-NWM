@@ -13,11 +13,12 @@ the gateway is genuinely healthy and reachable, the gateway check adds no blocke
   `NHMS_PRODUCTION_SLURM_ENABLED`). Otherwise preflight reports `not_required`.
 - `SLURM_GATEWAY_URL` points at the real node-22 gateway (default
   `http://localhost:8000` is the co-located dev/mock convention only).
-- `SLURM_GATEWAY_BACKEND` selects `mock` (dev) or `real`/`slurm` (production).
+- `SLURM_GATEWAY_BACKEND` selects `mock` (dev) or `slurm` (production). Any other
+  name is rejected by `create_gateway`, so the gateway check is unhealthy.
 
 ## What preflight checks (`_slurm_preflight` -> `gateway`)
 
-1. **Self-reference (deterministic, no network).** With a `real`/`slurm`
+1. **Self-reference (deterministic, no network).** With the `slurm`
    backend, a gateway URL whose host is loopback / `0.0.0.0` / `localhost` AND
    whose port equals this service's own control-API port
    (`NHMS_SERVICE_PORT`, default `8000`) is rejected as
@@ -26,10 +27,14 @@ the gateway is genuinely healthy and reachable, the gateway check adds no blocke
 2. **Health / capability (bounded, fail-safe).** Probes gateway health
    (`sinfo --version` for the real backend), submit capability, and accounting
    availability. Any of: health failure, missing Slurm CLI, or accounting
-   unavailable -> `SLURM_GATEWAY_UNAVAILABLE`. The probe is bounded and never
-   raises: a probe that cannot determine state fails **BLOCKED**, never a false
-   PASS. On a node-22 compute container with no Slurm CLI this BLOCKED state is a
-   real, expected terminal outcome — not a bug.
+   unavailable -> `SLURM_GATEWAY_UNAVAILABLE`. With the `slurm` backend the probe
+   also refuses a gateway whose health body names another backend (for example
+   `mock`): the check is unhealthy and not submit-capable, the blocker is
+   `SLURM_GATEWAY_UNAVAILABLE` with a reason naming the reported backend, and a
+   body without a backend name is judged on health and binaries alone. The
+   probe is bounded and never raises: a probe that cannot determine state fails
+   **BLOCKED**, never a false PASS. On a node-22 compute container with no Slurm
+   CLI this BLOCKED state is a real, expected terminal outcome — not a bug.
 
 Adjacent pre-submit checks (same gate): allowed sbatch templates
 (`infra/sbatch` allowlist), storage roots (workspace / object store / **log
@@ -39,7 +44,7 @@ sbatch templates.
 
 ## Evidence
 
-`slurm_preflight.checks.gateway` records `mode` (mock/real), endpoint
+`slurm_preflight.checks.gateway` records `mode` (mock/slurm), `backend`, endpoint
 `host:port`, `self_reference`, `healthy`, `submit_capable`, and
 `accounting_available`. The whole payload is run through `redact_payload` and
 the gateway URL's `user:pass@` userinfo is stripped — **no credentials are ever
