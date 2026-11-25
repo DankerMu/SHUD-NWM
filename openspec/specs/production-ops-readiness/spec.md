@@ -196,8 +196,8 @@ The installer's ERR handlers SHALL run only in the main shell, and a probe timer
 ### Requirement: Display API restart wrapper uses documented port env
 
 The node-27 display API restart wrapper SHALL read the display API port from
-`NHMS_DISPLAY_API_PORT`, matching `infra/env/display.example` and
-`infra/compose.display.yml`. The wrapper SHALL default to port `8080` when the
+`NHMS_DISPLAY_API_PORT`, matching `infra/env/display.example`. The wrapper
+SHALL default to port `8080` when the
 documented env var is unset.
 
 #### Scenario: documented display API port controls wrapper
@@ -220,7 +220,7 @@ documented env var is unset.
 #### Scenario: default display API port matches node-27 runtime
 
 - **WHEN** no explicit display API port env var is configured
-- **THEN** the restart wrapper and compose host bind SHALL default to `8080`
+- **THEN** the restart wrapper SHALL default to `8080`
 
 #### Scenario: invalid display API port fails before restart actions
 

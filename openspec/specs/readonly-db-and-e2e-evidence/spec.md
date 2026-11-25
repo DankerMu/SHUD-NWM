@@ -2,7 +2,7 @@
 
 ## Purpose
 
-How the node-27 display is proven read-only and how that evidence is laid out: the readonly-DB validator's deny-write probes, its identity-bound display route smoke and self-consistent identity discovery, the per-source merge, and where Docker evidence bundles live.
+How the node-27 display is proven read-only and how that evidence is laid out: the readonly-DB validator's deny-write probes, its identity-bound display route smoke and self-consistent identity discovery, and the per-source merge.
 
 ## Requirements
 
@@ -105,22 +105,3 @@ libpq-direct client, not only through a driver that applies form decoding of its
   idle-in-transaction timeouts
 - **AND** an automated test SHALL execute that connection against a real PostgreSQL, so reintroducing a
   form-encoded options value fails the suite instead of surfacing only as a connection `FATAL` on production
-
-### Requirement: Docker evidence location
-
-All project-created Docker smoke and codeagent review artifacts SHALL be written under the repository or `/scratch/frd_muziyao`.
-
-#### Scenario: Stage change review artifacts
-- **WHEN** OpenSpec review or planning agents produce output
-- **THEN** the output is saved under `artifacts/stage-change/m22-two-node-docker-readonly-display/` or `/scratch/frd_muziyao/...`
-- **AND** no project-created temporary evidence is written to the system disk by default.
-
-#### Scenario: Docker smoke artifacts
-- **WHEN** Docker build, compose config, or container security smoke tests run
-- **THEN** test logs and generated evidence are written under the repository `artifacts/` tree or `/scratch/frd_muziyao`
-- **AND** commands document any unavoidable Docker daemon cache usage separately.
-
-#### Scenario: Docker disk preflight
-- **WHEN** Docker build or compose smoke is about to run
-- **THEN** evidence records `docker version`, `docker compose version`, DockerRootDir from `docker info`, `docker system df`, and relevant `df -h`
-- **AND** low available space marks Docker smoke as `BLOCKED` before large build steps run.

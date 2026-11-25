@@ -104,26 +104,21 @@ Governed artifact ownership documentation SHALL include the literal ownership
 terms required by the entropy audit.
 
 #### Scenario: governance audit checks DOC_STATUS
-- **WHEN** the audit checks `docs/governance/DOC_STATUS.md`
-- **THEN** the document explicitly mentions `.dockerignore` in the artifact
-  ownership policy and the corresponding gate-eligible finding is gone
 
-### Requirement: Display runtime rejects compute-only copyback authority
+- **WHEN** the audit checks `docs/governance/DOC_STATUS.md`
+- **THEN** the document explicitly mentions every ownership term the audit
+  requires (the agent, review, evidence and artifact paths) and no
+  gate-eligible ownership finding is reported
+
+### Requirement: The display role rejects compute-only copyback authority
 
 The `display_readonly` runtime role SHALL reject compute-control path
 configuration, including `NHMS_OBJECT_STORE_COPYBACK_ROOT`, so display nodes can
 read published artifacts without gaining run-product copyback authority.
 
 #### Scenario: display role includes copyback root
-- **WHEN** runtime configuration or the Docker entrypoint starts with
-  `NHMS_SERVICE_ROLE=display_readonly` and
-  `NHMS_OBJECT_STORE_COPYBACK_ROOT` configured
-- **THEN** startup/runtime validation blocks the configuration as a
-  display-forbidden compute-control path env
 
-#### Scenario: compute role includes copyback root
-- **WHEN** runtime/static Docker validation checks a compute-control service
-  with `OBJECT_STORE_ROOT` and `NHMS_OBJECT_STORE_COPYBACK_ROOT`
-- **THEN** the copyback root is required to be compute-only, mounted for compute
-  publication, and rejected if it overlaps `OBJECT_STORE_ROOT` except for exact
-  equality semantics governed by publisher copyback validation
+- **WHEN** the API starts with `NHMS_SERVICE_ROLE=display_readonly` and
+  `NHMS_OBJECT_STORE_COPYBACK_ROOT` configured
+- **THEN** startup is refused and the key is reported as a
+  display-forbidden compute-control path env

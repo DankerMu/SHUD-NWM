@@ -19,16 +19,16 @@ changed in the report; the entropy hard gate ends at 0 failing.
 
 ## 1. Spec (orchestrator)
 
-- [ ] 1.1 The nine deltas of this change; `two-node-docker-runtime` is
+- [x] 1.1 The nine deltas of this change; `two-node-docker-runtime` is
   retired.
 
 ## 2. Deletion
 
-- [ ] 2.1 `git rm` the files of the proposal's "Deleted" list (the
+- [x] 2.1 `git rm` the files of the proposal's "Deleted" list (the
   capability's spec is removed by the archive, not by hand). Remove the
   ruff per-file ignore of the runtime validator from `pyproject.toml` and
   the deleted test files from `scripts/ci/full_test_durations.json`.
-- [ ] 2.2 After the deletion, `git grep` for each deleted path and for
+- [x] 2.2 After the deletion, `git grep` for each deleted path and for
   `validate_two_node`, `test_two_node_docker`, `compose.compute`,
   `compose.display`, `Dockerfile.app`, `infra/docker/`, `dockerignore`,
   `compute.example`, `nhms-compute-compose`, `nhms-display-compose`,
@@ -39,7 +39,7 @@ changed in the report; the entropy hard gate ends at 0 failing.
 
 ## 3. Governance checks
 
-- [ ] 3.1 `scripts/governance/entropy_audit/check_topology.py`: the scan
+- [x] 3.1 `scripts/governance/entropy_audit/check_topology.py`: the scan
   list drops `infra/README.two-node-docker.md` and gains the directory
   `infra/systemd`. The audit yields only files whose name it accepts as
   text (`repo_files.py`, `_has_scannable_text_name`); the suffixes
@@ -47,7 +47,7 @@ changed in the report; the entropy hard gate ends at 0 failing.
   new root would contribute one JSON file and no unit. `topology_display_env.py`: the allow token
   `compose.display` goes if nothing else needs it. Report the hard-gate
   numbers before and after and every finding that appears or disappears.
-- [ ] 3.2 `check_paths_and_api.py`: the ownership check no longer requires
+- [x] 3.2 `check_paths_and_api.py`: the ownership check no longer requires
   the term `.dockerignore` in `DOC_STATUS.md`; the ignore check no longer
   reads `.dockerignore` (its three `.gitignore` expectations stay).
   `write_entropy_baseline.py`, `constants.py`, `repo_files.py`: the
@@ -59,7 +59,7 @@ changed in the report; the entropy hard gate ends at 0 failing.
   scan-list mechanism keeps proving the mechanism on a path that is still
   scanned; a test whose only subject was the deleted file is deleted and
   listed.
-- [ ] 3.3 Mutations: a `.service` file under `infra/systemd` with a line
+- [x] 3.3 Mutations: a `.service` file under `infra/systemd` with a line
   the topology check must flag is flagged; it is not once `infra/systemd`
   is taken out of the list again, and not once the `.service` suffix is
   taken out of the accepted names again (the two halves of 3.1 are each
@@ -68,7 +68,7 @@ changed in the report; the entropy hard gate ends at 0 failing.
 
 ## 4. Tests that named the lane
 
-- [ ] 4.1 `tests/test_production_scheduler.py::test_compute_env_example_enables_strict_forecast_warm_start`
+- [x] 4.1 `tests/test_production_scheduler.py::test_compute_env_example_enables_strict_forecast_warm_start`
   reads `infra/env/compute.scheduler-dbfree.env.example` (the key is set
   there); the two assertions on comment wording are kept only if that
   template carries the wording. `tests/test_slurm_gateway_deployment_contract.py`
@@ -77,19 +77,19 @@ changed in the report; the entropy hard gate ends at 0 failing.
   the "examples are trackable" half bite (for a tracked file `git
   check-ignore` answers 1 whatever the rules say; assert on an untracked
   path that the negation rule must cover, or with `--no-index`).
-- [ ] 4.2 `tests/test_role_boundary_static.py`: the template test also
+- [x] 4.2 `tests/test_role_boundary_static.py`: the template test also
   pins `NHMS_DISPLAY_API_PORT=8080` (the requirement's seventh key) and
   the two storage roots; a test pins that
   `infra/systemd/node22/nhms-compute-api.service` and
   `infra/systemd/node22/nhms-slurm-gateway.service` set their
   `NHMS_SERVICE_ROLE` (if a test already does, name it instead); the
   lines that expect `compute.example` in `ROLE_BOUNDARY.md` follow 6.x.
-- [ ] 4.3 `tests/test_readonly_db_validation_routes.py` (pins on the lane
+- [x] 4.3 `tests/test_readonly_db_validation_routes.py` (pins on the lane
   README and on `two-node-production-e2e-plan.md`),
   `tests/test_node22_runbook_section_markers.py` (the §5.2 marker): a pin
   whose subject is deleted is deleted; a pin on a sentence that 6.x
   rewrites follows the sentence. The report lists each.
-- [ ] 4.4 A new test pins D5: the forbidden-key list of
+- [x] 4.4 A new test pins D5: the forbidden-key list of
   `infra/env/README.md` equals `DISPLAY_RUNTIME_FORBIDDEN_ENV_KEYS`
   (`tests/test_role_boundary_static.py`, built from the runtime guard).
   The list is the bullet that 6.1 rewrites to begin "Keys the display
@@ -101,7 +101,7 @@ changed in the report; the entropy hard gate ends at 0 failing.
 
 ## 5. The display template
 
-- [ ] 5.1 `infra/env/display.example`: the header says what the file is
+- [x] 5.1 `infra/env/display.example`: the header says what the file is
   (template of `infra/env/display.env`, sourced by the unit of
   `scripts/ops/start-display-api.sh`); compose-only keys and comments go
   by the rule of D3; `NHMS_PUBLISHED_ARTIFACT_ROOT` takes the host path
@@ -112,7 +112,7 @@ changed in the report; the entropy hard gate ends at 0 failing.
 
 ## 6. Docs
 
-- [ ] 6.1 `infra/env/README.md`: title and introduction (the directory
+- [x] 6.1 `infra/env/README.md`: title and introduction (the directory
   holds the env templates of the systemd units, not of a compose stack);
   the paragraphs on `compute.env` / `compute.example` shrink to the
   leftover statement of the requirement; the "compose-lane role contract"
@@ -121,7 +121,7 @@ changed in the report; the entropy hard gate ends at 0 failing.
   the display section keeps the forbidden-key list (owner: the runtime
   guard) and loses mounts, HostConfig and compose interpolation; the
   validation commands go.
-- [ ] 6.2 `docs/runbooks/two-node-deployment-overview.md` (§5.2 list and
+- [x] 6.2 `docs/runbooks/two-node-deployment-overview.md` (§5.2 list and
   its superseded marker, the links to the README and the compose files),
   `docs/runbooks/two-node-production-e2e-plan.md`,
   `docs/runbooks/display-readonly-live-mvt.md`,
@@ -132,18 +132,18 @@ changed in the report; the entropy hard gate ends at 0 failing.
   `scripts/node27_timeseries_compression_prearm.py` (a docstring): each
   statement that sends the reader to a deleted file, or describes compose
   as a way to deploy, is corrected to the systemd reality or cut.
-- [ ] 6.3 `docs/governance/ROLE_BOUNDARY.md`, `DOC_STATUS.md`,
+- [x] 6.3 `docs/governance/ROLE_BOUNDARY.md`, `DOC_STATUS.md`,
   `API_LAYER_INVERSION_INVENTORY.md`, `LEGACY_DEAD_CODE_INVENTORY.md`
   (the lane gets an entry as deleted, with this issue),
   `entropy-burndown-triage.md`.
-- [ ] 6.4 Rule for 6.x: no new claim about production that was not
+- [x] 6.4 Rule for 6.x: no new claim about production that was not
   already in the doc or in the proposal; a sentence is cut rather than
   rephrased when its only content was the lane. The report lists every
   edited passage (file:line, cut / rewritten).
 
 ## 7. Evidence
 
-- [ ] 7.1 Local: every test file touched, every test that reads a file
+- [x] 7.1 Local: every test file touched, every test that reads a file
   edited by 5.x or 6.x (find them with `git grep -l` for the file's
   name under `tests/`; known: the `tests/test_node22_*` files that parse
   `infra/env/README.md`, `tests/test_precip_overlay.py`,
@@ -157,10 +157,10 @@ changed in the report; the entropy hard gate ends at 0 failing.
   compares against `.entropy-baseline/latest.json` (if a comparison fails
   only because the baseline's counts are old, the test id and assertion
   are reported and the orchestrator rewrites the baseline).
-- [ ] 7.2 node-27: the touched test files in a detached worktree.
-- [ ] 7.3 Both hosts, read-only, after the merge: no installed `nhms*`
+- [x] 7.2 node-27: the touched test files in a detached worktree.
+- [x] 7.3 Both hosts, read-only, after the merge: no installed `nhms*`
   user unit references a deleted path (the issue's third check).
-- [ ] 7.4 Archive the change in the PR's last push; then, in the main
+- [x] 7.4 Archive the change in the PR's last push; then, in the main
   specs: the Purpose of `node22-env-hygiene` without the compose lane, the
   Purpose of `readonly-db-and-e2e-evidence` without the Docker evidence
   bundles, and the scenario "display env includes compute-only env" of
