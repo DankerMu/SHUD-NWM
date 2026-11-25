@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import copy
 import json
 import os
 import shutil
 import stat
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -53,6 +56,7 @@ __all__ = (
     "forecast_cycle_from_raw_manifest_readiness",
     "nfs_raw_manifest_readiness",
     "nfs_raw_manifest_readiness_from_env",
+    "nfs_raw_manifest_readiness_scope",
     "nfs_raw_manifest_source_object_identity_from_env",
     "nfs_raw_manifest_source_policy_from_env",
     "source_object_identity_from_raw_manifest_readiness",
@@ -66,11 +70,59 @@ class NfsRawManifestStagingError(RuntimeError):
     """Raised when node-22 cannot materialize node-27 NFS raw for compute."""
 
 
+# #3236: the environment variables ``nfs_raw_manifest_readiness_from_env`` reads;
+# all of them are part of the key of a remembered result.
+_READINESS_ENV_NAMES = (
+    NFS_RAW_MANIFEST_ENABLED_ENV,
+    NFS_RAW_MANIFEST_REQUIRED_ENV,
+    NFS_RAW_MANIFEST_ROOT_ENV,
+    "OBJECT_STORE_ROOT",
+    NFS_RAW_MANIFEST_PREFIX_ENV,
+    "OBJECT_STORE_PREFIX",
+)
+_READINESS_SCOPE: ContextVar[dict[tuple[Any, ...], dict[str, Any]] | None] = ContextVar(
+    "nfs_raw_manifest_readiness_scope", default=None
+)
+
+
+@contextmanager
+def nfs_raw_manifest_readiness_scope() -> Iterator[None]:
+    """Compute each source cycle's readiness at most once until the scope exits.
+
+    Inside the scope every caller gets its own deep copy of the remembered
+    result; a call that raises remembers nothing.  A nested scope starts empty
+    and the outer one is restored on exit.  Outside any scope nothing is
+    remembered.
+    """
+
+    token = _READINESS_SCOPE.set({})
+    try:
+        yield
+    finally:
+        _READINESS_SCOPE.reset(token)
+
+
 def nfs_raw_manifest_readiness_from_env(source_id: str, cycle_time: datetime) -> dict[str, Any] | None:
     enabled = _env_flag(NFS_RAW_MANIFEST_ENABLED_ENV)
     required = _env_flag(NFS_RAW_MANIFEST_REQUIRED_ENV)
     if not enabled and not required:
         return None
+    memo = _READINESS_SCOPE.get()
+    if memo is None:
+        return _nfs_raw_manifest_readiness_for_env(source_id, cycle_time, required=required)
+    key = (
+        normalize_source_id(source_id),
+        cycle_time,
+        tuple(os.getenv(name) for name in _READINESS_ENV_NAMES),
+    )
+    if key not in memo:
+        memo[key] = _nfs_raw_manifest_readiness_for_env(source_id, cycle_time, required=required)
+    return copy.deepcopy(memo[key])
+
+
+def _nfs_raw_manifest_readiness_for_env(
+    source_id: str, cycle_time: datetime, *, required: bool
+) -> dict[str, Any]:
     root = os.getenv(NFS_RAW_MANIFEST_ROOT_ENV) or os.getenv("OBJECT_STORE_ROOT")
     prefix = os.getenv(NFS_RAW_MANIFEST_PREFIX_ENV) or os.getenv("OBJECT_STORE_PREFIX") or "s3://nhms"
     if root in (None, ""):
