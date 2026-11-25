@@ -26,7 +26,6 @@ DEFAULT_JOB_TYPE_TEMPLATES = {
     "run_shud_analysis": "run_shud_analysis.sbatch",
     "parse_analysis_output": "parse_analysis_output.sbatch",
     "save_state_snapshot": "save_state_snapshot.sbatch",
-    "smoke": "smoke.sbatch",
     "hindcast": "hindcast.sbatch",
 }
 

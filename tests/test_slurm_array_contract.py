@@ -523,7 +523,7 @@ def test_single_submit_refusal_set_is_derived_from_the_production_array_template
 
 
 def test_deployment_job_type_template_override_only_widens_the_refusal_set() -> None:
-    narrowing = {**DEFAULT_JOB_TYPE_TEMPLATES, "save_state_snapshot_array": "smoke.sbatch"}
+    narrowing = {**DEFAULT_JOB_TYPE_TEMPLATES, "save_state_snapshot_array": "save_state_snapshot.sbatch"}
     widening = {**DEFAULT_JOB_TYPE_TEMPLATES, "custom_array": "run_shud_forecast_array.sbatch"}
 
     assert real_backend.array_capable_job_types(narrowing) == set(_PRODUCTION_ARRAY_JOB_TYPES)

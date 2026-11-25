@@ -154,7 +154,7 @@ Issue #363 did not modify QHH diagnostic scripts, mocked Playwright specs, or `.
 `D6` confirmed before #363 that `workers/sbatch_templates` contained legacy
 single-run templates, while `infra/sbatch` contains the canonical production
 template set including `publish_tiles.sbatch`, array templates, analysis
-templates, `hindcast.sbatch`, and `smoke.sbatch`.
+templates and `hindcast.sbatch` (a minimal smoke template was part of it until #3233).
 
 `D7` confirmed both the tile publisher production counterpart and display tile consumers:
 

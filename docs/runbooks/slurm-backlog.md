@@ -2,7 +2,10 @@
 
 ## Preconditions
 
-- Confirm the alert payload includes `nhms_slurm_queue_backlog_jobs`, partition, account, and run ID.
+- Confirm the alert comes from `nhms-monitor` and is one of:
+  `slurm_queue_backlog` (payload: `alert`, `severity`, `observed` = active job count, `threshold`, `runbook`), or
+  `slurm_monitor_unavailable` (the monitor could not read the queue; `observed` = its error, no `threshold`).
+- The payload names no partition, account or run.
 - Use a host with Slurm CLI access before running live inspection.
 
 ## Commands
@@ -19,4 +22,4 @@ sinfo -o '%P|%a|%l|%D|%t|%N'
 
 ## Residual Risks
 
-Queue recovery does not prove solver correctness. Final readiness still requires accepted Slurm evidence and live alert receipts.
+Queue recovery does not prove solver correctness.

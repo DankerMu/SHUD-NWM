@@ -3311,7 +3311,10 @@ def test_array_capable_job_type_rejected_from_single_submit_despite_template_ove
             backend="slurm",
             template_dir="infra/sbatch",
             resource_profiles_path=str(_write_resource_profiles(tmp_path)),
-            job_type_templates={**DEFAULT_JOB_TYPE_TEMPLATES, "save_state_snapshot_array": "smoke.sbatch"},
+            job_type_templates={
+                **DEFAULT_JOB_TYPE_TEMPLATES,
+                "save_state_snapshot_array": "save_state_snapshot.sbatch",
+            },
             workspace_dir=str(tmp_path / "workspace"),
         )
     )
@@ -3399,6 +3402,39 @@ def test_unsupported_legacy_job_type_rejected_before_submission(monkeypatch, tmp
 
     with pytest.raises(TemplateNotFoundError):
         gateway.submit_job(SubmitJobRequest(run_id="run_001", model_id="model_001", job_type="legacy_unsupported"))
+
+
+def test_retired_smoke_job_type_is_refused_by_the_default_mapping(monkeypatch, tmp_path):
+    """#3233 D2: ``smoke`` has no template any more; a manual submit gets TEMPLATE_NOT_FOUND.
+
+    The gateway is built on the shipped default mapping (no ``job_type_templates``
+    passed) and the production template directory, so the refusal comes from the
+    mapping itself, not from a test-local one.
+    """
+
+    gateway = RealSlurmGateway(
+        SlurmGatewaySettings(
+            backend="slurm",
+            template_dir="infra/sbatch",
+            resource_profiles_path=str(_write_resource_profiles(tmp_path)),
+            workspace_dir=str(tmp_path / "workspace"),
+        )
+    )
+    calls: list[object] = []
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="Submitted batch job 12345\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(TemplateNotFoundError) as exc_info:
+        gateway.submit_job(SubmitJobRequest(manifest=_production_manifest(tmp_path, "smoke")))
+
+    assert exc_info.value.code == "TEMPLATE_NOT_FOUND"
+    assert exc_info.value.status_code == 404
+    assert calls == []
 
 
 def test_sandboxed_environment_restricts_template_access(tmp_path):
@@ -5653,7 +5689,9 @@ def test_fetch_logs_unbound_record_after_restart_with_deleted_tree_reports_tree_
 def test_mock_gateway_logs_report_tree_present(tmp_path) -> None:
     del tmp_path
     gateway = MockSlurmGateway(SlurmGatewaySettings(backend="mock"))
-    submitted = gateway.submit_job(SubmitJobRequest(job_type="smoke", run_id="run_001", model_id="model_001"))
+    submitted = gateway.submit_job(
+        SubmitJobRequest(job_type="convert_canonical", run_id="run_001", model_id="model_001")
+    )
 
     response = gateway.fetch_logs(submitted.job_id)
 

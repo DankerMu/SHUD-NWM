@@ -449,8 +449,8 @@ def test_the_summary_tier_nests_the_admission_record_it_ran_after(tmp_path: Path
     }
 
 
-def test_a_summary_tier_submitted_pass_still_passes_the_readiness_reader(tmp_path: Path) -> None:
-    """#1905 1.4b: the summary tier keeps ``model_run_evidence`` verbatim."""
+def test_a_summary_tier_pass_keeps_model_run_evidence_verbatim(tmp_path: Path) -> None:
+    """#1905 1.4b: a pass compacted to the summary tier keeps ``model_run_evidence`` verbatim."""
 
     from tests.scheduler_pass_payload_helpers import _live_scheduler_payload
 

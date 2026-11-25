@@ -832,12 +832,11 @@ def test_coverage_scan_parameters_keep_their_text_semantics() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_hydro_map_plan_fixture_names_indexes_that_the_migration_chain_creates() -> None:
+def test_migration_chain_creates_the_indexes_the_river_read_path_rides() -> None:
     """The two indexes the switched river read path rides are created by the migration chain.
 
-    The plan fixture this test once cross-checked was deleted with its lane (#3221); the
-    migration-chain half stays: the key-ordered fact index and core.river_segment's
-    surrogate-key unique constraint index must both be derivable from ``db/migrations``.
+    The key-ordered fact index and core.river_segment's surrogate-key unique
+    constraint index must both be derivable from ``db/migrations``.
     """
     migrations = "\n".join(path.read_text(encoding="utf-8") for path in sorted(MIGRATIONS_DIR.glob("*.sql")))
 

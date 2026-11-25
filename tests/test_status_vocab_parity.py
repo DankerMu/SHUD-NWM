@@ -249,7 +249,6 @@ _SLURM_FAILURE = frozenset(
     {"FAILED", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY", "NODE_FAIL", "PREEMPTED", "BOOT_FAIL", "DEADLINE"}
 )
 _QC_VERDICTS = frozenset({"passed", "failed", "blocked"})
-_READINESS_ITEM = frozenset({"passed", "failed", "blocked", "not_executed", "release_blocked"})
 
 # (vocabulary name, pinned literal): the vocabulary object must equal the literal
 # and carry the immutable type of the literal (`frozenset` or ordered `tuple`).
@@ -290,7 +289,6 @@ _VOCABULARY: tuple[tuple[str, frozenset[str] | tuple[str, ...]], ...] = (
     ("SLURM_TERMINAL_SUCCESS", _SLURM_SUCCESS),
     ("SLURM_TERMINAL_FAILURE", _SLURM_FAILURE),
     ("QC_VERDICTS", _QC_VERDICTS),
-    ("READINESS_ITEM_STATUSES", _READINESS_ITEM),
 )
 
 # (vocabulary name, site module, site attribute, site type at f7be77f22, pinned
@@ -712,7 +710,7 @@ def test_normalize_qc_verdict_maps_known_spellings(spelling: str, verdict: str) 
         pytest.param(b"PASS", id="bytes"),
         pytest.param("Pass", id="mixed-case"),
         pytest.param(" PASS", id="padded"),
-        pytest.param("not_executed", id="readiness-only"),
+        pytest.param("not_executed", id="unknown-word"),
     ],
 )
 def test_normalize_qc_verdict_rejects_everything_else(value: object) -> None:
