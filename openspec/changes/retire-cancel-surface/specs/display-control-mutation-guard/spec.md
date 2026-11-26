@@ -35,7 +35,7 @@ In `display_readonly` mode, the retry endpoint SHALL return a stable manual-acti
 
 #### Scenario: The cancel path answers like any unregistered POST path
 - **WHEN** a caller posts to `/api/v1/runs/{run_id}/cancel` on an API running as `display_readonly`, `compute_control` or `dev_monolith`, with operator credentials, with viewer credentials and with none
-- **THEN** every answer equals the answer of the same request to an unregistered path under `/api/v1/`: HTTP `405` with `Allow` naming only `GET` and `HEAD`, because the one route that matches the path is the GET fallback that serves the single-page app
+- **THEN** every answer equals the answer of the same request to an unregistered path under `/api/v1/`: HTTP `405` with `Allow: GET` and the same body, because the one route that matches the path is the GET fallback that serves the single-page app
 - **AND** no answer is `200` or `409`, and none carries a manual-action body or names a cancelled job
 - **AND** no Slurm gateway is constructed, no `cancel_job` call is made and no pipeline, hydro, met or forecast-cycle state is written.
 

@@ -492,15 +492,10 @@ marker 车道：它在 cycle 写锁内写 `manual_repair_requested` marker，不
    run 的工作目录在 `squeue` / `sacct` 中查找。找到在跑的作业时，**等它结束**，不要动这条行，再按其终态处理；
    没法证明不存在时，同样停下来上报，不要猜。
 2. **证明 Slurm 侧没有作业后**：
-   - **DB 车道**：唯一的 API 出口是同一 DB 环境上的 `POST /api/v1/runs/{run_id}/cancel`。它对 `slurm_job_id`
-     为空的 active 行跳过 gateway，直接把行改成 `cancelled`，active 判定随之放行。**副作用**：
-     - 没有 cancellation gap 时，cancel 还会把该 run 的 `hydro.hydro_run` 置为 `cancelled`，并把第一条带 `cycle_id`
-       的 active 行所属的 `met.forecast_cycle` 置为 `cancelled`（两者已是终态时保留原状），并写 `cancel` 事件；
-     - 同一 run 其他带 `slurm_job_id` 的 active 行会被真实 `scancel`；
-     - 在上面那个"sbatch 成功、未记账"子窗口里，cancel 只改本地状态，**不会**取消 Slurm 上的真实作业。如果
-       第 1 步没有排除这个子窗口，cancel 会把该作业留成孤儿。
-     这是带副作用的 workaround，不是自动过期；原先那条从未接入生产的 stale-pending 过期路径已随 #3157 PR 2
-     删除，仓内没有可替代它的过期入口。
+   - **DB 车道**：没有 API 出口。原先能把这种行改成 `cancelled` 的 `POST /api/v1/runs/{run_id}/cancel` 已随 #3394
+     退役（生产上本来也没有进程能提供它：display API 只读，计算侧的 API 单元从未启用）；那条从未接入生产的
+     stale-pending 过期路径已随 #3157 PR 2 删除。仓内没有任何工具能清理这种行，手改生产库不是被授权的路径：
+     保留证据并上报。
    - **文件车道**：本文没有验证过任何 operator CLI 能清理这种行（`demote-reserved-job` / `bind-reserved-job`
      针对的是 accepted-submit reservation，不是手动重试的 `pending` 行）。手改 journal、抹掉 durable 证据是禁止的；
      保留证据并上报。

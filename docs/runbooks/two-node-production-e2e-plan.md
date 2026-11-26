@@ -749,7 +749,7 @@ Retry/cancel 属于计算控制面能力。MVP 阶段 27 不触发 retry/cancel�
 计算控制面测试方式：
 
 1. 22 制造一个受控失败 job。
-2. 22 或授权运维入口触发 retry/cancel；如果这里只能看到无授权 / 非运维授权请求，它们应先作为 auth rejection evidence 单独记录。
+2. 22 或授权运维入口触发 retry（run 级 cancel 路由已随 #3394 退役；取消由调度器或 Slurm gateway 完成）；如果这里只能看到无授权 / 非运维授权请求，它们应先作为 auth rejection evidence 单独记录。
 3. 计算侧产生真实 Gateway/Slurm receipt。
 4. 22 写入 pipeline/job/stage 状态和 published log。
 
@@ -757,13 +757,13 @@ Retry/cancel 属于计算控制面能力。MVP 阶段 27 不触发 retry/cancel�
 
 1. 27 `/ops` 展示失败、日志、error code 和人工处理建议。
 2. 27 能复制诊断信息，诊断信息包含 `run_id/source/cycle_time/job_id/slurm_job_id/log_uri/error_code`。
-3. 27 的 retry/cancel API 在无 auth 或非运维 auth 时先返回 auth rejection；只有带真实 production operator auth header/token 时，才验证 `CONTROL_PLANE_MANUAL_ACTION_REQUIRED`。如果拿不到真实 auth 路径，这个 lane 记为 `BLOCKED`。
+3. 27 的 retry API 在无 auth 或非运维 auth 时先返回 auth rejection；只有带真实 production operator auth header/token 时，才验证 `CONTROL_PLANE_MANUAL_ACTION_REQUIRED`。如果拿不到真实 auth 路径，这个 lane 记为 `BLOCKED`。
 4. 22 经 marker 车道完成 retry（`scripts/node22_manual_retry_failed_runs.py` → `record_manual_repair`，scheduler 铸出新 job；API retry 自 #3157 起在所有角色上只返回 409 `CONTROL_PLANE_MANUAL_ACTION_REQUIRED`）或完成 cancel 后，27 通过刷新只读查询展示新 job、最终状态和日志。
 
 通过条件：
 
 - 27 不暴露真实 retry/cancel UI 操作；operator/sys_admin 也只能看到诊断和处理建议。
-- 27 上 `POST /api/v1/runs/{run_id}/retry` 和 `POST /api/v1/runs/{run_id}/cancel` 在无授权时返回 401/403 或 `AUTH_REQUIRED` / `NOT_AUTHORIZED` 等稳定拒绝错误；授权 manual-action lane 返回 `CONTROL_PLANE_MANUAL_ACTION_REQUIRED` 或等价稳定错误。
+- 27 上 `POST /api/v1/runs/{run_id}/cancel` 不是路由，任何凭据下都返回 405（#3394）；`POST /api/v1/runs/{run_id}/retry` 在无授权时返回 401/403 或 `AUTH_REQUIRED` / `NOT_AUTHORIZED` 等稳定拒绝错误；授权 manual-action lane 返回 `CONTROL_PLANE_MANUAL_ACTION_REQUIRED` 或等价稳定错误。
 - 27 直接 API 调用不会创建新 job，不更新 run，不调用 Gateway。
 - 22 侧经 marker 车道记录的 retry 由 scheduler 铸出新 job id 或 Gateway receipt，并由 27 只读展示；22 侧 API retry 只返回 409 `CONTROL_PLANE_MANUAL_ACTION_REQUIRED`，不产生 job。
 - 22 侧 cancel 不得对不存在或已终态 job 误报成功，并由 27 只读展示最终状态。

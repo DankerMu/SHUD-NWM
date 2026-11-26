@@ -114,9 +114,13 @@ corrected.
 
 The issue's verification line says "404 in every role". The app cannot answer that: `apps/api/startup_wiring.py`
 registers a GET fallback for every path (it serves the single-page app), so a POST to any unregistered path is a
-method mismatch and Starlette answers 405 with `Allow: GET, HEAD`. Nothing answers earlier: the pre-body guard of
-`apps/api/main.py` does not cover `/runs/…`, and with the route gone no RBAC dependency is left on the path. This is
-read from the code by the fixture reviewer, not yet observed.
+method mismatch and Starlette answers 405 with `Allow: GET` (observed; the fallback is registered for GET only, so
+HEAD is not offered either). Nothing answers earlier: the pre-body guard of
+`apps/api/main.py` does not cover `/runs/…`, and with the route gone no RBAC dependency is left on the path. The
+fixture reviewer read this from the code and expected `Allow: GET, HEAD`; the implementer observed the nine
+combinations on the real app with the route removed: 405 everywhere, status, `Allow` and body identical to an
+unregistered POST path, and `Allow` is `GET` alone. Before the deletion the same probe answered 500/403/401 in the
+compute roles and 409/403/401 in the display role.
 
 The requirement therefore says: in the three service roles, with operator credentials, viewer credentials and none,
 the retired path answers exactly as an unregistered POST path under `/api/v1/` does, and that answer is 405. The test

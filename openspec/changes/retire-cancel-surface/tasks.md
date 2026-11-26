@@ -34,7 +34,7 @@
 - [ ] 3.4 `openapi/nhms.v1.yaml` regenerated and `apps/frontend/src/api/types.ts` regenerated (`generate:api`);
       `check:api-types` and the OpenAPI drift test pass.
 - [ ] 3.5 The D5 test: in the three service roles with operator, viewer and no credentials the path answers 405 with
-      `Allow` naming only `GET` and `HEAD` (compared as a set of methods), equal to the answer of an unregistered POST path under `/api/v1/` in the same
+      `Allow` equal to `{GET}` (compared as a set of methods), equal in status, `Allow` and body to the answer of an unregistered POST path under `/api/v1/` in the same
       combination, with no gateway constructed and no state written. Red run: the route restored in a scratch edit →
       the test goes red.
 
