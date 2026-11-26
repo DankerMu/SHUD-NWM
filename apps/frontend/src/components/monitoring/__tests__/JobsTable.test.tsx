@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor, within } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -10,7 +10,6 @@ import { type PipelineJob, useMonitoringStore } from '@/stores/monitoring'
 const mocks = vi.hoisted(() => ({
   authState: {
     role: 'viewer' as AuthRole,
-    canUseActions: false,
   },
   getMock: vi.fn(),
   postMock: vi.fn(),
@@ -22,8 +21,6 @@ vi.mock('@/stores/auth', async (importOriginal) => {
     ...actual,
     useAuthStore: (selector: (state: { role: AuthRole; setRole: (role: AuthRole) => void }) => unknown) =>
       selector({ role: mocks.authState.role, setRole: vi.fn() }),
-    canUseDevRoleActions: (role: AuthRole) =>
-      mocks.authState.canUseActions && ['operator', 'model_admin', 'sys_admin'].includes(role),
   }
 })
 
@@ -111,20 +108,9 @@ function success<T>(data: T) {
   return { data: { status: 'success', data }, error: undefined }
 }
 
-function deferred<T>() {
-  let resolve!: (value: T) => void
-  let reject!: (reason?: unknown) => void
-  const promise = new Promise<T>((promiseResolve, promiseReject) => {
-    resolve = promiseResolve
-    reject = promiseReject
-  })
-  return { promise, resolve, reject }
-}
-
 describe('JobsTable RBAC action boundary', () => {
   beforeEach(() => {
     mocks.authState.role = 'viewer'
-    mocks.authState.canUseActions = false
     mocks.getMock.mockReset()
     mocks.getMock.mockResolvedValue(success({ job_id: 'job-failed', log_uri: 's3://logs/job-failed.log', content: 'current log' }))
     mocks.postMock.mockReset()
@@ -139,79 +125,36 @@ describe('JobsTable RBAC action boundary', () => {
     useToast.setState({ toasts: [] })
   })
 
-  it('does not show cancel actions for a configured production operator without dev override', () => {
-    mocks.authState.role = 'operator'
-    mocks.authState.canUseActions = false
-
-    render(<JobsTable />)
-
-    expect(screen.getByRole('row', { name: /run-failed/ })).toBeVisible()
-    expect(screen.queryByRole('button', { name: /重试/ })).not.toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: /取消/ })).not.toBeInTheDocument()
-  })
-
-  it('does not show cancel actions for analyst even when dev override is enabled', () => {
-    mocks.authState.role = 'analyst'
-    mocks.authState.canUseActions = true
-
-    render(<JobsTable />)
-
-    expect(screen.queryByRole('button', { name: /重试/ })).not.toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: /取消/ })).not.toBeInTheDocument()
-  })
-
-  it.each(['operator', 'model_admin', 'sys_admin'] as const)(
-    'shows dev override %s cancel/log actions and sends the compatible role header',
+  it.each(['viewer', 'analyst', 'operator', 'model_admin', 'sys_admin'] as const)(
+    'renders no run-action control and sends no run request for %s (#3179, #3394)',
     async (role) => {
       mocks.authState.role = role
-      mocks.authState.canUseActions = true
+      useMonitoringStore.setState({ jobs: [failedJob, runningJob, queuedJob], jobTotal: 3 })
 
       render(<JobsTable />)
       await waitFor(() => expect(useMonitoringStore.getState().fetchJobs).toHaveBeenCalledTimes(1))
 
-      const row = screen.getByRole('row', { name: /run-running/ })
-      await userEvent.click(within(row).getByRole('button', { name: /取消/ }))
-      await waitFor(() => expect(mocks.postMock).toHaveBeenCalledTimes(1))
-      await userEvent.click(within(screen.getByRole('row', { name: /run-failed/ })).getByRole('button', { name: /查看日志/ }))
-
-      expect(await screen.findByRole('dialog')).toHaveTextContent('作业日志 job-failed')
+      for (const runId of ['run-failed', 'run-running', 'run-queued']) {
+        const row = screen.getByRole('row', { name: new RegExp(runId) })
+        expect(within(row).getByRole('button', { name: /查看日志/ })).toBeVisible()
+        expect(within(row).queryByRole('button', { name: /重试/ })).not.toBeInTheDocument()
+        expect(within(row).queryByRole('button', { name: /取消/ })).not.toBeInTheDocument()
+        for (const button of within(row).getAllByRole('button')) {
+          await userEvent.click(button)
+          await userEvent.keyboard('{Escape}')
+        }
+      }
       expect(mocks.getMock).toHaveBeenCalledWith('/api/v1/jobs/{job_id}/logs', {
         params: { path: { job_id: 'job-failed' } },
       })
-      expect(mocks.postMock).toHaveBeenCalledWith(
-        '/api/v1/runs/{run_id}/cancel',
-        expect.objectContaining({
-          params: { path: { run_id: 'run-running' } },
-          headers: { 'X-User-Role': role },
-        }),
-      )
+      expect(mocks.postMock).not.toHaveBeenCalled()
     },
   )
-
-  it('shows the dev override operator cancel action with the compatible role header', async () => {
-    mocks.authState.role = 'operator'
-    mocks.authState.canUseActions = true
-
-    render(<JobsTable />)
-    await waitFor(() => expect(useMonitoringStore.getState().fetchJobs).toHaveBeenCalledTimes(1))
-
-    await userEvent.click(within(screen.getByRole('row', { name: /run-running/ })).getByRole('button', { name: /取消/ }))
-
-    await waitFor(() => expect(mocks.postMock).toHaveBeenCalledTimes(1))
-    expect(mocks.postMock).toHaveBeenCalledWith(
-      '/api/v1/runs/{run_id}/cancel',
-      expect.objectContaining({
-        params: { path: { run_id: 'run-running' } },
-        headers: { 'X-User-Role': 'operator' },
-      }),
-    )
-  })
 
   it.each(['operator', 'model_admin', 'sys_admin'] as const)(
     'shows no retry button for any job status to dev override %s (#3179)',
     (role) => {
       mocks.authState.role = role
-      mocks.authState.canUseActions = true
       const statuses = ['failed', 'submission_failed', 'partially_failed', 'permanently_failed', 'cancelled', 'running'] as const
       useMonitoringStore.setState({
         jobs: [
@@ -233,7 +176,6 @@ describe('JobsTable RBAC action boundary', () => {
 
   it('gives an authorized operator no way to post a retry for a failed run (#3179)', async () => {
     mocks.authState.role = 'operator'
-    mocks.authState.canUseActions = true
     useMonitoringStore.setState({
       jobs: [failedJob],
       jobTotal: 1,
@@ -252,142 +194,8 @@ describe('JobsTable RBAC action boundary', () => {
     expect(mocks.postMock).not.toHaveBeenCalled()
   })
 
-  it('keeps cancel and log controls independent of each other', () => {
-    mocks.authState.role = 'operator'
-    mocks.authState.canUseActions = true
-
-    const { unmount } = render(<JobsTable cancelControlsEnabled={false} />)
-
-    expect(within(screen.getByRole('row', { name: /run-running/ })).getByRole('button', { name: /查看日志/ })).toBeVisible()
-    expect(within(screen.getByRole('row', { name: /run-running/ })).queryByRole('button', { name: /取消/ })).not.toBeInTheDocument()
-    unmount()
-
-    render(<JobsTable logControlsEnabled={false} />)
-
-    expect(within(screen.getByRole('row', { name: /run-running/ })).getByRole('button', { name: /取消/ })).toBeVisible()
-    expect(within(screen.getByRole('row', { name: /run-running/ })).queryByRole('button', { name: /查看日志/ })).not.toBeInTheDocument()
-  })
-
-  it('posts one cancel while pending and suppresses duplicate clicks until refresh completes', async () => {
-    mocks.authState.role = 'operator'
-    mocks.authState.canUseActions = true
-    const cancelRequest = deferred<unknown>()
-    const fetchAll = vi.fn().mockResolvedValue(undefined)
-    const fetchJobs = vi.fn().mockResolvedValue(undefined)
-    mocks.postMock.mockReturnValueOnce(cancelRequest.promise)
-    useMonitoringStore.setState({
-      jobs: [runningJob],
-      jobTotal: 1,
-      fetchAll,
-      fetchJobs,
-    })
-
-    render(<JobsTable />)
-    await waitFor(() => expect(fetchJobs).toHaveBeenCalledTimes(1))
-    fetchJobs.mockClear()
-
-    const cancelButton = within(screen.getByRole('row', { name: /run-running/ })).getByRole('button', { name: /取消/ })
-    // Two clicks in one batch: the second lands before React re-renders the
-    // button disabled, so only the in-flight ref can suppress it.
-    act(() => {
-      cancelButton.click()
-      cancelButton.click()
-    })
-    await waitFor(() => expect(mocks.postMock).toHaveBeenCalledTimes(1))
-    expect(cancelButton).toBeDisabled()
-
-    await userEvent.click(cancelButton)
-    expect(mocks.postMock).toHaveBeenCalledTimes(1)
-    expect(fetchAll).not.toHaveBeenCalled()
-    expect(fetchJobs).not.toHaveBeenCalled()
-
-    cancelRequest.resolve(success({ run_id: 'run-running' }))
-    await waitFor(() => expect(fetchAll).toHaveBeenCalledTimes(1))
-    expect(fetchJobs).toHaveBeenCalledTimes(1)
-    await waitFor(() => expect(cancelButton).not.toBeDisabled())
-    expect(mocks.postMock).toHaveBeenCalledTimes(1)
-  })
-
-  it('refreshes status, stages, and jobs for the selected source/cycle after cancel success', async () => {
-    mocks.authState.role = 'operator'
-    mocks.authState.canUseActions = true
-    const events: string[] = []
-    const fetchAll = vi.fn().mockImplementation(async () => {
-      const { source, cycleTime } = useMonitoringStore.getState()
-      events.push(`all:${source}:${cycleTime}`)
-    })
-    const fetchJobs = vi.fn().mockImplementation(async () => {
-      const { source, cycleTime } = useMonitoringStore.getState()
-      events.push(`jobs:${source}:${cycleTime}`)
-    })
-    mocks.postMock.mockImplementationOnce(async () => {
-      events.push('post:run-running')
-      return success({ run_id: 'run-running' })
-    })
-    useMonitoringStore.setState({
-      source: 'IFS',
-      cycleTime: '2026-05-18T00:00:00.000Z',
-      jobs: [runningJob],
-      jobTotal: 1,
-      fetchAll,
-      fetchJobs,
-    })
-
-    render(<JobsTable autoFetch={false} />)
-
-    await userEvent.click(within(screen.getByRole('row', { name: /run-running/ })).getByRole('button', { name: /取消/ }))
-
-    await waitFor(() =>
-      expect(events).toEqual([
-        'post:run-running',
-        'all:IFS:2026-05-18T00:00:00.000Z',
-        'jobs:IFS:2026-05-18T00:00:00.000Z',
-      ]),
-    )
-  })
-
-  it('refreshes the current selected source/cycle if selection changes before cancel settles', async () => {
-    mocks.authState.role = 'operator'
-    mocks.authState.canUseActions = true
-    const cancelRequest = deferred<unknown>()
-    const refreshContexts: string[] = []
-    const fetchAll = vi.fn().mockImplementation(async () => {
-      const { source, cycleTime } = useMonitoringStore.getState()
-      refreshContexts.push(`all:${source}:${cycleTime}`)
-    })
-    const fetchJobs = vi.fn().mockImplementation(async () => {
-      const { source, cycleTime } = useMonitoringStore.getState()
-      refreshContexts.push(`jobs:${source}:${cycleTime}`)
-    })
-    mocks.postMock.mockReturnValueOnce(cancelRequest.promise)
-    useMonitoringStore.setState({
-      source: 'GFS',
-      cycleTime: '2026-05-18T00:00:00.000Z',
-      jobs: [runningJob],
-      jobTotal: 1,
-      fetchAll,
-      fetchJobs,
-    })
-
-    render(<JobsTable autoFetch={false} />)
-
-    await userEvent.click(within(screen.getByRole('row', { name: /run-running/ })).getByRole('button', { name: /取消/ }))
-    await waitFor(() => expect(mocks.postMock).toHaveBeenCalledTimes(1))
-    useMonitoringStore.getState().setSource('IFS')
-    useMonitoringStore.getState().setCycleTime('2026-05-19T06:00:00.000Z')
-
-    cancelRequest.resolve(success({ run_id: 'run-running' }))
-
-    await waitFor(() =>
-      expect(refreshContexts).toEqual([
-        'all:IFS:2026-05-19T06:00:00.000Z',
-        'jobs:IFS:2026-05-19T06:00:00.000Z',
-      ]),
-    )
-  })
-
   it('renders formal pipeline job fields from the backend contract', () => {
-    render(<JobsTable actionsEnabled={false} />)
+    render(<JobsTable />)
 
     expect(screen.getByRole('columnheader', { name: 'job_id' })).toBeInTheDocument()
     expect(screen.getByRole('columnheader', { name: 'run_id' })).toBeInTheDocument()
@@ -413,7 +221,7 @@ describe('JobsTable RBAC action boundary', () => {
   })
 
   it('can render log availability without opening the #212 log modal surface', () => {
-    render(<JobsTable actionsEnabled={false} logControlsEnabled={false} />)
+    render(<JobsTable logControlsEnabled={false} />)
 
     expect(screen.getAllByText('available')).toHaveLength(2)
     expect(screen.queryByRole('button', { name: /查看日志/ })).not.toBeInTheDocument()
@@ -425,7 +233,6 @@ describe('JobsTable RBAC action boundary', () => {
       <JobsTable
         autoFetch={false}
         diagnosticsEnabled
-        cancelControlsEnabled={false}
       />,
     )
 
@@ -437,7 +244,6 @@ describe('JobsTable RBAC action boundary', () => {
         autoFetch={false}
         diagnosticsDisplayReadonly
         diagnosticsEnabled
-        cancelControlsEnabled={false}
       />,
     )
 
@@ -458,7 +264,6 @@ describe('JobsTable RBAC action boundary', () => {
       <JobsTable
         autoFetch={false}
         diagnosticsEnabled
-        cancelControlsEnabled={false}
         strictIdentity={{
           source: 'GFS',
           cycleTime: '2026-05-09T00:00:00.000Z',
@@ -536,156 +341,10 @@ describe('JobsTable RBAC action boundary', () => {
       jobsError: 'jobs unsupported for selected context',
     })
 
-    render(<JobsTable actionsEnabled={false} />)
+    render(<JobsTable />)
 
     expect(screen.queryByRole('row', { name: /run-failed/ })).not.toBeInTheDocument()
     expect(screen.getByText(/当前 source\/cycle 的作业不可用：jobs unsupported for selected context/)).toBeInTheDocument()
-  })
-
-  it('allows an operator with dev actions to cancel queued jobs', async () => {
-    mocks.authState.role = 'operator'
-    mocks.authState.canUseActions = true
-    useMonitoringStore.setState({
-      jobs: [queuedJob],
-      jobTotal: 1,
-    })
-
-    render(<JobsTable />)
-    await waitFor(() => expect(useMonitoringStore.getState().fetchJobs).toHaveBeenCalledTimes(1))
-
-    const queuedRow = screen.getByRole('row', { name: /run-queued/ })
-    expect(within(queuedRow).getByRole('button', { name: /取消/ })).toBeVisible()
-    expect(within(queuedRow).queryByRole('button', { name: /重试/ })).not.toBeInTheDocument()
-
-    await userEvent.click(within(queuedRow).getByRole('button', { name: /取消/ }))
-
-    await waitFor(() => expect(mocks.postMock).toHaveBeenCalledTimes(1))
-    expect(mocks.postMock).toHaveBeenCalledWith(
-      '/api/v1/runs/{run_id}/cancel',
-      expect.objectContaining({
-        params: { path: { run_id: 'run-queued' } },
-        headers: { 'X-User-Role': 'operator' },
-      }),
-    )
-  })
-
-  it('renders backend forbidden action failures and refreshes monitoring state without success toast', async () => {
-    mocks.authState.role = 'operator'
-    mocks.authState.canUseActions = true
-    mocks.postMock.mockResolvedValueOnce({
-      data: undefined,
-      error: { error: { code: 'RBAC_FORBIDDEN', message: 'Actor roles are not authorized.' } },
-    })
-
-    render(<JobsTable />)
-
-    await userEvent.click(within(screen.getByRole('row', { name: /run-running/ })).getByRole('button', { name: /取消/ }))
-
-    await waitFor(() =>
-      expect(useToast.getState().toasts.at(-1)).toMatchObject({
-        title: '取消失败',
-        description: 'Actor roles are not authorized.',
-        variant: 'destructive',
-      }),
-    )
-    expect(useToast.getState().toasts).not.toContainEqual(expect.objectContaining({ title: '取消请求已提交' }))
-    expect(useMonitoringStore.getState().fetchAll).toHaveBeenCalledTimes(1)
-    expect(useMonitoringStore.getState().fetchJobs).toHaveBeenCalledTimes(2)
-  })
-
-  it('shows cancel success toast and clears pending state after scoped refresh', async () => {
-    mocks.authState.role = 'operator'
-    mocks.authState.canUseActions = true
-    const cancelRequest = deferred<unknown>()
-    const fetchAll = vi.fn().mockResolvedValue(undefined)
-    const fetchJobs = vi.fn().mockResolvedValue(undefined)
-    mocks.postMock.mockReturnValueOnce(cancelRequest.promise)
-    useMonitoringStore.setState({
-      jobs: [runningJob],
-      jobTotal: 1,
-      fetchAll,
-      fetchJobs,
-    })
-
-    render(<JobsTable autoFetch={false} />)
-
-    const cancelButton = within(screen.getByRole('row', { name: /run-running/ })).getByRole('button', { name: /取消/ })
-    await userEvent.click(cancelButton)
-    await waitFor(() => expect(cancelButton).toBeDisabled())
-
-    cancelRequest.resolve(success({ run_id: 'run-running' }))
-
-    await waitFor(() => expect(useToast.getState().toasts.at(-1)).toMatchObject({ title: '取消请求已提交' }))
-    expect(fetchAll).toHaveBeenCalledTimes(1)
-    expect(fetchJobs).toHaveBeenCalledTimes(1)
-    await waitFor(() => expect(cancelButton).not.toBeDisabled())
-  })
-
-  it('shows cancel network failures, refreshes, and clears pending state', async () => {
-    mocks.authState.role = 'operator'
-    mocks.authState.canUseActions = true
-    const fetchAll = vi.fn().mockResolvedValue(undefined)
-    const fetchJobs = vi.fn().mockResolvedValue(undefined)
-    mocks.postMock.mockRejectedValueOnce(new Error('network down'))
-    useMonitoringStore.setState({
-      jobs: [runningJob],
-      jobTotal: 1,
-      fetchAll,
-      fetchJobs,
-    })
-
-    render(<JobsTable autoFetch={false} />)
-
-    const cancelButton = within(screen.getByRole('row', { name: /run-running/ })).getByRole('button', { name: /取消/ })
-    await userEvent.click(cancelButton)
-
-    await waitFor(() =>
-      expect(useToast.getState().toasts.at(-1)).toMatchObject({
-        title: '取消失败',
-        description: 'network down',
-        variant: 'destructive',
-      }),
-    )
-    expect(useToast.getState().toasts).not.toContainEqual(expect.objectContaining({ title: '取消请求已提交' }))
-    expect(fetchAll).toHaveBeenCalledTimes(1)
-    expect(fetchJobs).toHaveBeenCalledTimes(1)
-    await waitFor(() => expect(cancelButton).not.toBeDisabled())
-  })
-
-  it('refreshes monitoring state after terminal cancel failures', async () => {
-    mocks.authState.role = 'operator'
-    mocks.authState.canUseActions = true
-    const fetchAll = vi.fn().mockResolvedValue(undefined)
-    const fetchJobs = vi.fn().mockResolvedValue(undefined)
-    mocks.postMock.mockResolvedValueOnce({
-      data: undefined,
-      error: {
-        error: {
-          code: 'CONTROL_PLANE_MANUAL_ACTION_REQUIRED',
-          message: 'Control-plane mutation is unavailable from a display_readonly API node.',
-        },
-      },
-    })
-    useMonitoringStore.setState({
-      jobs: [runningJob],
-      jobTotal: 1,
-      fetchAll,
-      fetchJobs,
-    })
-
-    render(<JobsTable autoFetch={false} />)
-
-    await userEvent.click(within(screen.getByRole('row', { name: /run-running/ })).getByRole('button', { name: /取消/ }))
-
-    await waitFor(() =>
-      expect(useToast.getState().toasts.at(-1)).toMatchObject({
-        title: '取消失败',
-        description: 'Control-plane mutation is unavailable from a display_readonly API node.',
-        variant: 'destructive',
-      }),
-    )
-    expect(fetchAll).toHaveBeenCalledTimes(1)
-    expect(fetchJobs).toHaveBeenCalledTimes(1)
   })
 
   it('closes an open log modal when the visible selected-context jobs no longer contain that job', async () => {

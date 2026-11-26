@@ -736,7 +736,7 @@ def _passing_manual_actions(run_id: str) -> list[dict[str, Any]]:
             "write_dependency_constructed": False,
             "write_executed": False,
         }
-        for action in ("retry", "cancel")
+        for action in ("retry",)
     ]
 
 

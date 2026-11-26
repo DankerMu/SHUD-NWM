@@ -303,3 +303,36 @@ def test_full_app_scheduler_bearer_allows_mutation_without_business_access(monke
     assert audit_actor != "slurm-scheduler", (
         f"scheduler bearer authenticated a business mutation: {audit_actor}"
     )
+
+
+def test_full_app_bare_dev_token_acts_as_operator_on_slurm_mutations(monkeypatch) -> None:
+    """#3394: on the compute mount the dev token without ``X-User-Role`` acts as ``operator``.
+
+    Submit and cancel admit ``operator`` and succeed over HTTP; the
+    ``sys_admin``-only reset refuses the same credential, and that refusal's
+    policy decision names the defaulted role and records that no role was sent.
+    """
+    app = _full_compute_app(allow_internal_reset=True)
+    client = _full_compute_client(
+        monkeypatch,
+        app,
+        SLURM_GATEWAY_SERVICE_TOKEN=None,
+        NHMS_DEV_AUTH_TOKEN="dev-token",
+    )
+    dev_token = {"Authorization": "Bearer dev-token"}
+
+    seeded = client.post("/api/v1/slurm/jobs", json=SUBMIT_BODY, headers=dev_token)
+    assert seeded.status_code == 201, seeded.text
+    job_id = seeded.json()["job_id"]
+    cancelled = client.delete(f"/api/v1/slurm/jobs/{job_id}", headers=dev_token)
+    assert cancelled.status_code == 200, cancelled.text
+    assert cancelled.json()["status"] == "cancelled"
+
+    refused = client.post("/api/v1/slurm/internal/reset", headers=dev_token)
+    assert refused.status_code == 403, refused.text
+    assert refused.json()["error"]["code"] == RBAC_FORBIDDEN
+    decision = refused.json()["error"]["details"]["policy_decision"]
+    assert decision["action_id"] == "slurm.reset_registry"
+    assert decision["roles"] == ["operator"]
+    assert decision["role_mapping_result"]["raw_roles_input_present"] is False
+    assert [job["job_id"] for job in client.get("/api/v1/slurm/jobs").json()] == [job_id]

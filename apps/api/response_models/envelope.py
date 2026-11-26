@@ -20,7 +20,7 @@ class OkEnvelope(OpenModel):
     """``{request_id, status, data}`` as built by each route module's ``_ok``.
 
     Subclasses declare ``data``. Conditional siblings (``auth_policy_decisions``
-    from ``models._ok`` / ``pipeline._ok``) pass through as extras, so they stay
+    from ``models._ok``) pass through as extras, so they stay
     absent when the handler omits them. The published 200 body is
     ``allOf[SuccessEnvelope, {data}]`` (``openapi_patching_response_models``);
     these envelope classes never reach the published components.

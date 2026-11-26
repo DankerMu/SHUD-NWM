@@ -80,7 +80,6 @@ export function MonitoringPage({ mode = 'monitoring' }: MonitoringPageProps) {
   const runtimeConfigUnavailableReason = runtimeConfigError ? `runtime config 不可用：${runtimeConfigError}` : null
   const isRuntimeConfigReady = Boolean(runtimeConfig) && !runtimeConfigError
   const isDisplayReadonly = isDisplayReadonlyRuntimeConfig(runtimeConfig)
-  const controlMutationsEnabled = Boolean(runtimeConfig?.control_mutations_enabled) && !isDisplayReadonly
   const queueReadonlyUnavailable = isDisplayReadonly || runtimeConfig?.queue_depth_mode === 'display_readonly_unavailable'
   const isRouteContextReady = useMemo(() => {
     if (!isOpsMode) return true
@@ -274,12 +273,6 @@ export function MonitoringPage({ mode = 'monitoring' }: MonitoringPageProps) {
         </div>
       ) : null}
 
-      {isDisplayReadonly ? (
-        <div className="rounded-md border border-border bg-background p-3 text-sm text-muted" role="status">
-          display_readonly：当前前端从后端 runtime config 判定为只读展示节点，重试、取消和 Slurm 控制请求已禁用；需要恢复时在 22 compute-control 节点按恢复 runbook 处理。
-        </div>
-      ) : null}
-
       {/* 四个面板各一道渲染期错误边界（#2347 D4）：一个面板崩溃不拖垮其余三个；换 source/cycle 即复位。 */}
       <RegionErrorBoundary region="概要" testId="region-error-summary" resetKeys={regionResetKeys}>
         <SummaryBar
@@ -314,7 +307,6 @@ export function MonitoringPage({ mode = 'monitoring' }: MonitoringPageProps) {
         <RegionErrorBoundary region="作业" testId="region-error-jobs" resetKeys={regionResetKeys}>
           <JobsTable
             autoFetch={isOperationalDataReady}
-            cancelControlsEnabled={!isOpsMode && controlMutationsEnabled && isOperationalDataReady}
             clearOnFailure={isOpsMode}
             diagnosticsDisplayReadonly={isDisplayReadonly}
             diagnosticsEnabled={isOpsMode}

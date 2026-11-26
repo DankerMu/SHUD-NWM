@@ -586,7 +586,7 @@ owner-only `0600` secret source，不记录原始 DSN、文件内容或 `source`
   当前 database 的 `CREATE`，以及当前登录可继承或可 `SET ROLE` 到的 reachable role 的危险 role
   attribute 和上述对象权限。
 - 任何 catalog 可变权限、reachable writer role、DML/DDL 成功执行、current database `CREATE`，或 audited schema 内任一 sequence 可变权限都记为 `FAIL`。一旦 catalog 盘点发现任一可变能力，整个矩阵不得执行任何 DML/DDL probe，只能写入未执行的 catalog evidence；发现 sequence 可变权限时也不得执行 `nextval`、`setval`、DML 或 DDL。
-- retry/cancel 的拒绝证据必须先分出无授权 / 非运维授权的 auth rejection lane；只有拿到真实 production auth
+- retry 的拒绝证据必须先分出无授权 / 非运维授权的 auth rejection lane；只有拿到真实 production auth
   token/header 时，授权 manual-action lane 才能继续验证 `CONTROL_PLANE_MANUAL_ACTION_REQUIRED`。如果拿不到
   真实 auth 路径，本 lane 记为 `BLOCKED`，且仍然不能构造 DB write 或 Gateway 依赖。
 - #239 final manual-ops lane 的 PASS 证据必须是 `nhms.two_node_e2e.manual_ops.v1` JSON，记录
@@ -595,7 +595,7 @@ owner-only `0600` secret source，不记录原始 DSN、文件内容或 `source`
   source、当前 evidence bundle、redaction 状态，并在 artifact path/sha256 存在时可由文件 hash 复验。只写
   `production_operator_auth_evidence: true`、`write_executed: false` 这类布尔断言会被最终聚合器判为
   `BLOCKED`。
-- `scripts/validate_readonly_db_boundary.py` 内部的 retry/cancel manual-action check 使用 in-process/dev-header
+- `scripts/validate_readonly_db_boundary.py` 内部的 retry manual-action check（cancel 探针已随 #3394 删除）使用 in-process/dev-header
   方式验证后端 no-write/readonly fail-closed 行为；这只属于 readonly DB safety evidence，不能计入 #239
   production-auth manual-action `PASS`，也不能替代真实 operator token/header lane。真实 production auth
   证据必须在独立 manual-ops/API lane 记录；没有真实 auth 路径时，该 production-auth lane 保持 `BLOCKED`。
@@ -749,7 +749,7 @@ Retry/cancel 属于计算控制面能力。MVP 阶段 27 不触发 retry/cancel�
 计算控制面测试方式：
 
 1. 22 制造一个受控失败 job。
-2. 22 或授权运维入口触发 retry/cancel；如果这里只能看到无授权 / 非运维授权请求，它们应先作为 auth rejection evidence 单独记录。
+2. 22 或授权运维入口触发 retry（run 级 cancel 路由已随 #3394 退役；取消由调度器或 Slurm gateway 完成）；如果这里只能看到无授权 / 非运维授权请求，它们应先作为 auth rejection evidence 单独记录。
 3. 计算侧产生真实 Gateway/Slurm receipt。
 4. 22 写入 pipeline/job/stage 状态和 published log。
 
@@ -757,13 +757,13 @@ Retry/cancel 属于计算控制面能力。MVP 阶段 27 不触发 retry/cancel�
 
 1. 27 `/ops` 展示失败、日志、error code 和人工处理建议。
 2. 27 能复制诊断信息，诊断信息包含 `run_id/source/cycle_time/job_id/slurm_job_id/log_uri/error_code`。
-3. 27 的 retry/cancel API 在无 auth 或非运维 auth 时先返回 auth rejection；只有带真实 production operator auth header/token 时，才验证 `CONTROL_PLANE_MANUAL_ACTION_REQUIRED`。如果拿不到真实 auth 路径，这个 lane 记为 `BLOCKED`。
+3. 27 的 retry API 在无 auth 或非运维 auth 时先返回 auth rejection；只有带真实 production operator auth header/token 时，才验证 `CONTROL_PLANE_MANUAL_ACTION_REQUIRED`。如果拿不到真实 auth 路径，这个 lane 记为 `BLOCKED`。
 4. 22 经 marker 车道完成 retry（`scripts/node22_manual_retry_failed_runs.py` → `record_manual_repair`，scheduler 铸出新 job；API retry 自 #3157 起在所有角色上只返回 409 `CONTROL_PLANE_MANUAL_ACTION_REQUIRED`）或完成 cancel 后，27 通过刷新只读查询展示新 job、最终状态和日志。
 
 通过条件：
 
 - 27 不暴露真实 retry/cancel UI 操作；operator/sys_admin 也只能看到诊断和处理建议。
-- 27 上 `POST /api/v1/runs/{run_id}/retry` 和 `POST /api/v1/runs/{run_id}/cancel` 在无授权时返回 401/403 或 `AUTH_REQUIRED` / `NOT_AUTHORIZED` 等稳定拒绝错误；授权 manual-action lane 返回 `CONTROL_PLANE_MANUAL_ACTION_REQUIRED` 或等价稳定错误。
+- 27 上 `POST /api/v1/runs/{run_id}/cancel` 不是路由，任何凭据下都返回 405（#3394）；`POST /api/v1/runs/{run_id}/retry` 在无授权时返回 401/403 或 `AUTH_REQUIRED` / `NOT_AUTHORIZED` 等稳定拒绝错误；授权 manual-action lane 返回 `CONTROL_PLANE_MANUAL_ACTION_REQUIRED` 或等价稳定错误。
 - 27 直接 API 调用不会创建新 job，不更新 run，不调用 Gateway。
 - 22 侧经 marker 车道记录的 retry 由 scheduler 铸出新 job id 或 Gateway receipt，并由 27 只读展示；22 侧 API retry 只返回 409 `CONTROL_PLANE_MANUAL_ACTION_REQUIRED`，不产生 job。
 - 22 侧 cancel 不得对不存在或已终态 job 误报成功，并由 27 只读展示最终状态。
@@ -870,7 +870,7 @@ mock/historical latest、wrong run/model/source/cycle/job identity 或 27 产生
 - 27 依赖重建并通过后端/前端基础检查。
 - API `/health`、models、stations、station-series、forecast-series 可用。
 - `NHMS_SERVICE_ROLE=display_readonly` 下 `/api/v1/slurm/*` 不可用。
-- retry/cancel 控制动作在 27 返回人工处理提示，不写 DB，不调用 Gateway。
+- retry 控制动作在 27 返回人工处理提示，不写 DB，不调用 Gateway；cancel 路径不是路由（#3394），回 405。
 - latest-product 至少一个 source 返回 200。
 - latest-product 可用强身份约束锁定 22 本轮 `run_id/source/cycle/model_id`，`/ops` 的 status/stages/jobs/logs 也必须用同一 strict identity，`ops_jobs` 和 `ops_job_logs` 还要绑定 `job_id`。
 - `/` 单页地图和 `/ops` 无 mock 浏览器 E2E 通过；如果只拿到 source/cycle-only 证据，这些 lane 只能记为 `BLOCKED` 或 `PARTIAL`。

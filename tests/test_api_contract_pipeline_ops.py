@@ -3,7 +3,7 @@
 The #2074 partition of the former 2,132-line `tests/test_api_contract.py` that
 owns the control-plane route contracts: `/api/v1/runs`, the QHH-latest product,
 `/api/v1/jobs`, pipeline status / ops / stage evidence, queue depth, stage
-duration metrics, and the retry / cancel envelopes.
+duration metrics, and the retry envelope.
 
 The shared doubles and assertion helpers live in `tests/api_contract_helpers.py`;
 the published-document and generated-type cases stayed on
@@ -37,7 +37,6 @@ from tests.api_contract_helpers import (
 )
 from tests.test_monitoring_api import (
     _client,
-    _create_job,
     _cycle_time,
     _insert_cycle,
     _MockGateway,
@@ -568,41 +567,3 @@ def test_stage_duration_metrics_contract_uses_success_envelope() -> None:
     assert isinstance(metric["job_count"], int)
 
 
-def test_cancel_contract_documents_cancelled_jobs_and_slurm_failures() -> None:
-    with _store() as store:
-        gateway = _MockGateway()
-        _create_job(
-            store,
-            job_id="job_cancel_contract",
-            run_id="run_cancel_contract",
-            status="running",
-            slurm_job_id="slurm_cancel_contract",
-        )
-        with _client(store, gateway, allow_dev_role_header=True) as client:
-            response = client.post("/api/v1/runs/run_cancel_contract/cancel", headers={"X-User-Role": "operator"})
-
-    assert response.status_code == 200
-    data = _assert_success_envelope(response.json())
-    assert set(data) == {
-        "run_id",
-        "cancelled_jobs",
-        "cancelled",
-        "failed_jobs",
-        "slurm_failures",
-        "blocked_jobs",
-        "slurm_cancellation_gaps",
-        "partial_failure",
-        "idempotent_jobs",
-        "hydro_run",
-        "forecast_cycle",
-    }
-    assert data["run_id"] == "run_cancel_contract"
-    assert data["failed_jobs"] == []
-    assert data["slurm_failures"] == []
-    assert data["blocked_jobs"] == []
-    assert data["slurm_cancellation_gaps"] == []
-    assert data["partial_failure"] is False
-    assert data["cancelled"] == data["cancelled_jobs"]
-    assert len(data["cancelled_jobs"]) == 1
-    assert set(data["cancelled_jobs"][0]) == PIPELINE_JOB_KEYS
-    assert data["cancelled_jobs"][0]["status"] == "cancelled"

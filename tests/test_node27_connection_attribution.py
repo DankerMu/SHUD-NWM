@@ -884,7 +884,7 @@ DISPLAY_UNIT_SURFACES: tuple[tuple[str, str], ...] = (
 # with the same verdict shape the delegated guard uses.
 DISPLAY_UNIT_CONNECT_CLOSURE: tuple[tuple[str, str, str], ...] = (
     ("apps/api/routes/hydro_display.py", ATTRIBUTED, "display read-only engine (#1714)"),
-    ("apps/api/routes/pipeline.py", ATTRIBUTED, "control-plane retry/cancel engine"),
+    ("apps/api/routes/pipeline.py", ATTRIBUTED, "ops pipeline engine"),
     ("packages/common/forecast_store.py", ATTRIBUTED, "forecast + data-sources stores and the station lookup"),
     ("packages/common/best_available.py", ATTRIBUTED, "best-available repository"),
     ("packages/common/model_registry.py", ATTRIBUTED, "model registry store"),
@@ -1521,11 +1521,12 @@ def test_pipeline_engine_adds_its_identity_and_leaves_other_parameters_intact(
 
 
 def test_pipeline_and_display_engines_are_separate_surfaces() -> None:
-    """The retry/cancel writes must be distinguishable from the display pool.
+    """The ops pipeline engine must be distinguishable from the display pool.
 
     #1728's operator scenario: both engines live in the same uvicorn process, so
-    a shared name would put the control-plane writes and the read-only display
-    queries under one label in pg_stat_activity.
+    a shared name would put the ops pipeline queries and the read-only display
+    queries under one label in pg_stat_activity. (Its retry/cancel writes left
+    with #3179 and #3394.)
     """
     assert pipeline._APPLICATION_NAME != hydro_display._APPLICATION_NAME
     assert (pipeline._APPLICATION_NAME, hydro_display._APPLICATION_NAME) == (

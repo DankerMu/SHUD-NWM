@@ -4,10 +4,9 @@ Same oracle as ``tests/test_response_model_preservation.py`` (capture the
 handler object, serialize it through the master ``dict[str, Any]`` field and
 the route's model, compare type-strictly). Samples drive the real
 ``apps/api/routes/pipeline.py`` handlers over the sqlite-backed
-``PipelineStore`` doubles of ``tests/test_monitoring_api.py`` and
-``tests/test_retry_cancel_consistency.py``, so every payload is assembled by
-the production projection code (`_job_payload`, `_stage_summaries`,
-`_ok(identity=...)`, the cancel/retry result builders).
+``PipelineStore`` double of ``tests/test_monitoring_api.py``, so every
+payload is assembled by the production projection code (`_job_payload`,
+`_stage_summaries`, `_ok(identity=...)`).
 """
 
 from __future__ import annotations
@@ -19,11 +18,8 @@ from typing import Any
 import pytest
 
 import tests.test_monitoring_api as monitoring
-import tests.test_retry_cancel_consistency as cancels
 from packages.common.contracts.time_normalization import cycle_id_for
 from tests.test_response_model_preservation import Sample, SampleEnv, ok, run_sample
-
-OPERATOR = {"X-User-Role": "operator"}
 
 
 def _strict_store(store: Any, log_root: Path) -> dict[str, str]:
@@ -101,48 +97,6 @@ class _ListJobsGateway:
         return [SimpleNamespace(status=status) for status in ("running", "pending", "submitted", "failed")]
 
 
-def _cancel_store(store: Any, run_id: str, *, cycle_status: str = "forecast_running", jobs: dict[str, str]) -> None:
-    cancels._insert_hydro_run(store, run_id, status="running")
-    cancels._insert_forecast_cycle(store, f"cycle_{run_id}", status=cycle_status)
-    for job_id, slurm_job_id in jobs.items():
-        cancels._create_job(
-            store, job_id=job_id, run_id=run_id, cycle_id=f"cycle_{run_id}", status="running", slurm_job_id=slurm_job_id
-        )
-
-
-def _cancel(env: SampleEnv) -> None:
-    variants: list[tuple[str, dict[str, Any], dict[str, str], str]] = [
-        ("run_clean", {}, {"job_clean": "slurm_clean"}, "forecast_running"),
-        ("run_terminal_cycle", {}, {"job_terminal": "slurm_terminal"}, "published"),
-        (
-            "run_partial",
-            {"failures": {"slurm_fail": cancels._scancel_path_bearing_error(502, "SLURM_ERROR", "run_partial")}},
-            {"job_ok": "slurm_ok", "job_fail": "slurm_fail"},
-            "forecast_running",
-        ),
-        (
-            "run_blocked",
-            {"failures": {"slurm_gone": cancels._scancel_path_bearing_error(404, "JOB_NOT_FOUND", "run_blocked")}},
-            {"job_blocked": "slurm_gone"},
-            "forecast_running",
-        ),
-        (
-            "run_unproven",
-            {"responses": {"slurm_unproven": {"job_id": "slurm_unproven", "status": "running"}}},
-            {"job_unproven": "slurm_unproven"},
-            "forecast_running",
-        ),
-    ]
-    with cancels._store() as store:
-        for run_id, gateway_kwargs, jobs, cycle_status in variants:
-            _cancel_store(store, run_id, cycle_status=cycle_status, jobs=jobs)
-            with cancels._client(store, gateway=cancels._MockGateway(**gateway_kwargs)) as client:
-                ok(client.post(f"/api/v1/runs/{run_id}/cancel", headers=OPERATOR))
-        # Nothing active left to cancel: the idempotent re-cancel.
-        with cancels._client(store, gateway=cancels._MockGateway()) as client:
-            ok(client.post("/api/v1/runs/run_clean/cancel", headers=OPERATOR))
-
-
 PIPELINE_SAMPLES: dict[str, Sample] = {
     "ops_reads_non_strict_and_strict": Sample(
         _ops_reads,
@@ -160,9 +114,6 @@ PIPELINE_SAMPLES: dict[str, Sample] = {
         frozenset(
             {"GET /api/v1/metrics/stage-duration", "GET /api/v1/metrics/success-rate", "GET /api/v1/queue/depth"}
         ),
-    ),
-    "cancel_clean_terminal_partial_blocked_unproven_idempotent": Sample(
-        _cancel, frozenset({"POST /api/v1/runs/{run_id}/cancel"})
     ),
 }
 

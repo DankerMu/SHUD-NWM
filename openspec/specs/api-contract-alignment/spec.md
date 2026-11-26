@@ -82,13 +82,13 @@ The published OpenAPI contract MUST declare the same-origin server and explicit 
 
 #### Scenario: Public operation remains public by default
 
-- **WHEN** a caller or generator inspects one of the 39 operations that remain unprotected after the four Slurm mutations become protected
+- **WHEN** a caller or generator inspects one of the operations that remain unprotected after the four Slurm mutations become protected
 - **THEN** it inherits root `security: []` and no global bearer requirement is asserted
 - **AND** Slurm health, list, status, array-result, and log reads remain in this anonymous set.
 
 #### Scenario: Existing business mutation keeps its exact identity alternatives
 
-- **WHEN** a caller or generator inspects any of the original 11 protected mutation/retry/cancel operations
+- **WHEN** a caller or generator inspects any of the 10 protected business mutation and retry operations (11 until the run-cancel operation was retired, #3394)
 - **THEN** that operation overrides root security with only the enabled non-production role header, configured non-production bearer token, or complete internal live-proof header set
 - **AND** `SlurmServiceBearer` is not an accepted alternative for those operations.
 

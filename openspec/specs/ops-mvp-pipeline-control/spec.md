@@ -8,7 +8,7 @@ boundary.
 
 ### Requirement: Ops MVP entry
 
-The frontend SHALL expose an operations MVP entry focused on QHH pipeline status, jobs, and logs. It has no retry control and no cancel control (cancel lives on `/monitoring`); failed-run recovery is the node-22 manual-repair marker lane (#3179).
+The frontend SHALL expose an operations MVP entry focused on QHH pipeline status, jobs, and logs. It has no retry control and no cancel control, and neither has `/monitoring` (#3179, #3394); failed-run recovery is the node-22 manual-repair marker lane (#3179).
 
 #### Scenario: Ops navigation entry
 - **WHEN** the app shell renders for an authorized operator
@@ -46,8 +46,8 @@ The operations MVP SHALL read stage, job, log, and retry state from formal backe
 
 #### Scenario: Authorization gate
 - **WHEN** a non-operator opens `/ops`
-- **THEN** mutating controls such as cancel are hidden or disabled according to existing RBAC behavior
-- **AND** direct retry or cancel API calls by a non-operator are rejected by the backend according to existing authorization rules
+- **THEN** the page renders no mutating run control, as for every role
+- **AND** a direct retry API call by a non-operator is rejected by the backend according to existing authorization rules
 - **AND** the page does not bypass production authentication requirements beyond documented internal MVP dev-role overrides.
 
 ### Requirement: Orchestrator boundary
@@ -55,8 +55,8 @@ The operations MVP SHALL read stage, job, log, and retry state from formal backe
 The operations MVP SHALL treat qhh diagnostic scripts as reproduction evidence only and use the formal backend scheduler/orchestrator path for operational status.
 
 #### Scenario: Formal scheduler source
-- **WHEN** the MVP operations page displays run status or cancel actions
-- **THEN** its data comes from backend pipeline status, jobs, logs, and cancel APIs tied to `ops.pipeline_job` or equivalent orchestrator persistence
+- **WHEN** the MVP operations page displays run status
+- **THEN** its data comes from backend pipeline status, jobs, and logs APIs tied to `ops.pipeline_job` or equivalent orchestrator persistence
 - **AND** it does not depend on `.nhms-runs/qhh-continuous` state JSON files as the production control source.
 
 #### Scenario: Controlled failure evidence

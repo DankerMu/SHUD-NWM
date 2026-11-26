@@ -160,7 +160,6 @@ GET /api/v1/pipeline/stages?source=&cycle_time=
 GET /api/v1/jobs?source=&cycle_time=&status=&model_id=&limit=&offset=
 GET /api/v1/jobs/{job_id}/logs
 POST /api/v1/runs/{run_id}/retry
-POST /api/v1/runs/{run_id}/cancel
 GET /api/v1/metrics/stage-duration?source=&days=7
 GET /api/v1/metrics/success-rate?source=&days=7
 GET /api/v1/queue/depth

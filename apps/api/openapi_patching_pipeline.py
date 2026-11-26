@@ -71,10 +71,6 @@ def _patch_pipeline_openapi(schema: dict) -> None:
         "the authorized actor must perform the action from the compute_control runbook on node 22.",
         ["CONTROL_PLANE_MANUAL_ACTION_REQUIRED"],
     )
-    responses["RunNotFound"] = _typed_error_response(
-        "The run id has no pipeline job and no hydro run record.",
-        ["RUN_NOT_FOUND"],
-    )
     responses["ControlPlaneQueueUnavailable"] = _typed_error_response(
         "Queue depth is unavailable from a display_readonly API node; "
         "the compute_control node exposes the live queue state.",
@@ -252,21 +248,9 @@ def _patch_pipeline_openapi(schema: dict) -> None:
             {"type": "array", "items": {"$ref": "#/components/schemas/SuccessRateMetric"}}
         ),
     )
-    # Cancel keeps FastAPI's generated success schema; only its typed error
-    # responses are injected so the runtime spec matches the static contract:
-    # the 404 for a run id with no job and no hydro run (#3245) and the
-    # display-mode 409. queue/depth additionally gets its named 200 body,
-    # written before `_inject_operation_responses` so the error injection
-    # (which only adds keys) cannot clobber it.
-    _inject_operation_responses(
-        schema,
-        "/api/v1/runs/{run_id}/cancel",
-        "post",
-        {
-            "404": {"$ref": "#/components/responses/RunNotFound"},
-            "409": {"$ref": "#/components/responses/ControlPlaneManualActionRequired"},
-        },
-    )
+    # queue/depth gets its named 200 body, written before
+    # `_inject_operation_responses` so the error injection (which only adds
+    # keys) cannot clobber it.
     _set_operation_response_schema(
         schema,
         "/api/v1/queue/depth",

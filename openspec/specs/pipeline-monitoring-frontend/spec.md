@@ -12,7 +12,7 @@ The pipeline monitoring page SHALL be accessible only to users with authorized r
 #### Scenario: Authorized user accesses monitoring page
 
 - **WHEN** a user with `operator`, `model_admin`, or `sys_admin` role navigates to the monitoring page
-- **THEN** the page SHALL render the full monitoring dashboard including its interactive controls (cancel); no retry control is rendered for any role (#3179)
+- **THEN** the page SHALL render the full monitoring dashboard including its interactive controls (filters, sorting, the log modal); no retry control and no cancel control is rendered for any role (#3179, #3394)
 
 #### Scenario: Unauthorized user attempts access
 
@@ -22,7 +22,7 @@ The pipeline monitoring page SHALL be accessible only to users with authorized r
 #### Scenario: Retry and cancel actions require operator+ role
 
 - **WHEN** a user with `viewer` or `contributor` role somehow reaches the monitoring page
-- **THEN** the cancel action button MUST NOT be rendered, and no retry action is rendered for this or any other role
+- **THEN** no cancel action and no retry action is rendered, for this or any other role (scenario title kept for archive continuity)
 
 ### Requirement: Top Summary Bar
 
@@ -123,7 +123,7 @@ The monitoring page SHALL display a job list table in the center area with colum
   - `slurm_job_id` — Slurm-assigned job identifier
   - `submitted_at` — formatted as `YYYY-MM-DD HH:mm:ss`
   - `duration` — formatted as `Xm Ys` or `--` if not finished
-  - `actions` — containing the "View Logs" button and, where authorized, the cancel control; there is no "Retry" button
+  - `actions` — containing the "View Logs" button and the diagnostics actions; there is no "Retry" button and no cancel control
 
 #### Scenario: Filter by status
 

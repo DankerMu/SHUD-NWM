@@ -2,7 +2,9 @@
 
 ## Purpose
 TBD - created by archiving change issue-125-frontend-production-data. Update Purpose after archive.
+
 ## Requirements
+
 ### Requirement: Forecast map uses backend river data
 
 The forecast map SHALL use backend river segment/network data for production segment selection.
@@ -40,8 +42,7 @@ The frontend SHALL NOT expose a production control that lets users grant themsel
 
 - **WHEN** the app runs in production mode without an explicit dev/test role override
 - **THEN** the role selector MUST NOT be shown
-- **AND** retry/cancel controls MUST be hidden or disabled for a viewer role
-- **AND** retry/cancel controls MUST NOT be shown or actionable solely because `VITE_AUTH_ROLE` is configured as an operator/admin role
+- **AND** no retry or cancel control exists for any role, so none can become shown or actionable because `VITE_AUTH_ROLE` is configured as an operator/admin role
 - **AND** operator action headers MUST only be sent by the explicit dev/test role override path until a trusted production backend auth/session mechanism exists
 
 ### Requirement: Monitoring trends respect source and scenario filters

@@ -180,8 +180,9 @@ Forbidden capabilities:
   `DOCKER_HOST`.
 - Opting into control mutations by setting
   `NHMS_DISPLAY_DISABLE_CONTROL_MUTATIONS=false`.
-- Performing retry/cancel actions or live queue-depth control-plane queries;
-  these fail closed with display-specific error codes.
+- Performing retry actions or live queue-depth control-plane queries;
+  these fail closed with display-specific error codes. The run cancel route
+  is retired in every role (#3394); its path answers 405.
 - Writing business state, scheduler state, Slurm state, workspace roots,
   object-store roots, producer/copyback roots, or published artifact roots.
 
@@ -306,7 +307,7 @@ Current guard tests:
 - `tests/test_migrations.py`
 - `tests/test_api_contract*.py` (#2074 partitioned this corpus into three
   files; the model-admin mutation guard is in `..._resources.py` and the
-  dev-role retry/cancel guards are in `..._pipeline_ops.py`)
+  dev-role retry guards are in `..._pipeline_ops.py`)
 - `tests/test_slurm_route_contract.py`
 
 ## #361 Hard Gate
@@ -324,7 +325,7 @@ surfaces fails `tests/test_role_boundary_static.py`.
 API request handling remains in `apps/api/auth.py`: FastAPI `Request` parsing,
 request-state audit recording, `require_action`, `evaluate_request_action`,
 `auth_context_from_request`, and API error mapping stay API-owned. Readonly DB
-validation may exercise display route smoke and retry/cancel probes, but FastAPI
+validation may exercise display route smoke and the retry probe, but FastAPI
 app construction, `TestClient` ownership, and pipeline dependency overrides live
 behind the API-owned `apps/api/readonly_validation_probe.py` adapter instead of
 inside `services/production_closure/readonly_db_validation.py`.

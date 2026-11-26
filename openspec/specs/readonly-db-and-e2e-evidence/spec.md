@@ -19,7 +19,7 @@ The display service SHALL be validated with readonly database credentials for di
 - **AND** no display smoke step requires writing hydro, met, or pipeline terminal state.
 
 #### Scenario: Mutating API blocked with readonly DB
-- **WHEN** retry or cancel is called on the display API backed by readonly DB credentials
+- **WHEN** retry is called on the display API backed by readonly DB credentials
 - **THEN** the request returns `CONTROL_PLANE_MANUAL_ACTION_REQUIRED`
 - **AND** it does not fail later because of a database write attempt.
 

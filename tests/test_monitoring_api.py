@@ -994,6 +994,48 @@ def test_jobs_and_pipeline_stages_redact_and_truncate_success_log_uri(monkeypatc
         assert raw_secret not in public_payload
 
 
+def test_jobs_list_redacts_persisted_error_message_and_log_uri_query() -> None:
+    """#3394: a job item renders its persisted ``error_message`` and ``log_uri`` without their secrets.
+
+    The persisted row keeps the raw text; only the public ``GET /api/v1/jobs``
+    item is rendered.
+    """
+
+    secret_uri = "s3://bucket/logs/job.out?token=supersecret"
+    secret_message = "old error https://user:pass@example.test/log?signature=abc token=rawsecret"
+    with _store() as store:
+        cycle_time = _cycle_time()
+        cycle_id = cycle_id_for("GFS", cycle_time)
+        _insert_cycle(store, cycle_time=cycle_time)
+        _create_job(
+            store,
+            job_id="job_jobs_list_secret",
+            run_id="run_jobs_list_secret",
+            cycle_id=cycle_id,
+            stage="forecast",
+            status="failed",
+            error_message=secret_message,
+            log_uri=secret_uri,
+        )
+        with _client(store) as client:
+            response = client.get(
+                "/api/v1/jobs",
+                params={"source": "GFS", "cycle_time": cycle_time.isoformat()},
+            )
+
+        assert store.get_job("job_jobs_list_secret").error_message == secret_message
+
+    assert response.status_code == 200
+    items = {item["job_id"]: item for item in response.json()["data"]["items"]}
+    item = items["job_jobs_list_secret"]
+    assert item["log_uri"] == "s3://bucket/logs/job.out"
+    assert isinstance(item["error_message"], str)
+    assert item["error_message"].startswith("old error")
+    item_text = json.dumps(item)
+    for raw_secret in ("supersecret", "rawsecret", "user:pass", "signature=abc"):
+        assert raw_secret not in item_text
+
+
 def test_jobs_list_source_cycle_requires_matching_forecast_cycle_and_excludes_sibling_records() -> None:
     with _store() as store:
         store.session.execute(text("PRAGMA case_sensitive_like = ON"))
@@ -1911,38 +1953,21 @@ def test_retry_all_operator_style_roles_are_allowed() -> None:
             assert _events(store) == []
 
 
-def test_dev_token_defaults_operator_only_when_role_header_absent(monkeypatch: Any) -> None:
-    # #3157: the retry route answers every authorized caller with a 409, whose error
-    # envelope carries no audit block, so the role-defaulting audit is read off the
-    # cancel route, which shares the same `require_action` path.  The retry half
-    # pins that the defaulted operator passes RBAC there too.
-    monkeypatch.setenv("NHMS_DEV_AUTH_TOKEN", "dev-token")
-    with _store() as store:
-        _create_job(
-            store,
-            job_id="job_retry_dev_token",
-            run_id="run_retry_dev_token",
-            job_type=GENERIC_RETRY_JOB_TYPE,
-            stage="forecast",
-            status="failed",
-        )
-        with _client(store) as client:
-            retry_response = client.post(
-                "/api/v1/runs/run_retry_dev_token/retry",
-                headers={"Authorization": "Bearer dev-token"},
-            )
-            response = client.post(
-                "/api/v1/runs/run_retry_dev_token/cancel",
-                headers={"Authorization": "Bearer dev-token"},
-            )
+def test_retry_dev_token_without_role_header_passes_rbac(monkeypatch: Any) -> None:
+    """#3394: the bare dev token, with no ``X-User-Role``, passes the retry route's RBAC.
 
-        _assert_retired_retry_manual_action(retry_response, run_id="run_retry_dev_token")
-        assert response.status_code == 200
-        decision = response.json()["auth_policy_decisions"][0]
-        assert decision["action_id"] == "pipeline.cancel_run"
-        assert decision["decision"] == "allow"
-        assert decision["roles"] == ["operator"]
-        assert decision["role_mapping_result"]["raw_roles_input_present"] is False
+    The 409 carries no audit block, so the role the token defaults to is pinned on
+    the Slurm mutations of the compute mount (``tests/test_slurm_gateway_auth_fullmount.py``).
+    """
+    monkeypatch.setenv("NHMS_DEV_AUTH_TOKEN", "dev-token")
+    monkeypatch.delenv("ALLOW_DEV_ROLE_HEADER", raising=False)
+    with _client_without_store() as client:
+        response = client.post(
+            "/api/v1/runs/run_retry_dev_token_bare/retry",
+            headers={"Authorization": "Bearer dev-token"},
+        )
+
+    _assert_retired_retry_manual_action(response, run_id="run_retry_dev_token_bare")
 
 
 def test_retry_dev_token_rejects_unmapped_role_header_without_operator_promotion(monkeypatch: Any) -> None:
@@ -1985,31 +2010,6 @@ def test_retry_dev_token_rejects_blank_role_header_without_operator_promotion(mo
         assert decision["role_mapping_result"]["raw_roles_input_present"] is True
         assert decision["role_mapping_result"]["raw_roles"] == []
         assert store.get_job("job_retry_blank_role").status == "failed"
-
-
-def test_allowed_control_mutation_records_canonical_audit_evidence() -> None:
-    # #3157: read off cancel -- the retired retry route has no success envelope.
-    with _store() as store:
-        _create_job(
-            store,
-            job_id="job_cancel_audit",
-            run_id="run_cancel_audit",
-            status="running",
-            slurm_job_id="slurm_cancel_audit",
-        )
-        with _client(store, allow_dev_role_header=True) as client:
-            response = client.post(
-                "/api/v1/runs/run_cancel_audit/cancel",
-                headers={"X-User-Role": "operator", "X-Request-ID": "req-cancel-audit"},
-            )
-
-        assert response.status_code == 200
-        auth_audit = response.json()["auth_policy_decisions"]
-        assert auth_audit[0]["request_id"] == "req-cancel-audit"
-        assert auth_audit[0]["action_id"] == "pipeline.cancel_run"
-        assert auth_audit[0]["decision"] == "allow"
-        assert auth_audit[0]["roles"] == ["operator"]
-        assert auth_audit[0]["execution_mode"] == "backend_route_executed"
 
 
 def test_retry_no_role_header() -> None:
@@ -2123,40 +2123,6 @@ def test_spoofed_live_headers_do_not_authorize_retry(monkeypatch: Any) -> None:
         assert store.get_job("job_spoofed_live").status == "failed"
 
 
-def test_trusted_test_live_proof_allows_control_mutation_with_provider_metadata(monkeypatch: Any) -> None:
-    # #3157: the live-proof actor reaches the retired retry lane's 409 (auth passed);
-    # the provider-metadata audit is read off cancel, which still has a success envelope.
-    monkeypatch.setenv("AUTH_BACKEND", "oidc")
-    monkeypatch.setenv("NHMS_TRUSTED_LIVE_PROOF_MODE", "test_internal")
-    monkeypatch.setenv("NHMS_INTERNAL_LIVE_PROOF_TOKEN", "proof-token")
-    live_headers = {
-        "X-NHMS-Internal-Live-Proof": "proof-token",
-        "X-Live-User-ID": "alice",
-        "X-Live-User-Roles": "operator",
-        "X-Live-Provider": "test-oidc",
-    }
-    with _store() as store:
-        _create_job(
-            store,
-            job_id="job_trusted_live",
-            run_id="run_trusted_live",
-            job_type=GENERIC_RETRY_JOB_TYPE,
-            stage="forecast",
-            status="failed",
-        )
-        with _client(store) as client:
-            retry_response = client.post("/api/v1/runs/run_trusted_live/retry", headers=live_headers)
-            response = client.post("/api/v1/runs/run_trusted_live/cancel", headers=live_headers)
-
-        _assert_retired_retry_manual_action(retry_response, run_id="run_trusted_live")
-        assert response.status_code == 200
-        audit = response.json()["auth_policy_decisions"][0]
-        assert audit["execution_mode"] == "live_proof"
-        assert audit["provider_metadata"]["provider"] == "test-oidc"
-        assert audit["provider_metadata"]["credential_header"] == "[redacted]"
-        assert audit["role_mapping_result"]["mapped_roles"] == ["operator"]
-
-
 def test_trusted_live_actor_with_unmapped_roles_is_forbidden(monkeypatch: Any) -> None:
     monkeypatch.setenv("AUTH_BACKEND", "oidc")
     monkeypatch.setenv("NHMS_TRUSTED_LIVE_PROOF_MODE", "test_internal")
@@ -2185,60 +2151,95 @@ def test_trusted_live_actor_with_unmapped_roles_is_forbidden(monkeypatch: Any) -
         assert store.get_job("job_unmapped_live").status == "failed"
 
 
-def test_cancel_endpoint() -> None:
-    with _store() as store:
-        gateway = _MockGateway()
-        _create_job(store, job_id="job_cancel_pending", run_id="run_cancel", status="pending", slurm_job_id="slurm_1")
-        _create_job(store, job_id="job_cancel_running", run_id="run_cancel", status="running", slurm_job_id="slurm_2")
-        _create_job(store, job_id="job_cancel_done", run_id="run_cancel", status="succeeded", slurm_job_id="slurm_3")
-        with _client(store, gateway, allow_dev_role_header=True) as client:
-            response = client.post("/api/v1/runs/run_cancel/cancel", headers={"X-User-Role": "operator"})
-
-        assert response.status_code == 200
-        cancelled = response.json()["data"]["cancelled_jobs"]
-        assert [job["job_id"] for job in cancelled] == ["job_cancel_pending", "job_cancel_running"]
-        assert gateway.cancelled == ["slurm_1", "slurm_2"]
-        assert store.get_job("job_cancel_pending").status == "cancelled"
-        assert store.get_job("job_cancel_running").status == "cancelled"
-        assert store.get_job("job_cancel_done").status == "succeeded"
-        events = _events(store)
-        assert [event.event_type for event in events] == ["cancel", "cancel"]
-        assert {event.details["slurm_job_id"] for event in events} == {"slurm_1", "slurm_2"}
+_RETIRED_CANCEL_ROLES = ("display_readonly", "compute_control", "dev_monolith")
+_RETIRED_CANCEL_CREDENTIALS = {
+    "operator": {"X-User-Role": "operator"},
+    "viewer": {"X-User-Role": "viewer"},
+    "none": {},
+}
 
 
-def test_display_cancel_returns_manual_action_without_gateway_or_store_dependencies(monkeypatch: Any) -> None:
+class _WriteRecordingStore:
+    """A pipeline store double that records every write it is asked for."""
+
+    def __init__(self) -> None:
+        self.writes: list[str] = []
+
+    def insert_event(self, *args: Any, **kwargs: Any) -> None:
+        self.writes.append("insert_event")
+
+    def update_job_status(self, *args: Any, **kwargs: Any) -> None:
+        self.writes.append("update_job_status")
+
+    def query_jobs_by_run(self, run_id: str) -> list[Any]:
+        return []
+
+
+@pytest.mark.parametrize("credential", sorted(_RETIRED_CANCEL_CREDENTIALS))
+@pytest.mark.parametrize("service_role", _RETIRED_CANCEL_ROLES)
+def test_retired_cancel_path_answers_like_an_unregistered_post_path(
+    monkeypatch: Any, service_role: str, credential: str
+) -> None:
+    """#3394 (D5): `POST /api/v1/runs/{run_id}/cancel` is not a route in any service role.
+
+    The one route matching the path is the GET fallback that serves the
+    single-page app, so the answer is the 405 of any unregistered POST path.
+    """
+    import services.slurm_gateway.routes as slurm_routes
+
     monkeypatch.setenv("ALLOW_DEV_ROLE_HEADER", "true")
-    display_app = create_app(_display_env())
-    display_app.dependency_overrides[pipeline_routes.get_pipeline_store] = _dependency_forbidden(
-        "pipeline store must not be constructed"
+    constructed: list[str] = []
+    store = _WriteRecordingStore()
+
+    def forbidden_gateway_factory(*_args: Any, **_kwargs: Any) -> Any:
+        constructed.append("slurm gateway factory")
+        raise AssertionError("the Slurm gateway must not be constructed")
+
+    def recording_store() -> _WriteRecordingStore:
+        constructed.append("pipeline store")
+        return store
+
+    def forbidden_route_gateway() -> None:
+        constructed.append("pipeline gateway")
+        raise AssertionError("the pipeline gateway must not be constructed")
+
+    monkeypatch.setattr(slurm_routes, "create_gateway", forbidden_gateway_factory)
+    slurm_routes.slurm_gateway.reset_instance()
+    env = {"NHMS_REQUIRE_SERVICE_ROLE": "true", "NHMS_SERVICE_ROLE": service_role}
+    if service_role == "display_readonly":
+        env = _display_env()
+    role_app = create_app(env)
+    role_app.dependency_overrides[pipeline_routes.get_pipeline_store] = recording_store
+    role_app.dependency_overrides[pipeline_routes.get_slurm_gateway] = forbidden_route_gateway
+    headers = _RETIRED_CANCEL_CREDENTIALS[credential]
+    try:
+        with TestClient(role_app) as client:
+            retired = client.post("/api/v1/runs/run_retired_cancel/cancel", headers=headers)
+            unregistered = client.post("/api/v1/runs/run_retired_cancel/no-such-action", headers=headers)
+    finally:
+        slurm_routes.slurm_gateway.reset_instance()
+
+    for response in (retired, unregistered):
+        assert response.status_code == 405, response.text
+        assert {method.strip() for method in response.headers["allow"].split(",")} == {"GET"}
+    assert (retired.status_code, retired.headers["allow"], retired.content) == (
+        unregistered.status_code,
+        unregistered.headers["allow"],
+        unregistered.content,
     )
-    display_app.dependency_overrides[pipeline_routes.get_slurm_gateway] = _dependency_forbidden(
-        "gateway must not be constructed"
-    )
-    with TestClient(display_app) as client:
-        response = client.post("/api/v1/runs/run_display_cancel/cancel", headers={"X-User-Role": "operator"})
-
-    assert response.status_code == 409
-    body = response.json()
-    assert body["status"] == "error"
-    assert body["error"]["code"] == "CONTROL_PLANE_MANUAL_ACTION_REQUIRED"
-    details = body["error"]["details"]
-    assert details == {
-        "run_id": "run_display_cancel",
-        "display_mode": "display_readonly",
-        "suggested_action": "Ask a node 22 operator to stop this run from the compute_control API or runbook.",
-        "recovery_runbook": "node22-control-plane-manual-recovery",
-    }
-    assert "cancelled_jobs" not in details
-    assert "slurm_job_id" not in details
-    assert "cancelled" not in details
+    assert "CONTROL_PLANE_MANUAL_ACTION_REQUIRED" not in retired.text
+    assert "recovery_runbook" not in retired.text
+    assert "cancelled" not in retired.text
+    assert constructed == []
+    assert store.writes == []
 
 
-def test_display_manual_action_recovery_runbook_slug_names_an_existing_runbook(monkeypatch: Any) -> None:
-    """#1186: the slug the 409 hands an operator must resolve to a real runbook file.
+def test_display_retry_recovery_runbook_slug_names_an_existing_runbook(monkeypatch: Any) -> None:
+    """#1186, #3394: the slug the display 409 hands an operator must resolve to a real runbook file.
 
-    The slug is read off the live payload the route builds, not a second copy of
-    the literal, so renaming either side without the other goes red here.
+    The slug is read off the live payload the display retry 409 builds, not a
+    second copy of the literal, so renaming either side without the other goes
+    red here.
     """
     monkeypatch.setenv("ALLOW_DEV_ROLE_HEADER", "true")
     display_app = create_app(_display_env())
@@ -2249,220 +2250,121 @@ def test_display_manual_action_recovery_runbook_slug_names_an_existing_runbook(m
         "gateway must not be constructed"
     )
     with TestClient(display_app) as client:
-        response = client.post("/api/v1/runs/run_display_cancel/cancel", headers={"X-User-Role": "operator"})
+        response = client.post("/api/v1/runs/run_display_retry/retry", headers={"X-User-Role": "operator"})
 
     assert response.status_code == 409
-    slug = response.json()["error"]["details"]["recovery_runbook"]
+    details = response.json()["error"]["details"]
+    assert details["display_mode"] == "display_readonly"
+    slug = details["recovery_runbook"]
     runbook = Path(__file__).resolve().parents[1] / "docs" / "runbooks" / f"{slug}.md"
     assert runbook.is_file(), runbook
 
 
-def test_display_cancel_invalid_run_id_returns_existing_validation_error(monkeypatch: Any) -> None:
-    monkeypatch.setenv("ALLOW_DEV_ROLE_HEADER", "true")
-    display_app = create_app(_display_env())
-    display_app.dependency_overrides[pipeline_routes.get_pipeline_store] = _dependency_forbidden(
-        "pipeline store must not be constructed"
-    )
-    display_app.dependency_overrides[pipeline_routes.get_slurm_gateway] = _dependency_forbidden(
-        "gateway must not be constructed"
-    )
-    with TestClient(display_app) as client:
-        response = client.post("/api/v1/runs/-bad/cancel", headers={"X-User-Role": "operator"})
+def test_release_blocked_auth_answers_503_on_retry_before_the_manual_action_stub(monkeypatch: Any) -> None:
+    """#3394: live auth without a proof is refused by the retry route's RBAC dependency.
 
-    assert response.status_code == 400
-    body = response.json()
-    assert body["error"]["code"] == "INVALID_RUN_ID"
-    assert body["error"]["details"] is None
-    assert _manual_action_details_absent(body)
-
-
-def test_display_cancel_auth_and_rbac_run_before_manual_action_details(monkeypatch: Any) -> None:
-    monkeypatch.setenv("ALLOW_DEV_ROLE_HEADER", "true")
-    display_app = create_app(_display_env())
-    display_app.dependency_overrides[pipeline_routes.get_slurm_gateway] = _dependency_forbidden(
-        "gateway must not be constructed"
-    )
-    with TestClient(display_app) as client:
-        unauthenticated = client.post("/api/v1/runs/run_display_cancel/cancel")
-        unauthorized = client.post("/api/v1/runs/run_display_cancel/cancel", headers={"X-User-Role": "viewer"})
-
-    assert unauthenticated.status_code == 401
-    assert unauthenticated.json()["error"]["code"] == "AUTH_REQUIRED"
-    assert _manual_action_details_absent(unauthenticated.json())
-    assert unauthorized.status_code == 403
-    assert unauthorized.json()["error"]["code"] == "RBAC_FORBIDDEN"
-    assert _manual_action_details_absent(unauthorized.json())
-
-
-def test_cancel_rbac() -> None:
-    with _store() as store:
-        gateway = _MockGateway()
-        _create_job(store, job_id="job_cancel_denied", run_id="run_cancel_denied", status="running")
-        with _client(store, gateway, allow_dev_role_header=True) as client:
-            response = client.post("/api/v1/runs/run_cancel_denied/cancel", headers={"X-User-Role": "viewer"})
-
-        assert response.status_code == 403
-        assert response.json()["error"]["code"] == "RBAC_FORBIDDEN"
-        assert gateway.cancelled == []
-        assert store.get_job("job_cancel_denied").status == "running"
-
-
-def test_cancel_no_role_header() -> None:
-    with _store() as store:
-        gateway = _MockGateway()
-        _create_job(store, job_id="job_cancel_no_role", run_id="run_cancel_no_role", status="running")
-        with _client(store, gateway) as client:
-            response = client.post("/api/v1/runs/run_cancel_no_role/cancel")
-
-        assert response.status_code == 401
-        assert response.json()["error"]["code"] == "AUTH_REQUIRED"
-        assert gateway.cancelled == []
-        assert store.get_job("job_cancel_no_role").status == "running"
-
-
-def test_cancel_denies_spoofed_role_header_by_default() -> None:
-    with _store() as store:
-        gateway = _MockGateway()
-        _create_job(
-            store,
-            job_id="job_cancel_prod",
-            run_id="run_cancel_prod",
-            status="running",
-            slurm_job_id="slurm_prod",
-        )
-        with _client(store, gateway) as client:
-            response = client.post("/api/v1/runs/run_cancel_prod/cancel", headers={"X-User-Role": "operator"})
-
-        assert response.status_code == 401
-        assert response.json()["error"]["code"] == "AUTH_REQUIRED"
-        assert gateway.cancelled == []
-        assert store.get_job("job_cancel_prod").status == "running"
-
-
-def test_release_blocked_auth_does_not_mutate(monkeypatch: Any) -> None:
+    The retry route writes nothing on any path, so this pins the 503 and its
+    policy decision, not an absence of writes; the release-blocked no-write pins
+    live on the ``models`` and Slurm mutation routes.
+    """
     monkeypatch.setenv("AUTH_BACKEND", "oidc")
     monkeypatch.delenv("NHMS_LIVE_AUTH_PROOF_ACCEPTED", raising=False)
-    with _store() as store:
-        gateway = _MockGateway()
-        _create_job(store, job_id="job_release_blocked", run_id="run_release_blocked", status="running")
-        with _client(store, gateway, allow_dev_role_header=True) as client:
-            response = client.post(
-                "/api/v1/runs/run_release_blocked/cancel",
-                headers={"X-User-Role": "operator"},
-            )
+    monkeypatch.setenv("ALLOW_DEV_ROLE_HEADER", "true")
+    with _client_without_store() as client:
+        response = client.post(
+            "/api/v1/runs/run_release_blocked_retry/retry",
+            headers={"X-User-Role": "operator"},
+        )
 
-        assert response.status_code == 503
-        body = response.json()
-        assert body["error"]["code"] == "RELEASE_BLOCKED"
-        assert body["error"]["details"]["policy_decision"]["execution_mode"] == "release_blocked"
-        assert body["error"]["details"]["policy_decision"]["no_mutation_expected"] is True
-        assert gateway.cancelled == []
-        assert store.get_job("job_release_blocked").status == "running"
+    assert response.status_code == 503, response.text
+    body = response.json()
+    assert body["error"]["code"] == "RELEASE_BLOCKED"
+    decision = body["error"]["details"]["policy_decision"]
+    assert decision["action_id"] == "pipeline.retry_run"
+    assert decision["execution_mode"] == "release_blocked"
+    assert decision["no_mutation_expected"] is True
 
 
-def test_release_blocked_cancel_carries_audit_and_removal_criteria_before_the_handler(monkeypatch: Any) -> None:
-    """Deferred auth on the API dependency surface (``require_action``) over HTTP."""
+def test_release_blocked_retry_carries_audit_and_removal_criteria_before_the_manual_action_stub(
+    monkeypatch: Any,
+) -> None:
+    """#3394: deferred auth on the API dependency surface (``require_action``) over HTTP, on retry."""
     monkeypatch.setenv("AUTH_BACKEND", "oidc")
     monkeypatch.delenv("NHMS_AUTH_MODE", raising=False)
     monkeypatch.delenv("NHMS_TRUSTED_LIVE_PROOF_MODE", raising=False)
     monkeypatch.delenv("NHMS_INTERNAL_LIVE_PROOF_TOKEN", raising=False)
-    run_id = "run_release_blocked_details"
-    request_id = "req-release-blocked-cancel-details"
-    with _store() as store:
-        gateway = _MockGateway()
-        _create_job(store, job_id="job_release_blocked_details", run_id=run_id, status="running")
-        # The cancel handler's first statement reads the run's jobs; recording
-        # that read shows whether the handler ran at all.
-        handler_reads: list[str] = []
-        real_query_jobs_by_run = store.query_jobs_by_run
+    monkeypatch.setenv("ALLOW_DEV_ROLE_HEADER", "true")
+    run_id = "run_release_blocked_retry_details"
+    request_id = "req-release-blocked-retry-details"
+    headers = {"X-User-Role": "operator", "X-Request-ID": request_id}
+    with _client_without_store() as client:
+        response = client.post(f"/api/v1/runs/{run_id}/retry", headers=headers)
 
-        def recording_query_jobs_by_run(queried_run_id: str) -> Any:
-            handler_reads.append(queried_run_id)
-            return real_query_jobs_by_run(queried_run_id)
+        body = response.json()
+        assert response.status_code == 503, response.text
+        assert body["error"]["code"] == "RELEASE_BLOCKED"
+        details = body["error"]["details"]
+        assert set(details) == {"policy_decision", "audit_record", "removal_criteria"}
+        decision = details["policy_decision"]
+        assert decision["decision"] == "release_blocked"
+        assert decision["reason_code"] == "RELEASE_BLOCKED"
+        assert decision["action_id"] == "pipeline.retry_run"
+        assert decision["target_id"] == run_id
+        audit = details["audit_record"]
+        assert audit["request_id"] == request_id
+        assert audit["decision"] == "release_blocked"
+        assert audit["action_id"] == "pipeline.retry_run"
+        assert audit["target"] == {"type": "pipeline_run", "id": run_id}
+        assert details["removal_criteria"] == "Configure and prove live backend identity-provider role mapping."
 
-        monkeypatch.setattr(store, "query_jobs_by_run", recording_query_jobs_by_run)
-        with _client(store, gateway, allow_dev_role_header=True) as client:
-            response = client.post(
-                f"/api/v1/runs/{run_id}/cancel",
-                headers={"X-User-Role": "operator", "X-Request-ID": request_id},
-            )
-
-            body = response.json()
-            assert response.status_code == 503, response.text
-            assert body["error"]["code"] == "RELEASE_BLOCKED"
-            details = body["error"]["details"]
-            assert set(details) == {"policy_decision", "audit_record", "removal_criteria"}
-            decision = details["policy_decision"]
-            assert decision["decision"] == "release_blocked"
-            assert decision["reason_code"] == "RELEASE_BLOCKED"
-            assert decision["action_id"] == "pipeline.cancel_run"
-            assert decision["target_id"] == run_id
-            audit = details["audit_record"]
-            assert audit["request_id"] == request_id
-            assert audit["decision"] == "release_blocked"
-            assert audit["action_id"] == "pipeline.cancel_run"
-            assert audit["target"] == {"type": "pipeline_run", "id": run_id}
-            assert details["removal_criteria"] == "Configure and prove live backend identity-provider role mapping."
-            assert handler_reads == []
-            assert gateway.cancelled == []
-            assert store.get_job("job_release_blocked_details").status == "running"
-
-            # Discrimination: with live auth off the same request reaches the
-            # handler, so the empty record above is the 503 stopping it.
-            monkeypatch.delenv("AUTH_BACKEND")
-            allowed = client.post(f"/api/v1/runs/{run_id}/cancel", headers={"X-User-Role": "operator"})
-            assert allowed.status_code == 200, allowed.text
-            assert handler_reads == [run_id]
+        # Discrimination: with live auth off the same request passes RBAC and
+        # reaches the manual-action 409, so the 503 above is the RBAC
+        # dependency stopping it first.
+        monkeypatch.delenv("AUTH_BACKEND")
+        allowed = client.post(f"/api/v1/runs/{run_id}/retry", headers=headers)
+        _assert_retired_retry_manual_action(allowed, run_id=run_id)
 
 
-def test_live_auth_requested_with_configured_proof_but_missing_proof_release_blocks(monkeypatch: Any) -> None:
+def test_live_auth_requested_with_configured_proof_but_missing_proof_release_blocks_retry(monkeypatch: Any) -> None:
     monkeypatch.setenv("AUTH_BACKEND", "oidc")
     monkeypatch.setenv("NHMS_TRUSTED_LIVE_PROOF_MODE", "test_internal")
     monkeypatch.setenv("NHMS_INTERNAL_LIVE_PROOF_TOKEN", "proof-token")
-    with _store() as store:
-        gateway = _MockGateway()
-        _create_job(store, job_id="job_missing_proof", run_id="run_missing_proof", status="running")
-        with _client(store, gateway, allow_dev_role_header=True) as client:
-            response = client.post(
-                "/api/v1/runs/run_missing_proof/cancel",
-                headers={"X-User-Role": "operator"},
-            )
+    monkeypatch.setenv("ALLOW_DEV_ROLE_HEADER", "true")
+    with _client_without_store() as client:
+        response = client.post(
+            "/api/v1/runs/run_missing_proof_retry/retry",
+            headers={"X-User-Role": "operator"},
+        )
 
-        body = response.json()
-        assert response.status_code == 503
-        assert body["error"]["code"] == "RELEASE_BLOCKED"
-        decision = body["error"]["details"]["policy_decision"]
-        assert decision["execution_mode"] == "release_blocked"
-        assert decision["no_mutation_expected"] is True
-        assert decision["auth_mode"] == "live_idp"
-        assert decision["execution_mode"] != "backend_route_executed"
-        assert gateway.cancelled == []
-        assert store.get_job("job_missing_proof").status == "running"
+    body = response.json()
+    assert response.status_code == 503, response.text
+    assert body["error"]["code"] == "RELEASE_BLOCKED"
+    decision = body["error"]["details"]["policy_decision"]
+    assert decision["action_id"] == "pipeline.retry_run"
+    assert decision["execution_mode"] == "release_blocked"
+    assert decision["no_mutation_expected"] is True
+    assert decision["auth_mode"] == "live_idp"
 
 
-def test_live_auth_requested_with_wrong_proof_release_blocks(monkeypatch: Any) -> None:
+def test_live_auth_requested_with_wrong_proof_release_blocks_retry(monkeypatch: Any) -> None:
     monkeypatch.setenv("AUTH_BACKEND", "oidc")
     monkeypatch.setenv("NHMS_TRUSTED_LIVE_PROOF_MODE", "test_internal")
     monkeypatch.setenv("NHMS_INTERNAL_LIVE_PROOF_TOKEN", "proof-token")
-    with _store() as store:
-        gateway = _MockGateway()
-        _create_job(store, job_id="job_wrong_proof", run_id="run_wrong_proof", status="running")
-        with _client(store, gateway, allow_dev_role_header=True) as client:
-            response = client.post(
-                "/api/v1/runs/run_wrong_proof/cancel",
-                headers={"X-User-Role": "operator", "X-NHMS-Internal-Live-Proof": "wrong-token"},
-            )
+    monkeypatch.setenv("ALLOW_DEV_ROLE_HEADER", "true")
+    with _client_without_store() as client:
+        response = client.post(
+            "/api/v1/runs/run_wrong_proof_retry/retry",
+            headers={"X-User-Role": "operator", "X-NHMS-Internal-Live-Proof": "wrong-token"},
+        )
 
-        body = response.json()
-        assert response.status_code == 503
-        assert body["error"]["code"] == "RELEASE_BLOCKED"
-        decision = body["error"]["details"]["policy_decision"]
-        assert decision["execution_mode"] == "release_blocked"
-        assert decision["no_mutation_expected"] is True
-        assert decision["auth_mode"] == "live_idp"
-        assert decision["execution_mode"] != "backend_route_executed"
-        assert gateway.cancelled == []
-        assert store.get_job("job_wrong_proof").status == "running"
+    body = response.json()
+    assert response.status_code == 503, response.text
+    assert body["error"]["code"] == "RELEASE_BLOCKED"
+    decision = body["error"]["details"]["policy_decision"]
+    assert decision["action_id"] == "pipeline.retry_run"
+    assert decision["execution_mode"] == "release_blocked"
+    assert decision["no_mutation_expected"] is True
+    assert decision["auth_mode"] == "live_idp"
 
 
 @pytest.mark.parametrize(
@@ -2473,45 +2375,40 @@ def test_live_auth_requested_with_wrong_proof_release_blocks(monkeypatch: Any) -
         ("proof-token", b"\xe4"),
         # (b) non-ASCII configured token and the SAME value on the wire: a plain
         # ``==`` over Starlette's latin-1 decoded header matches and authenticates.
-        ("pr\u00f6of-token", "pr\u00f6of-token".encode("latin-1")),
+        ("pröof-token", "pröof-token".encode("latin-1")),
     ],
     ids=["non_ascii_header", "non_ascii_configured_token"],
 )
-def test_live_auth_non_ascii_proof_release_blocks_without_500(
+def test_live_auth_non_ascii_proof_release_blocks_retry_without_500(
     monkeypatch: Any, configured_token: str, proof_header: bytes
 ) -> None:
-    """#2169: the live-proof secret compares as ASCII bytes in constant time; non-ASCII fails closed."""
+    """#2169, #3394: the live-proof secret compares as ASCII bytes in constant time; non-ASCII fails closed."""
 
     monkeypatch.setenv("AUTH_BACKEND", "oidc")
     monkeypatch.setenv("NHMS_TRUSTED_LIVE_PROOF_MODE", "test_internal")
     monkeypatch.setenv("NHMS_INTERNAL_LIVE_PROOF_TOKEN", configured_token)
-    with _store() as store:
-        gateway = _MockGateway()
-        _create_job(store, job_id="job_non_ascii_proof", run_id="run_non_ascii_proof", status="running")
-        with _client(store, gateway):
-            # Sent through httpx's ASGI transport, which hands the raw header
-            # bytes to Starlette unchanged (Starlette decodes them as latin-1).
-            # ``TestClient`` would re-encode a bytes value as UTF-8 on the way
-            # in, so the server would never see the latin-1 wire value.
-            response = asyncio.run(
-                _asgi_post(
-                    "/api/v1/runs/run_non_ascii_proof/cancel",
-                    headers={
-                        "X-NHMS-Internal-Live-Proof": proof_header,
-                        "X-Live-User-ID": b"alice",
-                        "X-Live-User-Roles": b"operator",
-                    },
-                )
-            )
+    # Sent through httpx's ASGI transport, which hands the raw header bytes to
+    # Starlette unchanged (Starlette decodes them as latin-1). ``TestClient``
+    # would re-encode a bytes value as UTF-8 on the way in, so the server would
+    # never see the latin-1 wire value.
+    response = asyncio.run(
+        _asgi_post(
+            "/api/v1/runs/run_non_ascii_proof_retry/retry",
+            headers={
+                "X-NHMS-Internal-Live-Proof": proof_header,
+                "X-Live-User-ID": b"alice",
+                "X-Live-User-Roles": b"operator",
+            },
+        )
+    )
 
-        assert response.status_code == 503
-        body = response.json()
-        assert body["error"]["code"] == "RELEASE_BLOCKED"
-        decision = body["error"]["details"]["policy_decision"]
-        assert decision["auth_mode"] == "live_idp"
-        assert decision["execution_mode"] == "release_blocked"
-        assert gateway.cancelled == []
-        assert store.get_job("job_non_ascii_proof").status == "running"
+    assert response.status_code == 503, response.text
+    body = response.json()
+    assert body["error"]["code"] == "RELEASE_BLOCKED"
+    decision = body["error"]["details"]["policy_decision"]
+    assert decision["action_id"] == "pipeline.retry_run"
+    assert decision["auth_mode"] == "live_idp"
+    assert decision["execution_mode"] == "release_blocked"
 
 
 async def _asgi_post(path: str, *, headers: dict[str, bytes]) -> Any:

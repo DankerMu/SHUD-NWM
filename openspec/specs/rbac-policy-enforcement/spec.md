@@ -2,14 +2,16 @@
 
 ## Purpose
 TBD - created by archiving change m17-production-auth-rbac. Update Purpose after archive.
+
 ## Requirements
+
 ### Requirement: RBAC Policy Enforcement
 The backend SHALL enforce role-based policy for production-sensitive actions before mutating system state.
 
-The canonical action ids are `pipeline.retry_run`, `pipeline.cancel_run`, `pipeline.rerun_cycle`, `qc.override_result`, `tiles.republish`, `sources.update_config`, `models.activate`, `models.deactivate`, `models.switch_version`, `models.rollback_version`, `models.supersede`, `users.manage`, `slurm.submit_job`, `slurm.cancel_job`, and `slurm.reset_registry`.
+The canonical action ids are `pipeline.retry_run`, `pipeline.rerun_cycle`, `qc.override_result`, `tiles.republish`, `sources.update_config`, `models.activate`, `models.deactivate`, `models.switch_version`, `models.rollback_version`, `models.supersede`, `users.manage`, `slurm.submit_job`, `slurm.cancel_job`, and `slurm.reset_registry`.
 
 #### Scenario: Operator action allowed
-WHEN an `operator` requests rerun, cancel, retry, tile republish, Slurm job submission, Slurm array submission, or Slurm job cancellation
+WHEN an `operator` requests rerun, retry, tile republish, Slurm job submission, Slurm array submission, or Slurm job cancellation
 THEN the backend authorizes only the allowed action set and records a policy decision.
 
 #### Scenario: Model admin action allowed
@@ -35,4 +37,3 @@ THEN the route returns `401 AUTH_REQUIRED` or `403 RBAC_FORBIDDEN` before constr
 #### Scenario: Release blocked dependency
 WHEN a protected action requires live auth proof that is configured as release-blocked
 THEN the backend returns `503 RELEASE_BLOCKED`, records `decision=release_blocked`, and no target state changes.
-

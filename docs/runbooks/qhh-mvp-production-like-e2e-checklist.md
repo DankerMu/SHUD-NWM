@@ -930,20 +930,8 @@ curl -sS -X POST "$NHMS_API_BASE_URL/runs/<failed_run_id>/retry" \
 
 ### 14.4 cancel API 检查
 
-```bash
-curl -sS -X POST "$NHMS_API_BASE_URL/runs/<running_run_id>/cancel" \
-  -H "X-User-Role: operator" \
-  | tee "$MVP_E2E_EVIDENCE_ROOT/api_cancel_response.json"
-```
-
-检查项：
-
-- [ ] operator 可取消 running/submitted run。
-- [ ] viewer/未授权用户不能取消。
-- [ ] Slurm active job 被 scancel 或记录幂等已终态。
-- [ ] pipeline_job 状态更新为 cancelled 或稳定失败。
-- [ ] hydro_run 状态更新为 cancelled，若适用。
-- [ ] cancel 不影响其他已成功 run。
+已退役（#3394）：`POST /api/v1/runs/{run_id}/cancel` 不再是路由，任何角色与凭据下对该路径的 POST 都返回 405。
+取消由计算侧调度器或 Slurm gateway 的作业路由完成，本清单没有对应的 API 检查项。
 
 ## 15. 负向和边界测试
 
@@ -1196,7 +1184,7 @@ operator: <redacted id>
 8. 执行 backend API curl 检查。
 9. 执行 `/hydro-met` 浏览器检查。
 10. 执行 `/ops` 浏览器检查。
-11. 构造受控失败；执行 cancel（§14.4），retry 经 node-22 marker 车道执行。
+11. 构造受控失败；retry 经 node-22 marker 车道执行（cancel API 已退役，见 §14.4）。
 12. 收集证据、填写 summary、列出 blockers。
 
 ## 22. 维护规则

@@ -120,7 +120,6 @@ test.describe('monitoring page', () => {
     const failedRow = page.getByRole('row', { name: /run-failed/ })
     await expect(failedRow).toContainText('failed')
     await expect(failedRow.getByRole('button', { name: /查看日志/ })).toBeVisible()
-    await expect(page.getByRole('row', { name: /run-running/ }).getByRole('button', { name: /取消/ })).toBeVisible()
     await expect(page.getByRole('button', { name: /重试/ })).toHaveCount(0)
 
     await failedRow.getByRole('button', { name: /查看日志/ }).click()
@@ -192,34 +191,27 @@ test.describe('monitoring page', () => {
     await expect(page.getByRole('button', { name: /重试/ })).toHaveCount(0)
   })
 
-  test('shows cancel for dev override operator and hides it when role becomes viewer', async ({ page }) => {
-    const cancelRequests: Array<{ method: string; pathname: string; role: string | null }> = []
+  test('gives an operator on a compute_control API no run action and sends no run request (#3179, #3394)', async ({ page }) => {
+    const runRequests: Array<{ method: string; pathname: string }> = []
     await openMonitoringAsOperator(page, {
-      onCancelRequest: (request) => {
-        cancelRequests.push({
-          method: request.method(),
-          pathname: new URL(request.url()).pathname,
-          role: request.headers()['x-user-role'] ?? null,
-        })
+      onApiRequest: (request) => {
+        const pathname = new URL(request.url()).pathname
+        if (pathname.startsWith('/api/v1/runs/')) runRequests.push({ method: request.method(), pathname })
       },
     })
+    expect(runtimeConfig).toMatchObject({ service_role: 'compute_control', control_mutations_enabled: true })
 
-    const cancelButton = page.getByRole('row', { name: /run-running/ }).getByRole('button', { name: /取消/ })
-    await expect(cancelButton).toBeVisible()
-    await cancelButton.click()
-
-    await expect.poll(() => cancelRequests).toEqual([
-      { method: 'POST', pathname: '/api/v1/runs/run-running/cancel', role: 'operator' },
-    ])
-    await expect(page.getByRole('listitem').filter({ hasText: '取消请求已提交' })).toBeVisible()
-
-    await setRole(page, 'viewer')
-
-    await expect(page.getByText('权限不足')).toBeVisible()
-    await expect(page.getByRole('button', { name: /取消/ })).toHaveCount(0)
+    for (const runId of ['run-failed', 'run-running']) {
+      const row = page.getByRole('row', { name: new RegExp(runId) })
+      await expect(row.getByRole('button', { name: /查看日志/ })).toBeVisible()
+      await expect(row.getByRole('button', { name: /取消/ })).toHaveCount(0)
+      await expect(row.getByRole('button', { name: /重试/ })).toHaveCount(0)
+    }
+    await expect(page.getByRole('button', { name: /取消|重试/ })).toHaveCount(0)
+    expect(runRequests).toEqual([])
   })
 
-  test('uses the configured API base for monitoring reads and operator actions', async ({ page }) => {
+  test('uses the configured API base for monitoring reads', async ({ page }) => {
     const origins: Array<{ origin: string; pathname: string; method: string }> = []
     await openMonitoringAsOperator(page, {
       onApiRequest: (request) => {
@@ -230,8 +222,6 @@ test.describe('monitoring page', () => {
 
     await expect.poll(() => origins.map((call) => call.pathname)).toContain('/api/v1/metrics/stage-duration')
     await expect.poll(() => origins.map((call) => call.pathname)).toContain('/api/v1/metrics/success-rate')
-    await page.getByRole('row', { name: /run-running/ }).getByRole('button', { name: /取消/ }).click()
-    await expect.poll(() => origins.map((call) => call.pathname)).toContain('/api/v1/runs/run-running/cancel')
 
     const expectedPaths = new Set([
       '/api/v1/pipeline/status',
@@ -240,10 +230,11 @@ test.describe('monitoring page', () => {
       '/api/v1/metrics/stage-duration',
       '/api/v1/metrics/success-rate',
       '/api/v1/jobs',
-      '/api/v1/runs/run-running/cancel',
     ])
     for (const path of expectedPaths) {
-      expect(origins.some((call) => call.origin === 'https://api.example.test' && call.pathname === path)).toBe(true)
+      await expect
+        .poll(() => origins.some((call) => call.origin === 'https://api.example.test' && call.pathname === path), { message: path })
+        .toBe(true)
     }
   })
 

@@ -113,8 +113,8 @@ DB 和 display/frontend oracle 都在 node-27。
   predicate、display unsafe-config blockers）
 - Slurm 路由按角色不挂载：`apps/api/main.py:310`；`GET /api/v1/runtime/config`
   capability flags：`main.py:283`
-- retry/cancel fail-closed
-  `409 CONTROL_PLANE_MANUAL_ACTION_REQUIRED`、queue-depth
+- retry fail-closed
+  `409 CONTROL_PLANE_MANUAL_ACTION_REQUIRED`（cancel 路由已随 #3394 退役，其路径回 405）、queue-depth
   `503 CONTROL_PLANE_QUEUE_UNAVAILABLE`：`apps/api/routes/pipeline.py`
 - artifact log
   reader（`published://`/穿越/脱敏/tail）：`services/artifacts/reader.py`；compute 侧发
@@ -136,8 +136,8 @@ DB 和 display/frontend oracle 都在 node-27。
 
 | 项  | 内容                                                                   | 落点                                                                    |
 | --- | ---------------------------------------------------------------------- | ----------------------------------------------------------------------- |
-| 2.7 | display retry/cancel `409` + queue `503` 的 OpenAPI 契约 + drift 测试  | `openapi/nhms.v1.yaml`、`main.py:715-733`、`tests/test_api_contract_pipeline_ops.py` |
-| 2.8 | retry/cancel 的 gateway-spy + 401/403/409 RBAC 矩阵 + no-write DB 断言 | `tests/test_retry_cancel_consistency.py`                                |
+| 2.7 | display retry `409` + queue `503` 的 OpenAPI 契约 + drift 测试（cancel 路由已随 #3394 退役） | `openapi/nhms.v1.yaml`、`main.py:715-733`、`tests/test_api_contract_pipeline_ops.py` |
+| 2.8 | retry 的 gateway-spy + 401/403/409 RBAC 矩阵（cancel 部分随 #3394 退役，其路径回 405） | `tests/test_retry_cancel_consistency.py`                                |
 | 3.6 | `JOB_LOG_*` 四个错误码进 OpenAPI + drift 测试                          | `openapi/nhms.v1.yaml`、`tests/test_pipeline_logs_artifacts.py`         |
 
 验证：`uv run ruff check . && uv run pytest -q tests/test_api_contract*.py tests/test_retry_cancel_consistency.py tests/test_pipeline_logs_artifacts.py`。改 OpenAPI 后需

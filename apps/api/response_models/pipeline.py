@@ -8,7 +8,6 @@ on PostgreSQL, text on the SQLite test double), hence ``datetime | str``.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
 
 from apps.api.response_models.envelope import OkEnvelope, OpenModel
 
@@ -128,61 +127,6 @@ class JobLogs(OpenModel):
     content: str
 
 
-class CancellationGap(OpenModel):
-    """``_slurm_cancellation_gap_payload`` (``error``) or
-    ``_unproven_slurm_cancellation_payload`` (``gateway_response``)."""
-
-    job_id: str
-    run_id: str
-    status: str
-    slurm_job_id: str | None
-    cancellation_proven: bool
-    error: dict[str, Any] | None = None
-    gateway_response: Any = None
-
-
-class IdempotentCancelJob(OpenModel):
-    job_id: str
-    slurm_job_id: str | None
-    note: str
-    error_code: str
-
-
-class HydroRunCancelTransition(OpenModel):
-    """``_cancel_hydro_run``."""
-
-    run_id: str
-    previous_status: str
-    status: str
-    preserved: bool
-
-
-class ForecastCycleCancelTransition(OpenModel):
-    """``_cancel_forecast_cycle``."""
-
-    cycle_id: str
-    previous_status: str
-    status: str
-    preserved: bool
-
-
-class CancelRunResult(OpenModel):
-    """``cancel_run``: the alias pairs (``cancelled``/``cancelled_jobs``, ...)
-    carry the same list."""
-
-    run_id: str
-    cancelled_jobs: list[PipelineJob]
-    cancelled: list[PipelineJob]
-    failed_jobs: list[CancellationGap]
-    slurm_failures: list[CancellationGap]
-    blocked_jobs: list[CancellationGap]
-    slurm_cancellation_gaps: list[CancellationGap]
-    partial_failure: bool
-    idempotent_jobs: list[IdempotentCancelJob]
-    hydro_run: HydroRunCancelTransition | None
-    forecast_cycle: ForecastCycleCancelTransition | None
-
-
 class StageDurationMetric(OpenModel):
     date: str
     stage: str
@@ -224,10 +168,6 @@ class PipelineJobPageEnvelope(_OpsEnvelope):
 class JobLogsEnvelope(_OpsEnvelope):
     identity: OpsLogIdentity | None = None
     data: JobLogs
-
-
-class CancelRunResultEnvelope(OkEnvelope):
-    data: CancelRunResult
 
 
 class StageDurationMetricListEnvelope(OkEnvelope):

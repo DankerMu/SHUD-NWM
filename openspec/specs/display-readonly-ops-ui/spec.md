@@ -18,12 +18,12 @@ The `/ops` frontend SHALL render as a read-only diagnostic surface when the serv
 
 #### Scenario: Display mode hides control buttons
 - **WHEN** `/ops` renders in display readonly mode
-- **THEN** real retry and cancel execution buttons are hidden or disabled for all user roles
-- **AND** the page does not initiate `POST /api/v1/runs/{run_id}/retry`, `POST /api/v1/runs/{run_id}/cancel`, or `/api/v1/slurm/*` control requests.
+- **THEN** no retry or cancel execution button is rendered for any user role
+- **AND** the page does not initiate `POST /api/v1/runs/{run_id}/retry` or `/api/v1/slurm/*` control requests, nor a request to the retired cancel path.
 
 #### Scenario: Compute mode can retain controls
 - **WHEN** `/ops` or monitoring renders in `compute_control` or `dev_monolith` mode and the user is authorized
-- **THEN** the existing cancel control can remain available according to RBAC; no retry control exists in any mode (#3179)
+- **THEN** no retry control and no cancel control exists, as in every mode (#3179, #3394; scenario title kept for archive continuity)
 - **AND** existing monitoring tests remain valid for non-display roles.
 
 #### Scenario: Display queue depth degradation

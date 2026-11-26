@@ -119,7 +119,7 @@ autopipe/parser/retention 共用的 `nhms` 角色抹平。现在每个组件自�
 | `nhms-output-parser` | `workers/output_parser`（autopipe 子进程）|
 | `nhms-refresh-coverage` | `scripts/node27_refresh_coverage.py`（autopipe 子进程）|
 | `nhms-display-api` | `apps/api/routes/hydro_display.py`（display API 只读连接池）|
-| `nhms-api-pipeline` | `apps/api/routes/pipeline.py`（同一 uvicorn 进程里的控制面 retry/cancel 引擎，**会写**）|
+| `nhms-api-pipeline` | `apps/api/routes/pipeline.py`（同一 uvicorn 进程里的运维查询：pipeline 状态、作业、日志、指标；自 #3394 起没有写入路由）|
 | `nhms-api-forecast` | `apps/api/routes/forecast.py` 的 forecast store 连接 |
 | `nhms-api-data-sources` | `apps/api/routes/data_sources.py` 的 forecast store + 气象站元数据查询 |
 | `nhms-api-best-available` | `apps/api/routes/best_available.py` 的 best-available 仓库 |
@@ -140,8 +140,8 @@ compression / raw-retention 每个 tick 的第一条连接）与
 **看到空串就一定不是在册生产 tick**，可以按上表照直处置。
 
 `nhms-display-api.service`（uvicorn `apps.api.main:app`，两个 worker）在同一进程里托管七个
-连接面，上表把它们拆成七个名字：`nhms-display-api` 是只读展示池，`nhms-api-pipeline` 与
-`nhms-api-models` 是**控制面写入**。名字由 route 层注入（`packages/common/*` 的 store 不
+连接面，上表把它们拆成七个名字：`nhms-display-api` 是只读展示池，`nhms-api-models` 是
+**控制面写入**，`nhms-api-pipeline` 自 #3394 起只读。名字由 route 层注入（`packages/common/*` 的 store 不
 硬编码任何名字），DSN 上的 `?application_name=` 依旧优先。静态闭包由
 `tests/test_node27_connection_attribution.py` 守着：从 `apps/api/route_registry.py` 出发
 遍历 import 图，新增的 router 或 store 连接面必须具名或写明 `unreachable` 理由。
@@ -172,7 +172,7 @@ compression / raw-retention 每个 tick 的第一条连接）与
   （`node-27-database-container-operations.md` §8）。端口为 `55432` 的 integration URL 会被 conftest
   以 usage error 拒绝。不要用裸生产 `DATABASE_URL` 跑 pytest —— 那正是把测试会话和生产 tick
   混在一张 `pg_stat_activity` 里的起点。
-- **display API 的写入面（`nhms-api-pipeline` / `nhms-api-models`）取消前先看日志。**
+- **display API 的写入面（`nhms-api-models`）取消前先看日志；`nhms-api-pipeline` 自 #3394 起只读。**
   自 #1704 起每个**经过 `error_response()` 的**错误响应都会在 `/tmp/display-api.log` 留一行
   `api_error request_id=… code=… status=… path=… details=…`（5xx 记 ERROR，4xx 记
   WARNING），用客户端拿到的 `X-Request-ID` 直接 grep 即可把一条 backend 对上一次请求：

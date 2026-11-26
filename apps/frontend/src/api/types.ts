@@ -469,23 +469,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/runs/{run_id}/cancel": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Cancel Run */
-        post: operations["cancel_run_api_v1_runs__run_id__cancel_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/v1/metrics/stage-duration": {
         parameters: {
             query?: never;
@@ -1967,52 +1950,6 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
-        /** CancelRunResult */
-        CancelRunResult: {
-            /** Run Id */
-            run_id: string;
-            /** Cancelled Jobs */
-            cancelled_jobs: components["schemas"]["PipelineJob"][];
-            /** Cancelled */
-            cancelled: components["schemas"]["PipelineJob"][];
-            /** Failed Jobs */
-            failed_jobs: components["schemas"]["CancellationGap"][];
-            /** Slurm Failures */
-            slurm_failures: components["schemas"]["CancellationGap"][];
-            /** Blocked Jobs */
-            blocked_jobs: components["schemas"]["CancellationGap"][];
-            /** Slurm Cancellation Gaps */
-            slurm_cancellation_gaps: components["schemas"]["CancellationGap"][];
-            /** Partial Failure */
-            partial_failure: boolean;
-            /** Idempotent Jobs */
-            idempotent_jobs: components["schemas"]["IdempotentCancelJob"][];
-            hydro_run: components["schemas"]["HydroRunCancelTransition"] | null;
-            forecast_cycle: components["schemas"]["ForecastCycleCancelTransition"] | null;
-        } & {
-            [key: string]: unknown;
-        };
-        /** CancellationGap */
-        CancellationGap: {
-            /** Job Id */
-            job_id: string;
-            /** Run Id */
-            run_id: string;
-            /** Status */
-            status: string;
-            /** Slurm Job Id */
-            slurm_job_id: string | null;
-            /** Cancellation Proven */
-            cancellation_proven: boolean;
-            /** Error */
-            error?: {
-                [key: string]: unknown;
-            } | null;
-            /** Gateway Response */
-            gateway_response?: unknown;
-        } & {
-            [key: string]: unknown;
-        };
         /** CrosswalkCreateResult */
         CrosswalkCreateResult: {
             /** Count */
@@ -2114,19 +2051,6 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
-        /** ForecastCycleCancelTransition */
-        ForecastCycleCancelTransition: {
-            /** Cycle Id */
-            cycle_id: string;
-            /** Previous Status */
-            previous_status: string;
-            /** Status */
-            status: string;
-            /** Preserved */
-            preserved: boolean;
-        } & {
-            [key: string]: unknown;
-        };
         /** ForecastCyclePage */
         ForecastCyclePage: {
             /** Items */
@@ -2146,32 +2070,6 @@ export interface components {
             type: string;
             /** Coordinates */
             coordinates: unknown[];
-        } & {
-            [key: string]: unknown;
-        };
-        /** HydroRunCancelTransition */
-        HydroRunCancelTransition: {
-            /** Run Id */
-            run_id: string;
-            /** Previous Status */
-            previous_status: string;
-            /** Status */
-            status: string;
-            /** Preserved */
-            preserved: boolean;
-        } & {
-            [key: string]: unknown;
-        };
-        /** IdempotentCancelJob */
-        IdempotentCancelJob: {
-            /** Job Id */
-            job_id: string;
-            /** Slurm Job Id */
-            slurm_job_id: string | null;
-            /** Note */
-            note: string;
-            /** Error Code */
-            error_code: string;
         } & {
             [key: string]: unknown;
         };
@@ -2411,27 +2309,6 @@ export interface components {
                     error: {
                         /** @enum {string} */
                         code: "CONTROL_PLANE_MANUAL_ACTION_REQUIRED";
-                        message: string;
-                        details?: {
-                            [key: string]: unknown;
-                        } | null;
-                    };
-                };
-            };
-        };
-        /** @description The run id has no pipeline job and no hydro run record. */
-        RunNotFound: {
-            headers: {
-                [name: string]: unknown;
-            };
-            content: {
-                "application/json": {
-                    request_id: string;
-                    /** @enum {string} */
-                    status: "error";
-                    error: {
-                        /** @enum {string} */
-                        code: "RUN_NOT_FOUND";
                         message: string;
                         details?: {
                             [key: string]: unknown;
@@ -3610,41 +3487,6 @@ export interface operations {
             409: components["responses"]["ControlPlaneManualActionRequired"];
             "4XX": components["responses"]["Error"];
             "5XX": components["responses"]["Error"];
-        };
-    };
-    cancel_run_api_v1_runs__run_id__cancel_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                run_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SuccessEnvelope"] & {
-                        data: components["schemas"]["CancelRunResult"];
-                    };
-                };
-            };
-            404: components["responses"]["RunNotFound"];
-            409: components["responses"]["ControlPlaneManualActionRequired"];
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
         };
     };
     stage_duration_metrics_api_v1_metrics_stage_duration_get: {
