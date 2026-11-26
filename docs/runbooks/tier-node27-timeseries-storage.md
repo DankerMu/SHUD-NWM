@@ -3599,8 +3599,9 @@ Measured inputs (node-27, 2026-11-26, the cluster rebuilt on 2026-11-05):
 - **Chunk size.** `hydro.river_timeseries` day chunks are 41.8 GiB (44.9 GB)
   uncompressed, `met.forcing_station_timeseries` day chunks 2.6 GiB (2.8 GB).
 - **Rate ≈ 11.3 s/GB, per-chunk overhead included.** Unit run times from the
-  journal: 2026-11-25 one river and one forcing chunk (47.8 GB) in 530 s;
-  2026-11-20, 11-22 and 11-24 about 1,015 s each; 11-21 and 11-23 about 48 s.
+  journal: 2026-11-20, 11-22 and 11-24 two river chunks (89.8 GB) in about
+  1,015 s each = 11.3 s/GB; 2026-11-25 one river and one forcing chunk
+  (47.8 GB) in 530 s = 11.1 s/GB; 11-21 and 11-23 about 48 s.
   The 55 s/GB of 2026-09-18 below was measured on the retired device.
 - **Arrival.** One river and one forcing day chunk per day: 2 per day on
   average. The cutoff follows the display watermark, and on 2026-11-20, 11-22
@@ -3626,19 +3627,37 @@ The constraints:
    chunk that was put off, taken newest-first within its hypertable.
 3. **What the third slot adds as a risk.** The §4.11 tick-deadline guard puts a
    chunk off when more than 2700 s have elapsed before it would start
-   (`wrapper wall − fence wait − cleanup margin`). With three river chunks at
-   `t` seconds each the wall is overrun only for `1300 < t ≤ 1350`
-   (28.9–30 s/GB, 2.6 times today's rate); slower than that and the third chunk
-   is put off instead. The band that exists for two chunks
-   (`1950 < t ≤ 2700`) is unchanged. An overrun is a failed unit, and the unit
-   mails on failure (#3380 slice 1). A chunk that waits for a lock is put off
-   after `lock_timeout` (5 s) and does not eat the wall.
+   (`wrapper wall − fence wait − cleanup margin`). With no fence wait and three
+   river chunks at `t` seconds each, the wall is overrun only for
+   `1300 < t ≤ 1350` (28.9–30 s/GB, 2.6 times today's rate); slower than that
+   and the third chunk is put off instead. The band that exists for two chunks
+   (`1950 < t ≤ 2700`) is unchanged. Fence waits open a second way that bound 2
+   did not have: three river chunks overrun when `2t + w1 + w2 ≤ 2700` and
+   `3t + w1 + w2 + w3 > 3900`, which at today's `t ≈ 507 s` needs more than
+   2380 s of fence waits in one tick (each at most 900 s), i.e. a river backlog
+   of three with the ingest fence held nearly the whole time for all three. An
+   overrun rolls the running chunk back and is a failed unit, and the unit
+   mails on failure (#3380 slice 1). A chunk that loses the lock wait costs its
+   rewrite time plus `lock_timeout` (5 s): the lock is taken after the rewrite,
+   so only the wait is bounded, not the work.
 
 **Retention overlap.** Unchanged: a tick from 04:25Z ends long before the
 06:36Z retention timer.
 
 **Catch-up rule.** Unchanged: a compress timeout above the default still
 requires `PER_TICK_BOUND=1` (§4.5).
+
+**Timer cadence.** No change. Chunk count is set by the time dimension (one
+day per chunk on both hypertables), not by ingest volume: two arrivals a day
+on average, three slots in the one daily tick.
+
+**Invalidation conditions for this derivation.** Re-derive when the chunk
+interval of a governed hypertable changes; when a river day chunk grows or
+the rate degrades so that three of them no longer fit the wall
+(`3 × GB × s/GB > 3900 s`: at 44.9 GB that is 28.9 s/GB, at 11.3 s/GB it is
+115 GB per chunk); when the wrapper wall / timeout / fence-wait values change
+(including a §4.5 override window); when the retention window or either timer
+changes; or when a hypertable joins or leaves the lane.
 
 **Previous decision (2026-09-18, #2425): `PER_TICK_BOUND=2`.** The text from
 here to "Selection order" is that derivation, kept as history; its inputs
@@ -3740,7 +3759,8 @@ tells which: a fence `NODE27_TIMESERIES_COMPRESSION_ENV_FILE` and fence
 `Environment=` = after. Record any env change with the receipt of the next
 tick.
 
-**Invalidation conditions for this derivation.** Re-derive when the chunk
+**Invalidation conditions of the 2026-09-18 derivation (history; the current
+ones are in the 2026-11-26 block above).** Re-derive when the chunk
 interval changes, chunk size leaves the 19–21 GB band by more than the ~1590 s
 wall margin allows (≈ 29 GB/chunk at 55 s/GB), the wrapper wall/timeout triple
 changes (including a §4.5 override window), the retention window or timer

@@ -27,18 +27,20 @@ NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS=172800
 # supersedes bound 2 of 2026-09-18, whose ~55 s/GB belongs to the retired
 # disk). Measured on node-27: hydro.river_timeseries day chunks are 44.9 GB,
 # met.forcing_station_timeseries day chunks 2.8 GB, and they compress at
-# ~11.3 s/GB including per-chunk overhead (2026-11-25 tick: 47.8 GB in
-# 530 s). Throughput: on average one river and one forcing chunk arrive per
-# day, i.e. 2 chunks/day (the cutoff follows the display watermark, which
-# can advance by two days at once); bound 2 had no slack, so a chunk put off
-# once was never selected again -- every later tick found two newer ones.
-# The third slot is the slack: averaged over the days, one slot a day is
-# left for a chunk that was put off. Wall: the worst selection, three river
-# chunks, is 3 x 44.9 GB x 11.3 s/GB ~= 1520 s <= the 3900 s wrapper wall.
-# The tick-deadline guard puts a chunk off untouched when more than 2700 s
-# have elapsed before it starts, so three river chunks overrun the wall
-# only at 28.9-30 s/GB (2.6x today's rate); slower than that the third is
-# put off. Selection is newest-first within each hypertable in
+# ~11.3 s/GB including per-chunk overhead (2026-11-24 tick: two river
+# chunks, 89.8 GB, in 1015 s). Throughput: on average one river and one
+# forcing chunk arrive per day, i.e. 2 chunks/day (the cutoff follows the
+# display watermark, which can advance by two days at once); bound 2 had no
+# slack, so a chunk put off once was never selected again -- every later
+# tick found two newer ones. The third slot is the slack: averaged over the
+# days, one slot a day is left for a chunk that was put off. Wall: the worst
+# selection, three river chunks, is 3 x 44.9 GB x 11.3 s/GB ~= 1520 s <=
+# the 3900 s wrapper wall. The tick-deadline guard puts a chunk off
+# untouched when more than 2700 s have elapsed before it starts, so, with
+# no fence wait, three river chunks overrun the wall only at 28.9-30 s/GB
+# (2.6x today's rate); slower than that the third is put off. Long fence
+# waits on all three chunks of a river backlog can also overrun it
+# (runbook). Selection is newest-first within each hypertable in
 # (schema, name) order, so the slots stay off the chunks DB retention drops
 # next. A raised COMPRESS_TIMEOUT_MS still requires bound 1 (see the budget
 # chain below). Full derivation: runbook section 4 "Per-tick capacity" and
