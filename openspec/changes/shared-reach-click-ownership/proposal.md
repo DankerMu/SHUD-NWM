@@ -10,9 +10,13 @@ Measured on the live display (2026-11-25): seven real clicks along `basins_byh_s
 opened a segment of `basins_cj_main`; the `basins_byh` segment cannot be opened from the map at all.
 
 Nine pairs of active networks share reaches (read-only PostGIS count on node-27, 2026-11-26, 66 active
-models): `basins_cj_main` with `basins_byh`, `basins_hj`, `basins_jialingjiang`, `basins_mj`,
-`basins_wj`; `basins_dth_yj` with `basins_dth_zj` (708 km); `basins_pearl_xj` with `basins_sw_yjhj`
-(1,224 km); and two pairs that only touch. No pair has equal segment counts.
+models; output-river segments only, the ones the map draws): `basins_cj_main` with `basins_byh`
+(4.9 km, one segment of `basins_byh`), `basins_hj` (53.2 km), `basins_jialingjiang` (2.2 km),
+`basins_mj` (4.3 km) and `basins_wj` (2.0 km); `basins_dth_yj` with `basins_dth_zj` (177 km, 90
+segments each); `basins_pearl_xj` with `basins_sw_yjhj` (306 km); and two pairs that only touch. No
+pair has equal segment counts. (A first count on the issue gave four times these lengths and twice the
+segments: it joined the reach rows and the output-river rows of `core.river_segment`, which hold the
+same geometry twice per network.)
 
 By the id order, the nested network (the one with fewer segments) already wins in seven of the nine
 pairs: `basins_hj`, `basins_jialingjiang`, `basins_mj`, `basins_wj`, `basins_dth_zj`, `basins_sw_yjhj`
@@ -76,8 +80,8 @@ that reach.
 ## Accepted consequences (stated for the owner)
 
 - **The larger network's forecast on a shared reach stays unreachable from the map.** That is option 1
-  of the issue. On the two long pairs it is a lot of river (`basins_dth_yj` 708 km against
-  `basins_dth_zj`, `basins_pearl_xj` 1,224 km against `basins_sw_yjhj`), and it is already so today:
+  of the issue. On the two long pairs it is a lot of river (`basins_dth_yj` 177 km against
+  `basins_dth_zj`, `basins_pearl_xj` 306 km against `basins_sw_yjhj`), and it is already so today:
   both are among the seven pairs the id order happens to get right. This change does not move them.
 - **Within 8 px of a nested network's segment the nested network wins**, also at a confluence where
   the pointer is nearer to a different reach of the larger network.
