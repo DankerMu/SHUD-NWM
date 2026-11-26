@@ -111,7 +111,7 @@ SHALL say so.
 ### Requirement: The compute units' environment-file authority is documented
 
 `infra/env/README.md` SHALL carry a table mapping every node-22 user systemd unit (`nhms-compute-scheduler`,
-`nhms-scheduler-evidence-retention`, `nhms-scheduler-file-provider-refresh`, `nhms-compute-api`, `nhms-slurm-gateway`)
+`nhms-scheduler-evidence-retention`, `nhms-scheduler-file-provider-refresh`, `nhms-slurm-gateway`)
 to the EnvironmentFile(s) it loads and to the tracked template for each, marking `compute.host.env` as untracked with
 no template, and SHALL state that an `infra/env/compute.env` still present on the host is a leftover of the retired
 docker/compose lane that no unit reads and that has no tracked template.

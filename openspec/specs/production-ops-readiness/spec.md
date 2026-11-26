@@ -261,7 +261,8 @@ historical node-22 writer topology.
 
 - **WHEN** the runbook describes node-22 production responsibilities
 - **THEN** it SHALL identify node-22 as compute/Slurm/SHUD plus Slurm Gateway
-  and diagnostic API host
+  host, and SHALL NOT present an API other than the gateway as running there (the
+  diagnostic API unit is retired, #3394)
 - **AND** it SHALL NOT instruct operators to use node-22 PostgreSQL `:55433` as
   a current NHMS production database.
 - **AND** it SHALL NOT present node-22 scheduler, orchestrator, ingest, or DB

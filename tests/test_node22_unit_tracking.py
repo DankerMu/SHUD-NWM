@@ -1,11 +1,14 @@
 """#2910: the node-22 live user units are tracked byte-exactly with a manifest.
 
-`infra/systemd/node22/` holds byte-exact copies of eight deployed files: seven
+`infra/systemd/node22/` holds byte-exact copies of seven deployed files: six
 recorded in the read-only receipt
 `docs/runbooks/receipts/2026-10-16-node22-live-units-snapshot.md` and, since
 #3359, the gateway's `20-runtime-path.conf` drop-in recorded in
 `docs/runbooks/receipts/2026-11-26-w3-gateway-runtime-path-dropin-snapshot.md`.
-The two receipts do not overlap and together record exactly the eight.
+The 2026-10-16 receipt also records `nhms-compute-api.service`, retired by
+#3394: receipts are history and keep their rows, so the two receipts (which do
+not overlap) record exactly the seven tracked files plus that one retired name,
+and the retired name is neither a file under `node22/` nor a manifest entry.
 `infra/systemd/node22/MANIFEST.json` lists every file deployed on node-22
 (`{deployed_relative_path, tracked_path, sha256}`), including the fourteen
 top-level oneshot units tracked at `infra/systemd/<name>` (twelve until #3121)
@@ -42,7 +45,6 @@ AUTHORITY_TOKEN_PREFIX = "NWM/infra/env/"
 SECRET_NAME_SUFFIXES = ("TOKEN", "SECRET", "PASS", "PASSWORD")
 
 NODE22_DEPLOYED_FILES = (
-    "nhms-compute-api.service",
     "nhms-compute-scheduler.service",
     "nhms-compute-scheduler.timer",
     "nhms-compute-scheduler.service.d/10-slurm-gateway-token.conf",
@@ -66,6 +68,8 @@ TOP_LEVEL_ONESHOTS = tuple(
     for suffix in ("service", "timer")
 )
 W3_ONLY_UNITS = ("nhms-w3-journal-backup.service", "nhms-w3-journal-backup.timer")
+# #3394: recorded by the 2026-10-16 receipt, no longer tracked or listed.
+RETIRED_DEPLOYED_FILES = frozenset({"nhms-compute-api.service"})
 EXPECTED_ENTRIES = frozenset(
     {(rel, NODE22_TRACKED_PREFIX + rel) for rel in NODE22_DEPLOYED_FILES}
     | {(name, f"infra/systemd/{name}") for name in TOP_LEVEL_ONESHOTS + W3_ONLY_UNITS}
@@ -200,6 +204,26 @@ def union_of_receipt_tables(tables: list[dict[str, str]]) -> tuple[dict[str, str
     return union, overlap
 
 
+def receipt_name_violations(recorded: set[str], tracked: set[str]) -> dict[str, list[str]]:
+    """How the receipts' names fail "the tracked files plus the retired names".
+
+    ``unrecorded`` are tracked names no receipt records; ``untracked_unretired``
+    are recorded names that are neither tracked nor retired; ``retired_missing``
+    are retired names the receipts no longer record or that are tracked again.
+    Every list is empty when the receipts record exactly ``tracked`` plus
+    ``RETIRED_DEPLOYED_FILES`` and ``tracked`` holds no retired name.
+    """
+    recorded_untracked = recorded - tracked
+    return {
+        "unrecorded": sorted(tracked - recorded),
+        "untracked_unretired": sorted(recorded_untracked - RETIRED_DEPLOYED_FILES),
+        "retired_missing": sorted(RETIRED_DEPLOYED_FILES - recorded_untracked),
+    }
+
+
+NO_RECEIPT_NAME_VIOLATIONS = {"unrecorded": [], "untracked_unretired": [], "retired_missing": []}
+
+
 def load_manifest() -> dict:
     return json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
 
@@ -259,14 +283,32 @@ def test_every_node22_file_is_listed_in_the_manifest() -> None:
 # --- (c) node22/ copies equal the receipt --------------------------------------
 
 
-def test_the_two_receipts_record_disjoint_sets_that_together_equal_the_eight() -> None:
+def test_the_two_receipts_record_disjoint_sets_that_together_equal_the_seven_and_the_retired_unit() -> None:
     snapshot, gateway_dropin = (receipt_sha256_table(path.read_text(encoding="utf-8")) for path in RECEIPT_PATHS)
     union, overlap = union_of_receipt_tables([snapshot, gateway_dropin])
 
-    assert set(snapshot) == set(NODE22_DEPLOYED_FILES) - {"nhms-slurm-gateway.service.d/20-runtime-path.conf"}
+    assert len(NODE22_DEPLOYED_FILES) == 7
+    assert (
+        set(snapshot)
+        == (set(NODE22_DEPLOYED_FILES) - {"nhms-slurm-gateway.service.d/20-runtime-path.conf"}) | RETIRED_DEPLOYED_FILES
+    )
     assert set(gateway_dropin) == {"nhms-slurm-gateway.service.d/20-runtime-path.conf"}
     assert overlap == set()
-    assert set(union) == set(NODE22_DEPLOYED_FILES), sorted(set(union) ^ set(NODE22_DEPLOYED_FILES))
+    assert receipt_name_violations(set(union), set(NODE22_DEPLOYED_FILES)) == NO_RECEIPT_NAME_VIOLATIONS
+
+
+def test_the_retired_unit_is_neither_a_node22_file_nor_a_manifest_entry() -> None:
+    """#3394: the receipt keeps its row; the repository no longer carries the unit."""
+    on_disk = {path.name for path in tracked_node22_files()}
+    listed = {
+        name
+        for entry in load_manifest()["entries"]
+        for name in (entry["deployed_relative_path"], PurePosixPath(entry["tracked_path"]).name)
+    }
+
+    assert RETIRED_DEPLOYED_FILES.isdisjoint(NODE22_DEPLOYED_FILES)
+    assert RETIRED_DEPLOYED_FILES.isdisjoint(on_disk), sorted(RETIRED_DEPLOYED_FILES & on_disk)
+    assert RETIRED_DEPLOYED_FILES.isdisjoint(listed), sorted(RETIRED_DEPLOYED_FILES & listed)
 
 
 def test_node22_copies_match_the_receipt_table() -> None:
@@ -274,7 +316,7 @@ def test_node22_copies_match_the_receipt_table() -> None:
         [receipt_sha256_table(path.read_text(encoding="utf-8")) for path in RECEIPT_PATHS]
     )
     assert overlap == set()
-    assert set(receipt) == set(NODE22_DEPLOYED_FILES), sorted(set(receipt) ^ set(NODE22_DEPLOYED_FILES))
+    assert receipt_name_violations(set(receipt), set(NODE22_DEPLOYED_FILES)) == NO_RECEIPT_NAME_VIOLATIONS
 
     node22_entries = [
         entry for entry in load_manifest()["entries"] if entry["tracked_path"].startswith(NODE22_TRACKED_PREFIX)
@@ -424,3 +466,30 @@ def test_receipt_union_reports_a_path_recorded_twice() -> None:
 
     assert union_of_receipt_tables([first, {}]) == (first, set())
     assert union_of_receipt_tables([first, second]) == ({"a.service": "0" * 64, "b.service": "2" * 64}, {"b.service"})
+
+
+def test_receipt_name_comparison_refuses_every_other_untracked_or_unrecorded_name() -> None:
+    """#3394: the receipts cannot be edited, so the comparison is shown on synthetic names."""
+    tracked = {"a.service", "a.service.d/10-x.conf"}
+    retired = set(RETIRED_DEPLOYED_FILES)
+
+    assert receipt_name_violations(tracked | retired, tracked) == NO_RECEIPT_NAME_VIOLATIONS
+    # A receipt that records another name nobody tracks.
+    assert receipt_name_violations(tracked | retired | {"b.service"}, tracked) == {
+        **NO_RECEIPT_NAME_VIOLATIONS,
+        "untracked_unretired": ["b.service"],
+    }
+    # A tracked file no receipt records.
+    assert receipt_name_violations({"a.service"} | retired, tracked) == {
+        **NO_RECEIPT_NAME_VIOLATIONS,
+        "unrecorded": ["a.service.d/10-x.conf"],
+    }
+    # The retired name tracked again, or no longer recorded.
+    assert receipt_name_violations(tracked | retired, tracked | retired) == {
+        **NO_RECEIPT_NAME_VIOLATIONS,
+        "retired_missing": sorted(retired),
+    }
+    assert receipt_name_violations(tracked, tracked) == {
+        **NO_RECEIPT_NAME_VIOLATIONS,
+        "retired_missing": sorted(retired),
+    }

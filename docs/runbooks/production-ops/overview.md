@@ -20,7 +20,7 @@
 - node-27 display API 由 user systemd `nhms-display-api.service` 托管，
   `scripts/ops/start-display-api.sh` 负责安装权威 unit、平滑接管和 smoke check；
   当前监听 `127.0.0.1:8080`，默认 2 workers；公网入口是 `https://test.nwm.ac.cn`。
-- node-22 是计算与 Slurm host：运行 Slurm Gateway、诊断 API、DB-free
+- node-22 是计算与 Slurm host：运行 Slurm Gateway、DB-free
   production scheduler timer、Slurm/SHUD wrapper，并向 NFS 写
   object-store/published 产物；node-22 不作为当前 NHMS 业务数据库 writer。
 - 完整 forcing 包和 SHUD run 输出的共享真相源是
@@ -38,7 +38,7 @@
 | node-27 ingest | node-27 `/home/nwm/NWM` | 扫描 object-store runs、seed registry、register、parse、publish、refresh coverage | `infra/env/node27-ingest.env` -> `nhms-node27-autopipe.timer` -> `scripts/node27_autopipe_cron.sh` -> `scripts/node27_autopipeline.py` |
 | node-27 display API | node-27 `127.0.0.1:8080` | display_readonly FastAPI, `/health`, `/api/v1/*`, frontend backend | `infra/systemd/nhms-display-api.service` -> `scripts/ops/start-display-api.sh` |
 | node-27 public entry | `https://test.nwm.ac.cn` | nginx reverse proxy to local display API | `/etc/nginx/conf.d/test.nwm.ac.cn.conf` |
-| node-22 compute | node-22 `/scratch/frd_muziyao/NWM` | Slurm Gateway、diagnostic API、DB-free scheduler、Slurm/SHUD compute wrapper | `nhms-compute-scheduler.timer`, `/scratch/frd_muziyao/NWM/.venv/bin/python -m services.slurm_gateway`, Slurm jobs |
+| node-22 compute | node-22 `/scratch/frd_muziyao/NWM` | Slurm Gateway（该 host 唯一的 API）、DB-free scheduler、Slurm/SHUD compute wrapper | `nhms-compute-scheduler.timer`, `/scratch/frd_muziyao/NWM/.venv/bin/python -m services.slurm_gateway`, Slurm jobs |
 | Shared NFS data | 22 `/ghdc/data/nwm`, 27 `/home/ghdc/nwm` | object-store mirror, published artifacts, Basins source data | NFS mount, no rsync step |
 
 Node-22 historical PostgreSQL `:55433` was archived and stopped on 2026-06-29

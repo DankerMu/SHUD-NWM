@@ -118,20 +118,21 @@ scheduler token 到 reset 是 403）。token 只经 POST/DELETE 变更请求转�
 health/read 路由保持匿名且不携带。**没有该 token 时 scheduler preflight
 fail-closed**（不会仅凭匿名 health 就报 submit-ready）。
 
-确认 node-22 Gateway 与诊断 API：
+确认 node-22 Slurm Gateway：
 
 ```bash
 ssh -p 32099 frd_muziyao@210.77.77.22
-pgrep -af '[s]ervices.slurm_gateway|uvicorn apps[.]api[.]main'
-ss -ltnp 2>/dev/null | grep -E ':(8000|8090)\b' || true
+pgrep -af '[s]ervices.slurm_gateway'
+ss -ltnp 2>/dev/null | grep -E ':8090\b' || true
 curl -fsS --max-time 2 http://127.0.0.1:8090/api/v1/slurm/health
 squeue -u "$USER" -o "%.18i %.20j %.2t %.10M %.10l %.6D %R"
 ```
 
-> 注：`/health`（bare）是 node-22 历史诊断 API 的路由（见本节末尾 2026-06-22
-> 现场验证，当时在 `:8001` 返回 `{"status":"ok",...}`）；standalone Slurm
-> gateway 的 health 实际是 `/api/v1/slurm/health`。8090 端口上只有
-> `/api/v1/slurm/health`，不要混用两个路径。
+> 注：`/health`（bare）是已退役的 `nhms-compute-api.service`（#3394）的路由
+> （见本节末尾 2026-06-22 现场验证，当时在 `:8001` 返回
+> `{"status":"ok",...}`）；计算 host 上除 Slurm Gateway 外不再承载任何 API。
+> standalone Slurm gateway 的 health 实际是 `/api/v1/slurm/health`。8090 端口上
+> 只有 `/api/v1/slurm/health`，不要混用两个路径。
 
 #### 3.2.1 凭据与听端口边界（#1684）
 
@@ -514,7 +515,8 @@ systemctl --user is-active nhms-compute-scheduler.timer
 2026-06-22 现场验证（历史）：
 
 - `python -m services.slurm_gateway` 在 node-22 运行。
-- node-22 diagnostic API `/health` 在 `:8001` 返回 `{"status":"ok",...}`。
+- node-22 diagnostic API `/health` 在 `:8001` 返回 `{"status":"ok",...}`（该单元
+  `nhms-compute-api.service` 已由 #3394 退役）。
 - node-22 `/ghdc/data/nwm/object-store` 与 `/ghdc/data/nwm/published`
   可见，是 node-27 `/home/ghdc/nwm/...` 的同一份 NFS 数据面。
 

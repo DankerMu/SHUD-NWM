@@ -1,7 +1,7 @@
 """#2911: the read-only, manifest-driven node-22 unit drift probe.
 
 Every case builds a fake repository under ``tmp_path`` with the real
-``MANIFEST.json`` and the nineteen tracked files it names copied to the same
+``MANIFEST.json`` and the twenty-four tracked files it names copied to the same
 relative paths (``infra/systemd/node22/MANIFEST.json`` sits at depth 3, so the
 probe's ``parents[3]`` is the fake repo root), deploys byte-identical copies
 into a fake ``systemd/user`` directory, then mutates one side per scenario.
@@ -45,6 +45,10 @@ RECEIPT_KEYS = {
 }
 ONESHOT = "nhms-scheduler-journal-retention.service"
 DROPIN = "nhms-compute-scheduler.service.d/10-slurm-gateway-token.conf"
+# A top-level `.service` under `infra/systemd/node22/`; first in the manifest since #3394.
+NODE22_UNIT = "nhms-compute-scheduler.service"
+# #3394: retired, no longer a manifest entry; a deployed copy is untracked drift.
+RETIRED_UNIT = "nhms-compute-api.service"
 
 
 def real_entries() -> list[dict[str, str]]:
@@ -218,13 +222,19 @@ def test_an_untracked_dropin_is_deployed(layout: Layout) -> None:
 
 
 def test_untracked_top_level_units_are_listed_sorted(layout: Layout) -> None:
+    assert RETIRED_UNIT not in [entry["deployed_relative_path"] for entry in real_entries()]
     (layout.systemd / "nhms-zz-new.timer").write_text("[Timer]\n", encoding="utf-8")
     (layout.systemd / "nhms-aa-new.service").write_text("[Service]\n", encoding="utf-8")
     (layout.systemd / "other.service").write_text("[Service]\n", encoding="utf-8")
+    # An installed copy of the unit retired by #3394 is drift, not a known entry.
+    (layout.systemd / RETIRED_UNIT).write_text("[Service]\nExecStart=/bin/true\n", encoding="utf-8")
 
     assert probe.main(layout.argv()) == 1
 
-    assert layout.read_receipt()["untracked"] == ["nhms-aa-new.service", "nhms-zz-new.timer"]
+    receipt = layout.read_receipt()
+    assert receipt["exit_code"] == 1
+    assert receipt["entries"] == expected_entries()
+    assert receipt["untracked"] == ["nhms-aa-new.service", RETIRED_UNIT, "nhms-zz-new.timer"]
 
 
 def test_a_manifest_entry_is_missing_on_the_host(layout: Layout) -> None:
@@ -326,19 +336,19 @@ def _duplicate_entry(lay: Layout) -> None:
 
 def _entry_not_an_object(lay: Layout) -> None:
     document = json.loads(lay.manifest.read_text(encoding="utf-8"))
-    document["entries"].append("nhms-compute-api.service")
+    document["entries"].append(NODE22_UNIT)
     lay.write_manifest(document)
 
 
 def _deep_deployed_path(lay: Layout) -> None:
-    _mutate_entry(lay, 2, deployed_relative_path="nhms-compute-scheduler.service.d/sub/10-slurm-gateway-token.conf")
+    _mutate_entry(lay, _index_of(DROPIN), deployed_relative_path=DROPIN.replace(".service.d/", ".service.d/sub/"))
 
 
 def _tracked_outside_infra_systemd(lay: Layout) -> None:
-    moved = lay.repo / "infra/env/nhms-compute-api.service"
+    moved = lay.repo / "infra/env" / NODE22_UNIT
     moved.parent.mkdir(parents=True)
-    shutil.copyfile(lay.repo / "infra/systemd/node22/nhms-compute-api.service", moved)
-    _mutate_entry(lay, 0, tracked_path="infra/env/nhms-compute-api.service")
+    shutil.copyfile(lay.repo / "infra/systemd/node22" / NODE22_UNIT, moved)
+    _mutate_entry(lay, _index_of(NODE22_UNIT), tracked_path=f"infra/env/{NODE22_UNIT}")
 
 
 def _tracked_sha_mismatch(lay: Layout) -> None:
@@ -377,49 +387,53 @@ EXIT_2_CASES = [
     ("entry-extra-key", lambda lay: _mutate_entry(lay, 0, mode="0644"), False, "extra=['mode']", None),
     (
         "deployed-absolute",
-        lambda lay: _mutate_entry(lay, 0, deployed_relative_path="/etc/systemd/user/nhms-compute-api.service"),
+        lambda lay: _mutate_entry(
+            lay, _index_of(NODE22_UNIT), deployed_relative_path=f"/etc/systemd/user/{NODE22_UNIT}"
+        ),
         False,
         "deployed_relative_path is absolute",
         None,
     ),
     (
         "tracked-absolute",
-        lambda lay: _mutate_entry(lay, 0, tracked_path="/infra/systemd/node22/nhms-compute-api.service"),
+        lambda lay: _mutate_entry(lay, _index_of(NODE22_UNIT), tracked_path=f"/infra/systemd/node22/{NODE22_UNIT}"),
         False,
         "tracked_path is absolute",
         None,
     ),
     (
         "deployed-dotdot",
-        lambda lay: _mutate_entry(lay, 0, deployed_relative_path="../nhms-compute-api.service"),
+        lambda lay: _mutate_entry(lay, _index_of(NODE22_UNIT), deployed_relative_path=f"../{NODE22_UNIT}"),
         False,
         "deployed_relative_path contains a '..' segment",
         None,
     ),
     (
         "tracked-dotdot",
-        lambda lay: _mutate_entry(lay, 0, tracked_path="infra/systemd/../systemd/node22/nhms-compute-api.service"),
+        lambda lay: _mutate_entry(
+            lay, _index_of(NODE22_UNIT), tracked_path=f"infra/systemd/../systemd/node22/{NODE22_UNIT}"
+        ),
         False,
         "tracked_path contains a '..' segment",
         None,
     ),
     (
         "deployed-dot-prefix",
-        lambda lay: _mutate_entry(lay, 0, deployed_relative_path="./nhms-compute-api.service"),
+        lambda lay: _mutate_entry(lay, _index_of(NODE22_UNIT), deployed_relative_path=f"./{NODE22_UNIT}"),
         False,
         "deployed_relative_path is not a normalized relative POSIX path",
         None,
     ),
     (
         "deployed-double-slash",
-        lambda lay: _mutate_entry(lay, 2, deployed_relative_path=DROPIN.replace("/", "//")),
+        lambda lay: _mutate_entry(lay, _index_of(DROPIN), deployed_relative_path=DROPIN.replace("/", "//")),
         False,
         "deployed_relative_path is not a normalized relative POSIX path",
         None,
     ),
     (
         "deployed-trailing-slash",
-        lambda lay: _mutate_entry(lay, 0, deployed_relative_path="nhms-compute-api.service/"),
+        lambda lay: _mutate_entry(lay, _index_of(NODE22_UNIT), deployed_relative_path=f"{NODE22_UNIT}/"),
         False,
         "deployed_relative_path is not a normalized relative POSIX path",
         None,

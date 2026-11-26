@@ -39,8 +39,12 @@ Do not use unprefixed `PUBLISHED_ARTIFACT_ROOT` as an app runtime variable.
 ## node-22 unit → EnvironmentFile authority (#1694)
 
 Which file a node-22 user systemd unit actually loads. Paths are on node-22
-under `/scratch/frd_muziyao/`. The first five rows were verified read-only on
-the live host 2026-09-02; the `nhms-node22-unit-failure-alert@.service` row was
+under `/scratch/frd_muziyao/`. The rows of `nhms-compute-scheduler.service`,
+`nhms-scheduler-evidence-retention.service`,
+`nhms-scheduler-file-provider-refresh.service` and `nhms-slurm-gateway.service`
+were verified read-only on the live host 2026-09-02; the fifth unit of that
+reading, `nhms-compute-api.service`, is retired (#3394) and has no row. The
+`nhms-node22-unit-failure-alert@.service` row was
 deployed 2026-11-12 (issue 3127; the env file sends through the SMTPS wrapper
 `scripts/node22_smtp_sendmail.sh`), receipt
 `docs/runbooks/receipts/2026-11-12-issue-3127-node22-unit-failure-alert-deploy.md`.
@@ -50,7 +54,6 @@ deployed 2026-11-12 (issue 3127; the env file sends through the SMTPS wrapper
 | `nhms-compute-scheduler.service` | `NWM/infra/env/compute.scheduler-dbfree.env` + `nhms-prod/secrets/slurm-gateway.env` | `compute.scheduler-dbfree.env.example`; the secret file has none by design (credential-bearing, mode 0600, see #1684 above) |
 | `nhms-scheduler-evidence-retention.service` | `NWM/infra/env/compute.scheduler-dbfree.env` | `compute.scheduler-dbfree.env.example` |
 | `nhms-scheduler-file-provider-refresh.service` | `NWM/infra/env/compute.scheduler-provider-refresh.env` | `compute.scheduler-provider-refresh.env.example` |
-| `nhms-compute-api.service` | `NWM/infra/env/compute.host.env` | **untracked, no template** |
 | `nhms-slurm-gateway.service` | `NWM/infra/env/compute.host.env` + `nhms-prod/secrets/slurm-gateway.env` | **untracked, no template** for `compute.host.env` |
 | `nhms-node22-unit-failure-alert@.service` | `NWM/infra/env/node22-unit-failure-alert.env` | `node22-unit-failure-alert.example` |
 
@@ -75,8 +78,9 @@ Notes:
   leftover of the docker/compose lane retired by #3231**: no unit reads it and
   it has no tracked template. Verified on node-22 read-only 2026-09-02, receipt
   `.workplans/pr-1956/node22-compute-env-receipt.log`: no user systemd unit
-  lists it in `EnvironmentFiles` (receipt `:1-13`, the five deployed units in the
-  first five rows of the table above).
+  lists it in `EnvironmentFiles` (receipt `:1-13`: the four units verified on
+  2026-09-02 in the table above and the fifth unit of that reading,
+  `nhms-compute-api.service`, retired by #3394).
   Values in it — including basin roots and scheduler model/basin filters — are
   **not** the production scheduler's configuration and must not be quoted as
   such.
@@ -92,9 +96,9 @@ Notes:
   `NHMS_SCHEDULER_CYCLE_LAG_HOURS=16` (lookback 48 and 288), from before the
   scheduler's own file moved to 10 / 32 (#3225). The scheduler service loads
   `compute.scheduler-dbfree.env` plus the gateway secret file (table above);
-  `compute.host.env` is loaded by the gateway and the compute API, which read
-  neither key (the gateway does read other `NHMS_SCHEDULER_*` keys from it, so
-  drop only these two). The stale values change nothing; drop those two keys at
+  `compute.host.env` is loaded by the gateway, which reads neither key (it does
+  read other `NHMS_SCHEDULER_*` keys from it, so drop only these two). The stale
+  values change nothing; drop those two keys at
   the next edit of those two host files, and read the scheduler's lag and
   lookback from `compute.scheduler-dbfree.env` (`#3233`).
 - 部署的单元体与 drop-in 的逐字节副本在 `infra/systemd/node22/`（`MANIFEST.json`，收据 `docs/runbooks/receipts/2026-10-16-node22-live-units-snapshot.md` 与 `docs/runbooks/receipts/2026-11-26-w3-gateway-runtime-path-dropin-snapshot.md`），本表仍是 EnvironmentFile 权威，`tests/test_node22_unit_tracking.py` 以本表校验那些文件的 `EnvironmentFile=`
@@ -147,11 +151,8 @@ table above.
   `docs/runbooks/current-production-ops.md` §5.3 depends on. Same scan: only
   `compute.host.env`, `compute.replay.env` and `compute.scheduler-dbfree.env`
   carry `NHMS_OBJECT_STORE_COPYBACK_ROOT`.
-  `DATABASE_URL` belongs to an explicit archived rollback drill — and the live
-  `nhms-compute-api.service` does not load
-  `compute.env` at all; its only `EnvironmentFile` is the untracked
-  `compute.host.env` (receipt `:9-10`). Node-22 `:55433` is stopped/archived and
-  is not scheduler runtime env.
+  `DATABASE_URL` belongs to an explicit archived rollback drill. Node-22
+  `:55433` is stopped/archived and is not scheduler runtime env.
 - The node-22 DB-free scheduler live env
   (`compute.scheduler-dbfree.env`, referenced by systemd `EnvironmentFile=`)
   has exactly one tracked source: `compute.scheduler-dbfree.env.example`.
