@@ -778,8 +778,10 @@ committed env template SHALL carry the target value with a comment
 identifying it as a capacity conclusion and pointing at the recorded
 derivation in the operator runbook, the deployed node-27 env SHALL carry
 the same value, and every receipt echoes the effective bound via its
-existing `per_tick_bound` field. The variable remains mandatory with no
-in-code default. A change of any governed hypertable's chunk time
+existing `per_tick_bound` field. The variable remains mandatory in an env
+declaration: an env that does not declare it is refused. The in-code value
+used when the budget is resolved without an env (direct invocation) SHALL
+equal the template's and SHALL be pinned by a test. A change of any governed hypertable's chunk time
 interval SHALL invalidate the derivation and require the template,
 runbook and live env to be re-pinned in the same change.
 
@@ -787,10 +789,12 @@ runbook and live env to be re-pinned in the same change.
 
 - **WHEN** `infra/env/node27-timeseries-compression.example` is read
 - **THEN** it SHALL contain the uncommented line
-  `NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND=4` with a
-  capacity-conclusion comment re-derived for one-day chunks (two
-  canonical arrivals per day under a 4-chunk bound; 4 × ≈7.5 min narrow
-  chunks inside the 65-minute wrapper wall), and an enforced test SHALL
+  `NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND=3` with a
+  capacity-conclusion comment re-derived for one-day chunks on the cluster
+  of 2026-11-05 (two canonical arrivals per day on average under a 3-chunk
+  bound, the third slot being the slack for a chunk that was put off; the
+  worst selection, three river day chunks of 44.9 GB at about 11.3 s/GB,
+  about 1520 s inside the 3900 s wrapper wall), and an enforced test SHALL
   pin that exact assignment line so silent drift back to a stale value
   fails CI
 
@@ -815,8 +819,9 @@ runbook and live env to be re-pinned in the same change.
   — plus the measured inputs behind the current target, the
   derivation's invalidation conditions (chunk-interval change listed
   among them), and an explicit conclusion on timer cadence (one-day
-  chunks raise arrival from two per week to two per day; the daily tick
-  still covers it under bound 4, so no frequency change is required) so
+  chunks arrive at two per day on average; the daily tick covers them
+  under bound 3 with one slot of slack, so no frequency change is
+  required) so
   the next retune starts from the formula instead of incident-scene
   guesswork
 

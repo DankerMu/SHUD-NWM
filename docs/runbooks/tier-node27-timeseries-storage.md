@@ -117,7 +117,7 @@ REPO_ENV=/home/nwm/NWM/infra/env/node27-timeseries-compression.env
 
    ```bash
    grep -c '^NODE27_TIMESERIES_COMPRESSION_REPO_ROOT=/home/nwm/NWM$' "$REPO_ENV"
-   grep -c '^NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND=2$' "$REPO_ENV"
+   grep -c '^NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND=3$' "$REPO_ENV"
    grep -c '^NODE27_TIMESERIES_COMPRESSION_RECEIPT_PATH=/home/nwm/NWM/.nhms-issue1069-live/scheduled-receipt.json$' "$REPO_ENV"
    grep -c '^NODE27_TIMESERIES_COMPRESSION_LOCK_PATH=/home/nwm/NWM/.nhms-issue1069-live/compression.lock$' "$REPO_ENV"
    ```
@@ -3586,15 +3586,89 @@ runner (`scripts/node27_timeseries_compression.py`, `#851`), never to the
 active write-target chunk. This section covers the fail-closed write guard
 and the manual decompress procedure that pairs with it.
 
-### Per-tick capacity (current: bound 2, re-derived 2026-09-18 in #2425; history from #1237)
+### Per-tick capacity (current: bound 3, re-derived 2026-11-26 in #3380; history from #2425 and #1237)
 
-**Current decision (2026-09-18, #2425): `PER_TICK_BOUND=2`, newest-first
-within a hypertable.** This re-derivation replaces the 7-day-geometry numbers
+**Current decision (2026-11-26, #3380): `PER_TICK_BOUND=3`, newest-first
+within a hypertable.** Template, pin test
+(`tests/test_node27_timeseries_compression.py`), in-code direct-invocation
+default (`packages/common/node27_timeseries_compression_budget.py`
+`DEFAULT_COMPRESSION_PER_TICK_BOUND`) and the live env all carry `3`.
+
+Measured inputs (node-27, 2026-11-26, the cluster rebuilt on 2026-11-05):
+
+- **Chunk size.** `hydro.river_timeseries` day chunks are 41.8 GiB (44.9 GB)
+  uncompressed, `met.forcing_station_timeseries` day chunks 2.6 GiB (2.8 GB).
+- **Rate ≈ 11.3 s/GB, per-chunk overhead included.** Unit run times from the
+  journal: 2026-11-20, 11-22 and 11-24 two river chunks (89.8 GB) in about
+  1,015 s each = 11.3 s/GB; 2026-11-25 one river and one forcing chunk
+  (47.8 GB) in 530 s = 11.1 s/GB; 11-21 and 11-23 about 48 s.
+  The 55 s/GB of 2026-09-18 below was measured on the retired device.
+- **Arrival.** One river and one forcing day chunk per day: 2 per day on
+  average. The cutoff follows the display watermark, and on 2026-11-20, 11-22
+  and 11-24 the watermark advanced by two days at once and stood still on the
+  days between: four chunks became eligible on one tick and none on the next.
+- **The failure bound 2 produced.** Two arrivals against two slots leave no
+  slack. A chunk that is put off once is never selected again, because every
+  later tick finds two newer eligible chunks: the forcing chunks of 2026-11-13,
+  11-14, 11-19 and 11-20 stayed uncompressed (about 10 GiB) and would have
+  stayed so until retention dropped them.
+- **Not caused by the bound.** The uncompressed working set alternated by two
+  river chunks (84 GiB) from day to day (#3379). That follows the two-day
+  steps of the watermark and a third slot does not change it.
+
+The constraints:
+
+1. **Wall.** `Σ(selected GB) × rate + Σ fence_wait ≤ 3900 s` (wrapper wall, the
+   whole tick). A tick after a one-day step is river + forcing + one overdue
+   forcing chunk, about 50 GB, about 570 s; after a two-day step it is two
+   river chunks + one forcing chunk, about 93 GB, about 1050 s. The worst
+   selection is three river chunks: `3 × 44.9 GB × 11.3 s/GB ≈ 1520 s`.
+2. **Throughput.** 3 slots against 2 arrivals a day on average: one slot a day is left for a
+   chunk that was put off, taken newest-first within its hypertable.
+3. **What the third slot adds as a risk.** The §4.11 tick-deadline guard puts a
+   chunk off when more than 2700 s have elapsed before it would start
+   (`wrapper wall − fence wait − cleanup margin`). With no fence wait and three
+   river chunks at `t` seconds each, the wall is overrun only for
+   `1300 < t ≤ 1350` (28.9–30 s/GB, 2.6 times today's rate); slower than that
+   and the third chunk is put off instead. The band that exists for two chunks
+   (`1950 < t ≤ 2700`) is unchanged. Fence waits open a second way that bound 2
+   did not have: three river chunks overrun when `2t + w1 + w2 ≤ 2700` and
+   `3t + w1 + w2 + w3 > 3900`, which at today's `t ≈ 507 s` needs more than
+   2380 s of fence waits in one tick (each at most 900 s), i.e. a river backlog
+   of three with the ingest fence held nearly the whole time for all three. An
+   overrun rolls the running chunk back and is a failed unit, and the unit
+   mails on failure (#3380 slice 1). A chunk that loses the lock wait costs its
+   rewrite time plus `lock_timeout` (5 s): the lock is taken after the rewrite,
+   so only the wait is bounded, not the work.
+
+**Retention overlap.** Unchanged: a tick from 04:25Z ends long before the
+06:36Z retention timer.
+
+**Catch-up rule.** Unchanged: a compress timeout above the default still
+requires `PER_TICK_BOUND=1` (§4.5).
+
+**Timer cadence.** No change. Chunk count is set by the time dimension (one
+day per chunk on both hypertables), not by ingest volume: two arrivals a day
+on average, three slots in the one daily tick.
+
+**Invalidation conditions for this derivation.** Re-derive when the chunk
+interval of a governed hypertable changes; when a river day chunk grows or
+the rate degrades so that three of them no longer fit the wall
+(`3 × GB × s/GB > 3900 s`: at 44.9 GB that is 28.9 s/GB, at 11.3 s/GB it is
+115 GB per chunk); when the wrapper wall / timeout / fence-wait values change
+(including a §4.5 override window); when the retention window or either timer
+changes; or when a hypertable joins or leaves the lane.
+
+**Previous decision (2026-09-18, #2425): `PER_TICK_BOUND=2`.** The text from
+here to "Selection order" is that derivation, kept as history; its inputs
+(19–23 GB chunks, 55 s/GB, "1 arrival/day") are not today's, and its premise
+that 2 slots exceed the arrival counted the river chunk only. That re-derivation replaced the 7-day-geometry numbers
 further down (`bound=4`, ~6.0 s/GB, 2 arrivals/week), which stay as historical
 evidence. Template, pin test (`tests/test_node27_timeseries_compression.py`),
 in-code direct-invocation default
 (`packages/common/node27_timeseries_compression_budget.py`
-`DEFAULT_COMPRESSION_PER_TICK_BOUND`) and the live env all carry `2`.
+`DEFAULT_COMPRESSION_PER_TICK_BOUND`) and the live env all carried `2` until
+2026-11-26.
 
 Measured inputs (node-27):
 
@@ -3638,7 +3712,8 @@ chunk took 47 min while #1988 read-only sessions were open, and it committed
 did `_hyper_9_143` (23.04 GB) at ≈50 s/GB with `pg_blocking_pids` always
 empty (receipt
 `docs/runbooks/receipts/2026-09-18-issue-2285-2425-2360-service-restore/`
-Stage B). A lock wait was not established (`log_lock_waits` is off).
+Stage B). A lock wait was not established (`log_lock_waits` was off; it is on
+since 2026-11-26, #3380).
 Operator rule: keep long-open transactions and full scans of the river
 hypertables out of 04:25Z–05:30Z, and out of any manual compression run. An
 open transaction holding `ACCESS SHARE` on a chunk can hold up the lock
@@ -3684,7 +3759,8 @@ tells which: a fence `NODE27_TIMESERIES_COMPRESSION_ENV_FILE` and fence
 `Environment=` = after. Record any env change with the receipt of the next
 tick.
 
-**Invalidation conditions for this derivation.** Re-derive when the chunk
+**Invalidation conditions of the 2026-09-18 derivation (history; the current
+ones are in the 2026-11-26 block above).** Re-derive when the chunk
 interval changes, chunk size leaves the 19–21 GB band by more than the ~1590 s
 wall margin allows (≈ 29 GB/chunk at 55 s/GB), the wrapper wall/timeout triple
 changes (including a §4.5 override window), the retention window or timer
@@ -5662,8 +5738,8 @@ NODE27_RIVER_IDENTITY_BACKFILL_LOCK_PATH=/home/nwm/locks/river-identity-backfill
 ```
 
 **Mask the compression timer for the whole enforce window.** This is not
-advisory. The timer fires daily at 04:25 UTC with `PER_TICK_BOUND=2` (`=4`
-when #1339 ran); a tick
+advisory. The timer fires daily at 04:25 UTC with `PER_TICK_BOUND=3` (`=4`
+when #1339 ran, `=2` from 2026-09-18 to 2026-11-26); a tick
 landing mid-backfill compresses a chunk that still holds NULL rows, and the
 only way to reach those rows again is decompressing 200+ GB.
 
