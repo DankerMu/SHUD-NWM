@@ -65,6 +65,7 @@ class AuditThresholds:
     database_warn_bytes: int = 300 * GIB
     database_critical_bytes: int = 500 * GIB
     safety_margin_bytes: int = 100 * GIB
+    runway_critical_days: float = 3.0
     working_set_warn_bytes: int = 400 * GIB
     index_ratio_warn: float = 2.0
     index_ratio_critical: float = 4.0
@@ -164,13 +165,16 @@ def _temp_bytes(postgres: Mapping[str, Any], name: str = "nhms") -> int:
     return 0
 
 
-def _recommendations(receipt: Mapping[str, Any], thresholds: AuditThresholds) -> list[dict[str, Any]]:
-    recommendations: list[dict[str, Any]] = []
-    working_set = receipt.get("working_set", {})
-    status = working_set.get("projection_status")
+RUNWAY_CRITICAL_CODE = "PGDATA_INGEST_RUNWAY_BELOW_CRITICAL"
+# Catalog statuses after which the working-set fields (rate included) were read.
+CATALOG_OBSERVED_STATUSES = frozenset({"ok", "no_uncompressed_chunk", "watermark_unavailable"})
+
+
+def _capacity_valid(working_set: Mapping[str, Any]) -> bool:
+    """The configured PGDATA filesystem was observed directly and unambiguously."""
     binding = working_set.get("working_set_filesystem") or {}
     available = working_set.get("working_set_free_bytes")
-    capacity_valid = (
+    return (
         binding.get("status") == "ok"
         and bool(binding.get("path"))
         and bool(binding.get("device_identity"))
@@ -179,6 +183,33 @@ def _recommendations(receipt: Mapping[str, Any], thresholds: AuditThresholds) ->
         and not isinstance(available, bool)
         and available >= 0
     )
+
+
+def _arrival_rate(working_set: Mapping[str, Any]) -> float | None:
+    """`daily_arrival_bytes` as a finite non-negative number, else None (absent/bool/NaN/inf/negative)."""
+    rate = _number(working_set.get("daily_arrival_bytes"))
+    return rate if rate is not None and rate >= 0 else None
+
+
+def _ingest_runway_days(working_set: Mapping[str, Any], thresholds: AuditThresholds) -> float | None:
+    """Days of ingest the PGDATA device takes before it is down to the margin; may be negative.
+
+    None when the catalog observation failed, capacity is not valid, or the rate is zero or unusable.
+    """
+    if working_set.get("projection_status") not in CATALOG_OBSERVED_STATUSES or not _capacity_valid(working_set):
+        return None
+    rate = _arrival_rate(working_set)
+    if rate is None or rate == 0:
+        return None
+    return (working_set["working_set_free_bytes"] - thresholds.safety_margin_bytes) / rate
+
+
+def _recommendations(receipt: Mapping[str, Any], thresholds: AuditThresholds) -> list[dict[str, Any]]:
+    recommendations: list[dict[str, Any]] = []
+    working_set = receipt.get("working_set", {})
+    status = working_set.get("projection_status")
+    available = working_set.get("working_set_free_bytes")
+    capacity_valid = _capacity_valid(working_set)
     if not capacity_valid:
         recommendations.append(
             {
@@ -227,22 +258,41 @@ def _recommendations(receipt: Mapping[str, Any], thresholds: AuditThresholds) ->
                 "action": "Review the uncompressed working set and compression cadence.",
             }
         )
-    peak = working_set.get("projected_peak_bytes")
-    if (
-        status == "ok"
-        and isinstance(peak, int | float)
-        and capacity_valid
-        and peak > available - thresholds.safety_margin_bytes
-    ):
-        recommendations.append(
-            {
-                "severity": "critical",
-                "area": "postgres",
-                "code": "PROJECTED_PEAK_EXCEEDS_WORKING_SET_FREE",
-                "evidence": {**working_set, "safety_margin_bytes": thresholds.safety_margin_bytes},
-                "action": "Restore compression capacity before the projected peak exhausts the PGDATA filesystem.",
-            }
-        )
+    # #3379: the critical is the ingest runway of the PGDATA device, not the
+    # projected peak (evidence only, read by no rule). It does not wait for
+    # the watermark; a zero rate leaves `free < margin` by the same expression.
+    if status in CATALOG_OBSERVED_STATUSES:
+        rate = _arrival_rate(working_set)
+        if rate is None:
+            recommendations.append(
+                {
+                    "severity": "critical",
+                    "area": "postgres",
+                    "code": "WORKING_SET_UNAVAILABLE",
+                    "evidence": dict(working_set),
+                    "action": (
+                        "daily_arrival_bytes is missing, negative or not finite after a successful catalog "
+                        "observation; restore the uncompressed-chunk read before assessing the ingest runway."
+                    ),
+                }
+            )
+        elif capacity_valid and available - thresholds.safety_margin_bytes < thresholds.runway_critical_days * rate:
+            recommendations.append(
+                {
+                    "severity": "critical",
+                    "area": "postgres",
+                    "code": RUNWAY_CRITICAL_CODE,
+                    "evidence": {
+                        **working_set,
+                        "safety_margin_bytes": thresholds.safety_margin_bytes,
+                        "runway_critical_days": thresholds.runway_critical_days,
+                    },
+                    "action": (
+                        "Free space on the PGDATA filesystem or restore compression: at the measured arrival "
+                        "rate it is down to the safety margin in fewer days than runway_critical_days."
+                    ),
+                }
+            )
     fs = receipt.get("filesystem", {})
     root = (fs.get("filesystems") or {}).get("root", {})
     root_free = root.get("free_bytes")
@@ -586,6 +636,7 @@ def build_receipt(config: AuditConfig) -> dict[str, Any]:
             / 86400,
         )
         working_set["projected_peak_bytes"] = uncompressed + working_set["daily_ingest_bytes"] * days
+    working_set["ingest_runway_days"] = _ingest_runway_days(working_set, config.thresholds)
     receipt: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "status": "completed",
@@ -646,6 +697,16 @@ def _nonnegative_bytes(raw: str, *, label: str) -> int:
     return value
 
 
+def _positive_finite_days(raw: str, *, label: str) -> float:
+    try:
+        value = float(raw)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(f"{label} must be a number of days") from error
+    if not math.isfinite(value) or value <= 0:
+        raise argparse.ArgumentTypeError(f"{label} must be finite and positive")
+    return value
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo-root", default=os.getenv("NODE27_GOVERNANCE_REPO_ROOT", "/home/nwm/NWM"))
@@ -693,6 +754,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=AuditThresholds.safety_margin_bytes,
     )
     parser.add_argument(
+        "--runway-critical-days",
+        type=lambda raw: _positive_finite_days(raw, label="runway-critical-days"),
+        default=AuditThresholds.runway_critical_days,
+    )
+    parser.add_argument(
         "--working-set-warn-bytes",
         type=lambda raw: _nonnegative_bytes(raw, label="working-set-warn-bytes"),
         default=AuditThresholds.working_set_warn_bytes,
@@ -710,6 +776,7 @@ def config_from_args(args: argparse.Namespace) -> AuditConfig:
         database_warn_bytes=args.database_warn_bytes,
         database_critical_bytes=args.database_critical_bytes,
         safety_margin_bytes=args.safety_margin_bytes,
+        runway_critical_days=args.runway_critical_days,
         working_set_warn_bytes=args.working_set_warn_bytes,
     )
     pgdata_root = Path(args.pgdata_root).expanduser() if args.pgdata_root else None
@@ -769,32 +836,52 @@ def main(argv: list[str] | None = None) -> int:
     # this stderr line is the only thing the journal (and therefore the
     # `OnFailure=` mail body) can quote.
     critical_codes = _critical_codes(receipt)
-    for code in critical_codes:
+    recommendations = receipt.get("recommendations")
+    for item in recommendations if isinstance(recommendations, list) else []:
+        if not isinstance(item, Mapping) or item.get("severity") != "critical":
+            continue
+        code = str(item.get("code"))
         print(f"{CRITICAL_DIAGNOSTIC_PREFIX}{code}", file=sys.stderr)
-        if code in {
-            "PROJECTED_PEAK_EXCEEDS_WORKING_SET_FREE",
-            "WORKING_SET_FILESYSTEM_UNAVAILABLE",
-            "PGDATA_USAGE_UNAVAILABLE",
-        }:
-            working_set = receipt.get("working_set", {})
-            print(
-                "working-set peak: "
-                + " ".join(
-                    f"{name}={working_set.get(name)}"
-                    for name in (
-                        "projected_peak_bytes",
-                        "working_set_free_bytes",
-                        "next_compressible_at",
-                        "uncompressed_bytes",
-                    )
-                ),
-                file=sys.stderr,
-            )
-            print(
-                "working-set filesystem: " + json.dumps(working_set.get("working_set_filesystem", {}), sort_keys=True),
-                file=sys.stderr,
-            )
+        for line in _critical_detail_lines(code, item, receipt):
+            print(line, file=sys.stderr)
     return 1 if critical_codes else 0
+
+
+def _diagnostic_fields(label: str, values: Mapping[str, Any], names: tuple[str, ...]) -> str:
+    safe = redact_payload({name: values.get(name) for name in names})
+    return label + " ".join(f"{name}={safe[name]}" for name in names)
+
+
+def _critical_detail_lines(code: str, item: Mapping[str, Any], receipt: Mapping[str, Any]) -> list[str]:
+    """The numbers an operator needs in the OnFailure mail, for the capacity criticals only."""
+    working_set = receipt.get("working_set") or {}
+    if code == RUNWAY_CRITICAL_CODE:
+        evidence = item.get("evidence")
+        lines = [
+            _diagnostic_fields(
+                "ingest runway: ",
+                evidence if isinstance(evidence, Mapping) else {},
+                (
+                    "ingest_runway_days",
+                    "daily_arrival_bytes",
+                    "working_set_free_bytes",
+                    "safety_margin_bytes",
+                    "uncompressed_bytes",
+                ),
+            )
+        ]
+    elif code in {"WORKING_SET_FILESYSTEM_UNAVAILABLE", "PGDATA_USAGE_UNAVAILABLE"}:
+        usage = ((receipt.get("filesystem") or {}).get("path_sizes") or {}).get("pgdata_root") or {}
+        values = {
+            "working_set_free_bytes": working_set.get("working_set_free_bytes"),
+            "pgdata_usage_status": usage.get("status"),
+        }
+        lines = [_diagnostic_fields("working-set capacity: ", values, tuple(values))]
+    else:
+        return []
+    filesystem = redact_payload(working_set.get("working_set_filesystem", {}))
+    lines.append("working-set filesystem: " + json.dumps(filesystem, sort_keys=True))
+    return lines
 
 
 if __name__ == "__main__":
