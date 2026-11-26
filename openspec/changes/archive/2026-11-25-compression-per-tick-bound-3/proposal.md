@@ -28,3 +28,9 @@ The code default, the template, the pins and the runbook are in the same PR (iss
   such a table is modelled when one is in the lane; none is today (the legacy store was dropped on
   2026-09-19).
 - The selection order, the walls, the catch-up rule.
+- The scenario "Chunk interval change without re-derivation is caught" is reproduced unchanged. No test
+  implements it today (the template tests pin the assignment line and the absence of "one chunk width");
+  that gap predates this change and is reported on the issue, not closed here.
+- The narrative of "Raising the compress timeout above default MUST fail closed unless per_tick_bound is
+  1" still speaks of bound 4 as the risk it was written for; its scenarios use 4 as an example input,
+  which stays valid for any bound above 1.
