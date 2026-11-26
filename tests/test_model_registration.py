@@ -991,6 +991,44 @@ async def test_model_registry_admin_write_success_exposes_allowed_policy_evidenc
 
 
 @pytest.mark.asyncio
+async def test_trusted_test_live_proof_allows_registry_write_with_provider_metadata(
+    fake_store: FakeModelRegistryStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#3394: a trusted live-proof actor's allowed mutation records its provider metadata in the audit."""
+    monkeypatch.setenv("AUTH_BACKEND", "oidc")
+    monkeypatch.setenv("NHMS_TRUSTED_LIVE_PROOF_MODE", "test_internal")
+    monkeypatch.setenv("NHMS_INTERNAL_LIVE_PROOF_TOKEN", "proof-token")
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/mesh-versions",
+            headers={
+                "X-NHMS-Internal-Live-Proof": "proof-token",
+                "X-Live-User-ID": "alice",
+                "X-Live-User-Roles": "model_admin",
+                "X-Live-Provider": "test-oidc",
+            },
+            json={
+                "basin_version_id": "basin_v01",
+                "version_label": "v02",
+                "mesh_uri": "s3://nhms/mesh.sp",
+            },
+        )
+
+    assert response.status_code == 201, response.text
+    audit = response.json()["auth_policy_decisions"][0]
+    assert audit["action_id"] == "models.switch_version"
+    assert audit["decision"] == "allow"
+    assert audit["execution_mode"] == "live_proof"
+    assert audit["provider_metadata"]["provider"] == "test-oidc"
+    assert audit["provider_metadata"]["credential_header"] == "[redacted]"
+    assert audit["role_mapping_result"]["mapped_roles"] == ["model_admin"]
+    assert "proof-token" not in response.text
+    assert fake_store.write_calls == ["create_mesh_version"]
+
+
+@pytest.mark.asyncio
 async def test_model_lifecycle_route_runs_preflight_and_activation_with_canonical_policy(
     fake_store: FakeModelRegistryStore,
 ) -> None:

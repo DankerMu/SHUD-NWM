@@ -994,6 +994,48 @@ def test_jobs_and_pipeline_stages_redact_and_truncate_success_log_uri(monkeypatc
         assert raw_secret not in public_payload
 
 
+def test_jobs_list_redacts_persisted_error_message_and_log_uri_query() -> None:
+    """#3394: a job item renders its persisted ``error_message`` and ``log_uri`` without their secrets.
+
+    The persisted row keeps the raw text; only the public ``GET /api/v1/jobs``
+    item is rendered.
+    """
+
+    secret_uri = "s3://bucket/logs/job.out?token=supersecret"
+    secret_message = "old error https://user:pass@example.test/log?signature=abc token=rawsecret"
+    with _store() as store:
+        cycle_time = _cycle_time()
+        cycle_id = cycle_id_for("GFS", cycle_time)
+        _insert_cycle(store, cycle_time=cycle_time)
+        _create_job(
+            store,
+            job_id="job_jobs_list_secret",
+            run_id="run_jobs_list_secret",
+            cycle_id=cycle_id,
+            stage="forecast",
+            status="failed",
+            error_message=secret_message,
+            log_uri=secret_uri,
+        )
+        with _client(store) as client:
+            response = client.get(
+                "/api/v1/jobs",
+                params={"source": "GFS", "cycle_time": cycle_time.isoformat()},
+            )
+
+        assert store.get_job("job_jobs_list_secret").error_message == secret_message
+
+    assert response.status_code == 200
+    items = {item["job_id"]: item for item in response.json()["data"]["items"]}
+    item = items["job_jobs_list_secret"]
+    assert item["log_uri"] == "s3://bucket/logs/job.out"
+    assert isinstance(item["error_message"], str)
+    assert item["error_message"].startswith("old error")
+    item_text = json.dumps(item)
+    for raw_secret in ("supersecret", "rawsecret", "user:pass", "signature=abc"):
+        assert raw_secret not in item_text
+
+
 def test_jobs_list_source_cycle_requires_matching_forecast_cycle_and_excludes_sibling_records() -> None:
     with _store() as store:
         store.session.execute(text("PRAGMA case_sensitive_like = ON"))
@@ -1945,6 +1987,23 @@ def test_dev_token_defaults_operator_only_when_role_header_absent(monkeypatch: A
         assert decision["role_mapping_result"]["raw_roles_input_present"] is False
 
 
+def test_retry_dev_token_without_role_header_passes_rbac(monkeypatch: Any) -> None:
+    """#3394: the bare dev token, with no ``X-User-Role``, passes the retry route's RBAC.
+
+    The 409 carries no audit block, so the role the token defaults to is pinned on
+    the Slurm mutations of the compute mount (``tests/test_slurm_gateway_auth_fullmount.py``).
+    """
+    monkeypatch.setenv("NHMS_DEV_AUTH_TOKEN", "dev-token")
+    monkeypatch.delenv("ALLOW_DEV_ROLE_HEADER", raising=False)
+    with _client_without_store() as client:
+        response = client.post(
+            "/api/v1/runs/run_retry_dev_token_bare/retry",
+            headers={"Authorization": "Bearer dev-token"},
+        )
+
+    _assert_retired_retry_manual_action(response, run_id="run_retry_dev_token_bare")
+
+
 def test_retry_dev_token_rejects_unmapped_role_header_without_operator_promotion(monkeypatch: Any) -> None:
     monkeypatch.setenv("NHMS_DEV_AUTH_TOKEN", "dev-token")
     with _store() as store:
@@ -2257,6 +2316,32 @@ def test_display_manual_action_recovery_runbook_slug_names_an_existing_runbook(m
     assert runbook.is_file(), runbook
 
 
+def test_display_retry_recovery_runbook_slug_names_an_existing_runbook(monkeypatch: Any) -> None:
+    """#1186, #3394: the slug the display 409 hands an operator must resolve to a real runbook file.
+
+    The slug is read off the live payload the display retry 409 builds, not a
+    second copy of the literal, so renaming either side without the other goes
+    red here.
+    """
+    monkeypatch.setenv("ALLOW_DEV_ROLE_HEADER", "true")
+    display_app = create_app(_display_env())
+    display_app.dependency_overrides[pipeline_routes.get_pipeline_store] = _dependency_forbidden(
+        "pipeline store must not be constructed"
+    )
+    display_app.dependency_overrides[pipeline_routes.get_slurm_gateway] = _dependency_forbidden(
+        "gateway must not be constructed"
+    )
+    with TestClient(display_app) as client:
+        response = client.post("/api/v1/runs/run_display_retry/retry", headers={"X-User-Role": "operator"})
+
+    assert response.status_code == 409
+    details = response.json()["error"]["details"]
+    assert details["display_mode"] == "display_readonly"
+    slug = details["recovery_runbook"]
+    runbook = Path(__file__).resolve().parents[1] / "docs" / "runbooks" / f"{slug}.md"
+    assert runbook.is_file(), runbook
+
+
 def test_display_cancel_invalid_run_id_returns_existing_validation_error(monkeypatch: Any) -> None:
     monkeypatch.setenv("ALLOW_DEV_ROLE_HEADER", "true")
     display_app = create_app(_display_env())
@@ -2360,6 +2445,31 @@ def test_release_blocked_auth_does_not_mutate(monkeypatch: Any) -> None:
         assert store.get_job("job_release_blocked").status == "running"
 
 
+def test_release_blocked_auth_answers_503_on_retry_before_the_manual_action_stub(monkeypatch: Any) -> None:
+    """#3394: live auth without a proof is refused by the retry route's RBAC dependency.
+
+    The retry route writes nothing on any path, so this pins the 503 and its
+    policy decision, not an absence of writes; the release-blocked no-write pins
+    live on the ``models`` and Slurm mutation routes.
+    """
+    monkeypatch.setenv("AUTH_BACKEND", "oidc")
+    monkeypatch.delenv("NHMS_LIVE_AUTH_PROOF_ACCEPTED", raising=False)
+    monkeypatch.setenv("ALLOW_DEV_ROLE_HEADER", "true")
+    with _client_without_store() as client:
+        response = client.post(
+            "/api/v1/runs/run_release_blocked_retry/retry",
+            headers={"X-User-Role": "operator"},
+        )
+
+    assert response.status_code == 503, response.text
+    body = response.json()
+    assert body["error"]["code"] == "RELEASE_BLOCKED"
+    decision = body["error"]["details"]["policy_decision"]
+    assert decision["action_id"] == "pipeline.retry_run"
+    assert decision["execution_mode"] == "release_blocked"
+    assert decision["no_mutation_expected"] is True
+
+
 def test_release_blocked_cancel_carries_audit_and_removal_criteria_before_the_handler(monkeypatch: Any) -> None:
     """Deferred auth on the API dependency surface (``require_action``) over HTTP."""
     monkeypatch.setenv("AUTH_BACKEND", "oidc")
@@ -2415,6 +2525,46 @@ def test_release_blocked_cancel_carries_audit_and_removal_criteria_before_the_ha
             assert handler_reads == [run_id]
 
 
+def test_release_blocked_retry_carries_audit_and_removal_criteria_before_the_manual_action_stub(
+    monkeypatch: Any,
+) -> None:
+    """#3394: deferred auth on the API dependency surface (``require_action``) over HTTP, on retry."""
+    monkeypatch.setenv("AUTH_BACKEND", "oidc")
+    monkeypatch.delenv("NHMS_AUTH_MODE", raising=False)
+    monkeypatch.delenv("NHMS_TRUSTED_LIVE_PROOF_MODE", raising=False)
+    monkeypatch.delenv("NHMS_INTERNAL_LIVE_PROOF_TOKEN", raising=False)
+    monkeypatch.setenv("ALLOW_DEV_ROLE_HEADER", "true")
+    run_id = "run_release_blocked_retry_details"
+    request_id = "req-release-blocked-retry-details"
+    headers = {"X-User-Role": "operator", "X-Request-ID": request_id}
+    with _client_without_store() as client:
+        response = client.post(f"/api/v1/runs/{run_id}/retry", headers=headers)
+
+        body = response.json()
+        assert response.status_code == 503, response.text
+        assert body["error"]["code"] == "RELEASE_BLOCKED"
+        details = body["error"]["details"]
+        assert set(details) == {"policy_decision", "audit_record", "removal_criteria"}
+        decision = details["policy_decision"]
+        assert decision["decision"] == "release_blocked"
+        assert decision["reason_code"] == "RELEASE_BLOCKED"
+        assert decision["action_id"] == "pipeline.retry_run"
+        assert decision["target_id"] == run_id
+        audit = details["audit_record"]
+        assert audit["request_id"] == request_id
+        assert audit["decision"] == "release_blocked"
+        assert audit["action_id"] == "pipeline.retry_run"
+        assert audit["target"] == {"type": "pipeline_run", "id": run_id}
+        assert details["removal_criteria"] == "Configure and prove live backend identity-provider role mapping."
+
+        # Discrimination: with live auth off the same request passes RBAC and
+        # reaches the manual-action 409, so the 503 above is the RBAC
+        # dependency stopping it first.
+        monkeypatch.delenv("AUTH_BACKEND")
+        allowed = client.post(f"/api/v1/runs/{run_id}/retry", headers=headers)
+        _assert_retired_retry_manual_action(allowed, run_id=run_id)
+
+
 def test_live_auth_requested_with_configured_proof_but_missing_proof_release_blocks(monkeypatch: Any) -> None:
     monkeypatch.setenv("AUTH_BACKEND", "oidc")
     monkeypatch.setenv("NHMS_TRUSTED_LIVE_PROOF_MODE", "test_internal")
@@ -2440,6 +2590,27 @@ def test_live_auth_requested_with_configured_proof_but_missing_proof_release_blo
         assert store.get_job("job_missing_proof").status == "running"
 
 
+def test_live_auth_requested_with_configured_proof_but_missing_proof_release_blocks_retry(monkeypatch: Any) -> None:
+    monkeypatch.setenv("AUTH_BACKEND", "oidc")
+    monkeypatch.setenv("NHMS_TRUSTED_LIVE_PROOF_MODE", "test_internal")
+    monkeypatch.setenv("NHMS_INTERNAL_LIVE_PROOF_TOKEN", "proof-token")
+    monkeypatch.setenv("ALLOW_DEV_ROLE_HEADER", "true")
+    with _client_without_store() as client:
+        response = client.post(
+            "/api/v1/runs/run_missing_proof_retry/retry",
+            headers={"X-User-Role": "operator"},
+        )
+
+    body = response.json()
+    assert response.status_code == 503, response.text
+    assert body["error"]["code"] == "RELEASE_BLOCKED"
+    decision = body["error"]["details"]["policy_decision"]
+    assert decision["action_id"] == "pipeline.retry_run"
+    assert decision["execution_mode"] == "release_blocked"
+    assert decision["no_mutation_expected"] is True
+    assert decision["auth_mode"] == "live_idp"
+
+
 def test_live_auth_requested_with_wrong_proof_release_blocks(monkeypatch: Any) -> None:
     monkeypatch.setenv("AUTH_BACKEND", "oidc")
     monkeypatch.setenv("NHMS_TRUSTED_LIVE_PROOF_MODE", "test_internal")
@@ -2463,6 +2634,27 @@ def test_live_auth_requested_with_wrong_proof_release_blocks(monkeypatch: Any) -
         assert decision["execution_mode"] != "backend_route_executed"
         assert gateway.cancelled == []
         assert store.get_job("job_wrong_proof").status == "running"
+
+
+def test_live_auth_requested_with_wrong_proof_release_blocks_retry(monkeypatch: Any) -> None:
+    monkeypatch.setenv("AUTH_BACKEND", "oidc")
+    monkeypatch.setenv("NHMS_TRUSTED_LIVE_PROOF_MODE", "test_internal")
+    monkeypatch.setenv("NHMS_INTERNAL_LIVE_PROOF_TOKEN", "proof-token")
+    monkeypatch.setenv("ALLOW_DEV_ROLE_HEADER", "true")
+    with _client_without_store() as client:
+        response = client.post(
+            "/api/v1/runs/run_wrong_proof_retry/retry",
+            headers={"X-User-Role": "operator", "X-NHMS-Internal-Live-Proof": "wrong-token"},
+        )
+
+    body = response.json()
+    assert response.status_code == 503, response.text
+    assert body["error"]["code"] == "RELEASE_BLOCKED"
+    decision = body["error"]["details"]["policy_decision"]
+    assert decision["action_id"] == "pipeline.retry_run"
+    assert decision["execution_mode"] == "release_blocked"
+    assert decision["no_mutation_expected"] is True
+    assert decision["auth_mode"] == "live_idp"
 
 
 @pytest.mark.parametrize(
@@ -2512,6 +2704,50 @@ def test_live_auth_non_ascii_proof_release_blocks_without_500(
         assert decision["execution_mode"] == "release_blocked"
         assert gateway.cancelled == []
         assert store.get_job("job_non_ascii_proof").status == "running"
+
+
+@pytest.mark.parametrize(
+    ("configured_token", "proof_header"),
+    [
+        # (a) header byte 0xE4 is not ASCII; httpx rejects a non-ASCII ``str``
+        # value client-side, so the raw latin-1 bytes are sent.
+        ("proof-token", b"\xe4"),
+        # (b) non-ASCII configured token and the SAME value on the wire: a plain
+        # ``==`` over Starlette's latin-1 decoded header matches and authenticates.
+        ("pröof-token", "pröof-token".encode("latin-1")),
+    ],
+    ids=["non_ascii_header", "non_ascii_configured_token"],
+)
+def test_live_auth_non_ascii_proof_release_blocks_retry_without_500(
+    monkeypatch: Any, configured_token: str, proof_header: bytes
+) -> None:
+    """#2169, #3394: the live-proof secret compares as ASCII bytes in constant time; non-ASCII fails closed."""
+
+    monkeypatch.setenv("AUTH_BACKEND", "oidc")
+    monkeypatch.setenv("NHMS_TRUSTED_LIVE_PROOF_MODE", "test_internal")
+    monkeypatch.setenv("NHMS_INTERNAL_LIVE_PROOF_TOKEN", configured_token)
+    # Sent through httpx's ASGI transport, which hands the raw header bytes to
+    # Starlette unchanged (Starlette decodes them as latin-1). ``TestClient``
+    # would re-encode a bytes value as UTF-8 on the way in, so the server would
+    # never see the latin-1 wire value.
+    response = asyncio.run(
+        _asgi_post(
+            "/api/v1/runs/run_non_ascii_proof_retry/retry",
+            headers={
+                "X-NHMS-Internal-Live-Proof": proof_header,
+                "X-Live-User-ID": b"alice",
+                "X-Live-User-Roles": b"operator",
+            },
+        )
+    )
+
+    assert response.status_code == 503, response.text
+    body = response.json()
+    assert body["error"]["code"] == "RELEASE_BLOCKED"
+    decision = body["error"]["details"]["policy_decision"]
+    assert decision["action_id"] == "pipeline.retry_run"
+    assert decision["auth_mode"] == "live_idp"
+    assert decision["execution_mode"] == "release_blocked"
 
 
 async def _asgi_post(path: str, *, headers: dict[str, bytes]) -> Any:
