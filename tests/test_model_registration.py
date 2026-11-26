@@ -3284,6 +3284,83 @@ def test_list_models_exposes_basin_id_and_basin_name_from_join(
     assert item["basin_version_id"] == "basins_qhh_vbasins"
 
 
+def test_list_models_projects_river_network_segment_count_from_join(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # #3390 (shared-reach-click-ownership D6): the overview derives the map's
+    # per-network segment counts from this list, so each item must carry
+    # `core.river_network_version.segment_count` like the detail does. The fake
+    # cursor answers like the database would: the row carries `segment_count`
+    # only when the page query selects it through the river-network join.
+    from fastapi.testclient import TestClient
+
+    base_row = {
+        "model_id": "basins_byh_shud",
+        "basin_version_id": "basins_byh_vbasins",
+        "basin_id": "basins_byh",
+        "basin_name": "Byh",
+        "river_network_version_id": "basins_byh_rivnet_vbasins",
+        "mesh_version_id": "basins_byh_mesh_vbasins",
+        "calibration_version_id": "basins_byh_shud_calib_vbasins",
+        "shud_code_version": "basins-shud",
+        "model_package_uri": "s3://nhms/models/basins_byh_shud/package/",
+        "active_flag": True,
+        "resource_profile": {},
+        "created_at": "2026-06-14T05:31:18Z",
+    }
+    rnv_join = "JOIN core.river_network_version rnv ON rnv.river_network_version_id = mi.river_network_version_id"
+    statements: list[str] = []
+
+    class FakeCursor:
+        def __init__(self) -> None:
+            self._result: Any = None
+
+        def execute(self, statement: str, _parameters: tuple[Any, ...]) -> None:
+            statements.append(statement)
+            if "SELECT COUNT" in statement:
+                self._result = {"total": 1}
+                return
+            row = dict(base_row)
+            if rnv_join in statement and "rnv.segment_count" in statement:
+                row["segment_count"] = 7971
+            self._result = [row]
+
+        def fetchone(self) -> dict[str, Any]:
+            return self._result
+
+        def fetchall(self) -> list[dict[str, Any]]:
+            return self._result
+
+    class FakeTransaction:
+        def __enter__(self) -> FakeCursor:
+            return FakeCursor()
+
+        def __exit__(self, *_args: object) -> bool:
+            return False
+
+    monkeypatch.setattr(PsycopgModelRegistryStore, "_transaction", lambda _self: FakeTransaction())
+    store = PsycopgModelRegistryStore("postgresql://example")
+    page = store.list_models(basin_version_id="basins_byh_vbasins", active=True, limit=10, offset=0)
+
+    assert page["items"][0]["segment_count"] == 7971
+    count_sql, page_sql = statements
+    assert rnv_join in page_sql and "rnv.segment_count" in page_sql
+    # The count query is unchanged: the join drops no row (NOT NULL foreign key).
+    assert "river_network_version" not in count_sql
+    # `rnv` also has `basin_version_id`: every filter column stays pinned to `mi.`.
+    for sql in (count_sql, page_sql):
+        assert "WHERE mi.basin_version_id = %s AND mi.active_flag = %s" in sql
+
+    # Through the route: the wire item carries the count as an integer.
+    app.dependency_overrides[get_model_registry_store] = lambda: store
+    with TestClient(app) as client:
+        response = client.get("/api/v1/models", params={"active": "all"})
+    assert response.status_code == 200, response.text
+    item = response.json()["data"]["items"][0]
+    assert item["segment_count"] == 7971
+    assert isinstance(item["segment_count"], int)
+
+
 def test_fetch_active_model_for_scope_joins_basin() -> None:
     # Mirror of test_list_models_exposes_basin_id_and_basin_name_from_join for the
     # lifecycle sibling path. `_fetch_active_model_for_scope` feeds lifecycle response

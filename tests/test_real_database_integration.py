@@ -322,6 +322,32 @@ def test_list_models_real_db_returns_basin_id_and_basin_name(
     assert item["basin_name"] == "Issue 126 Integration Basin"
 
 
+def test_list_models_real_db_returns_river_network_segment_count(
+    integration_database_url: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # #3390 (shared-reach-click-ownership D6): the list item carries the seeded
+    # network's `core.river_network_version.segment_count` (2), the same value
+    # as the detail endpoint.
+    apply_migrations_from_zero(integration_database_url)
+    object_root = tmp_path / "object-store"
+    seed_issue_126_data(integration_database_url, object_root=object_root)
+    set_integration_env(integration_database_url, object_root, monkeypatch)
+
+    with TestClient(app) as client:
+        listing = client.get("/api/v1/models", params={"active": "all"})
+        detail = client.get(f"/api/v1/models/{MODEL_ID}")
+
+    assert listing.status_code == 200, listing.text
+    assert detail.status_code == 200, detail.text
+    item = next((m for m in listing.json()["data"]["items"] if m["model_id"] == MODEL_ID), None)
+    assert item is not None, f"seeded MODEL_ID={MODEL_ID} not in /api/v1/models items"
+    assert item["river_network_version_id"] == RIVER_NETWORK_VERSION_ID
+    assert item["segment_count"] == 2
+    assert detail.json()["data"]["segment_count"] == item["segment_count"]
+
+
 # ---------------------------------------------------------------------------
 # PR 6 (issue #566): post-ingest no-cross-gap invariant on real PostGIS.
 # Covers tasks.md 6.2: every reach polyline is single-part, non-trivial, and
