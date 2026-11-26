@@ -252,10 +252,11 @@ def _route_key(route: APIRoute) -> str:
     return f"{sorted(route.methods)[0]} {route.path}"
 
 
-def test_route_table_is_the_33_plus_4_modelled_routes() -> None:
+def test_route_table_is_the_32_plus_4_modelled_routes() -> None:
     # 35 + 4 = 39 until #2866 retired `GET /api/v1/basin-versions/{bv}/river-segments`;
-    # 38 until #3179 (2026-11-17) dropped the retry route's success model.
-    assert len(ROUTES) == 37, sorted(ROUTES)
+    # 38 until #3179 (2026-11-17) dropped the retry route's success model;
+    # 37 until #3394 retired `POST /api/v1/runs/{run_id}/cancel`.
+    assert len(ROUTES) == 36, sorted(ROUTES)
 
 
 def test_every_unmodelled_business_route_is_annotated_to_return_a_response() -> None:

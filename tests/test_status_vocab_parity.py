@@ -133,7 +133,6 @@ _HYDRO_RUN_ORDER = (
 _ACTIVE_HYDRO = frozenset({"created", "staged", "pending", "submitted", "running"})
 _DURABLE_HYDRO_SUCCESS = frozenset({"succeeded", "parsed", "published", "complete"})
 _CODE_CLEARING = frozenset({"pending", "created", "succeeded", "complete", "parsed", "published"})
-_HYDRO_TERMINAL_UI = frozenset({"succeeded", "parsed", "published", "failed", "cancelled", "superseded"})
 _DISPLAY_READY = frozenset({"succeeded", "parsed", "published"})
 _QHH_LATEST_READY = ("succeeded", "parsed", "published")
 _PARSE_READY = ("succeeded", "parsed", "failed")
@@ -180,20 +179,6 @@ _CYCLE_ORDER = (
     "failed_parse",
     "failed_publish",
     "cancelled",
-)
-_CYCLE_TERMINAL_UI = frozenset(
-    {
-        "complete",
-        "published",
-        "parsed_partial",
-        "failed_download",
-        "failed_convert",
-        "failed_forcing",
-        "failed_run",
-        "failed_parse",
-        "failed_publish",
-        "cancelled",
-    }
 )
 _CYCLE_TERMINAL_UPSERT = ("published", "cancelled")
 _CYCLE_UPSERT_PRESERVED = (
@@ -273,7 +258,6 @@ _VOCABULARY: tuple[tuple[str, frozenset[str] | tuple[str, ...]], ...] = (
     ("ACTIVE_HYDRO_STATUSES", _ACTIVE_HYDRO),
     ("DURABLE_HYDRO_SUCCESS_STATUSES", _DURABLE_HYDRO_SUCCESS),
     ("HYDRO_RUN_CODE_CLEARING_STATUSES", _CODE_CLEARING),
-    ("HYDRO_RUN_TERMINAL_UI", _HYDRO_TERMINAL_UI),
     ("DISPLAY_PRODUCT_READY_STATUSES", _DISPLAY_READY),
     ("QHH_LATEST_READY_RUN_STATUSES", _QHH_LATEST_READY),
     ("PARSE_READY_RUN_STATUSES", _PARSE_READY),
@@ -281,7 +265,6 @@ _VOCABULARY: tuple[tuple[str, frozenset[str] | tuple[str, ...]], ...] = (
     ("FORECAST_CYCLE_SUCCESS_STATUSES", _FORECAST_CYCLE_SUCCESS),
     ("CYCLE_STATUS_ORDER", _CYCLE_ORDER),
     ("CYCLE_STATUSES", frozenset(_CYCLE_ORDER)),
-    ("CYCLE_TERMINAL_UI", _CYCLE_TERMINAL_UI),
     ("CYCLE_TERMINAL_UPSERT", _CYCLE_TERMINAL_UPSERT),
     ("CYCLE_UPSERT_PRESERVED", _CYCLE_UPSERT_PRESERVED),
     ("SLURM_RAW_STATES", _SLURM_RAW),
@@ -347,7 +330,6 @@ _CANONICAL_SITES: tuple[tuple[str, ModuleType, str, type, frozenset[str] | tuple
         frozenset,
         _CODE_CLEARING,
     ),
-    ("HYDRO_RUN_TERMINAL_UI", pipeline_route, "_TERMINAL_HYDRO_STATUSES", set, _HYDRO_TERMINAL_UI),
     ("DISPLAY_PRODUCT_READY_STATUSES", hydro_display_constants, "DISPLAY_PRODUCT_READY_STATUSES", set, _DISPLAY_READY),
     ("QHH_LATEST_READY_RUN_STATUSES", forecast_store, "QHH_LATEST_READY_RUN_STATUSES", tuple, _QHH_LATEST_READY),
     ("PARSE_READY_RUN_STATUSES", parser, "PARSE_READY_RUN_STATUSES", tuple, _PARSE_READY),
@@ -359,7 +341,6 @@ _CANONICAL_SITES: tuple[tuple[str, ModuleType, str, type, frozenset[str] | tuple
         set,
         _FORECAST_CYCLE_SUCCESS,
     ),
-    ("CYCLE_TERMINAL_UI", pipeline_route, "_TERMINAL_CYCLE_STATUSES", set, _CYCLE_TERMINAL_UI),
     ("CYCLE_TERMINAL_UPSERT", met_store, "_TERMINAL_CYCLE_STATUSES", tuple, _CYCLE_TERMINAL_UPSERT),
     ("CYCLE_UPSERT_PRESERVED", met_store, "_UPSERT_PRESERVED_CYCLE_STATUSES", tuple, _CYCLE_UPSERT_PRESERVED),
     ("SLURM_TERMINAL_SUCCESS", run_qhh_continuous, "SLURM_TERMINAL_SUCCESS", set, _SLURM_SUCCESS),
@@ -575,15 +556,13 @@ def test_pipeline_route_sites_rebind_the_vocabulary() -> None:
     """Task 2.2: the public tuple is the ordered vocabulary tuple, the buckets `set` copies.
 
     The tuple feeds the published OpenAPI enum in order, so it must be the
-    vocabulary tuple itself; the four route buckets stay fresh mutable sets.
+    vocabulary tuple itself; the two route buckets stay fresh mutable sets.
     """
 
     assert pipeline_route.PIPELINE_JOB_STATUS_VALUES is vocab.PIPELINE_JOB_STATUS_ORDER
     for site_name, vocab_name in (
         ("_ACTIVE_JOB_STATUSES", "PIPELINE_JOB_ACTIVE"),
         ("_FAILED_JOB_STATUSES", "PIPELINE_JOB_FAILED_UI"),
-        ("_TERMINAL_HYDRO_STATUSES", "HYDRO_RUN_TERMINAL_UI"),
-        ("_TERMINAL_CYCLE_STATUSES", "CYCLE_TERMINAL_UI"),
     ):
         site = getattr(pipeline_route, site_name)
         assert type(site) is set, site_name
@@ -654,7 +633,6 @@ def test_cycle_order_equals_the_folded_db_enum_in_ordinal_order() -> None:
     assert tuple(status for status in order if status not in _CYCLE_ADDED_AFTER) == _CYCLE_CREATE_ORDER
     for added, after in _CYCLE_ADDED_AFTER.items():
         assert order.index(added) == order.index(after) + 1, f"{added} must follow {after}"
-    assert vocab.CYCLE_TERMINAL_UI <= vocab.CYCLE_STATUSES
     assert set(vocab.CYCLE_UPSERT_PRESERVED) <= vocab.CYCLE_STATUSES
     assert vocab.CYCLE_UPSERT_PRESERVED[-len(vocab.CYCLE_TERMINAL_UPSERT) :] == vocab.CYCLE_TERMINAL_UPSERT
 

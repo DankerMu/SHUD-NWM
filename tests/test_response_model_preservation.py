@@ -770,8 +770,9 @@ def test_every_json_route_is_sampled() -> None:
     sampled = set().union(*(sample.routes for sample in (*SAMPLES.values(), *PIPELINE_SAMPLES.values())))
     in_scope = _in_scope_json_routes()
     # 35 #2348 routes minus the river-segment list retired by #2866, minus the
-    # retry route #3157 made fail-closed (`FAIL_CLOSED_ROUTES`).
-    assert len(in_scope) == 33, sorted(in_scope)
+    # retry route #3157 made fail-closed (`FAIL_CLOSED_ROUTES`), minus
+    # `POST /api/v1/runs/{run_id}/cancel` retired by #3394.
+    assert len(in_scope) == 32, sorted(in_scope)
     assert sampled == in_scope, {"unsampled": sorted(in_scope - sampled), "unknown": sorted(sampled - in_scope)}
     # ...and each is typed by an `apps.api.response_models` model, not by the
     # implicit `dict[str, Any]` FastAPI infers from the return annotation.

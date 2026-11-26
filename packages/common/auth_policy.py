@@ -21,7 +21,6 @@ ROLE_VOCABULARY: tuple[AuthRole, ...] = ("viewer", "analyst", "operator", "model
 
 ACTION_MATRIX: dict[str, tuple[AuthRole, ...]] = {
     "pipeline.retry_run": ("operator", "model_admin", "sys_admin"),
-    "pipeline.cancel_run": ("operator", "model_admin", "sys_admin"),
     "pipeline.rerun_cycle": ("operator", "model_admin", "sys_admin"),
     "qc.override_result": ("operator", "sys_admin"),
     "tiles.republish": ("operator", "sys_admin"),

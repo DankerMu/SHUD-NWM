@@ -19,7 +19,7 @@ _PROTECTED_OPERATION_SECURITY: list[dict] = [
 
 # Exactly the operations enforced by apps/api/main.protected_mutation_auth_guard
 # (registry mutations, model active/lifecycle/preflight) or the pipeline
-# retry/cancel require_action dependencies.
+# retry require_action dependency.
 PROTECTED_OPERATION_OVERRIDES: dict[tuple[str, str], list[dict]] = {
     ("POST", "/api/v1/basins"): _PROTECTED_OPERATION_SECURITY,
     ("POST", "/api/v1/basins/{basin_id}/versions"): _PROTECTED_OPERATION_SECURITY,
@@ -31,7 +31,6 @@ PROTECTED_OPERATION_OVERRIDES: dict[tuple[str, str], list[dict]] = {
     ("POST", "/api/v1/river-segment-crosswalks"): _PROTECTED_OPERATION_SECURITY,
     ("PUT", "/api/v1/models/{model_id}/active"): _PROTECTED_OPERATION_SECURITY,
     ("POST", "/api/v1/runs/{run_id}/retry"): _PROTECTED_OPERATION_SECURITY,
-    ("POST", "/api/v1/runs/{run_id}/cancel"): _PROTECTED_OPERATION_SECURITY,
 }
 
 

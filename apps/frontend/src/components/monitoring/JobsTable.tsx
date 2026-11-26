@@ -1,8 +1,6 @@
-import { ArrowDown, ArrowUp, ArrowUpDown, CheckCircle2, ChevronLeft, ChevronRight, ClipboardCopy, Square, Terminal } from 'lucide-react'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { ArrowDown, ArrowUp, ArrowUpDown, CheckCircle2, ChevronLeft, ChevronRight, ClipboardCopy, Terminal } from 'lucide-react'
+import { useCallback, useEffect, useState } from 'react'
 
-import { client } from '@/api/client'
-import { getApiErrorMessage } from '@/api/response'
 import { JobFilters } from '@/components/monitoring/JobFilters'
 import { LogModal } from '@/components/monitoring/LogModal'
 import {
@@ -24,7 +22,6 @@ import { useToast } from '@/hooks/useToast'
 import { cn } from '@/lib/cn'
 import { FAILED_STATUSES } from '@/lib/constants'
 import { formatDate, formatDuration } from '@/lib/format'
-import { canUseDevRoleActions, useAuthStore } from '@/stores/auth'
 import {
   type JobFilters as JobFilterState,
   type MonitoringStrictIdentity,
@@ -35,8 +32,6 @@ import {
 
 type SortKey = 'submitted_at' | 'duration_seconds'
 type SortDirection = 'asc' | 'desc'
-
-const activeStatuses = new Set(['pending', 'queued', 'submitted', 'running'])
 
 function statusClass(status: string) {
   if (status === 'succeeded') return 'border-emerald-200 bg-emerald-50 text-emerald-700'
@@ -51,9 +46,7 @@ function SortIcon({ active, direction }: { active: boolean; direction: SortDirec
 }
 
 interface JobsTableProps {
-  actionsEnabled?: boolean
   autoFetch?: boolean
-  cancelControlsEnabled?: boolean
   clearOnFailure?: boolean
   diagnosticsDisplayReadonly?: boolean
   diagnosticsEnabled?: boolean
@@ -65,9 +58,7 @@ interface JobsTableProps {
 }
 
 export function JobsTable({
-  actionsEnabled = true,
   autoFetch = true,
-  cancelControlsEnabled,
   clearOnFailure = false,
   diagnosticsDisplayReadonly = false,
   diagnosticsEnabled = false,
@@ -77,7 +68,6 @@ export function JobsTable({
   strictIdentity = null,
   unavailableReason = null,
 }: JobsTableProps) {
-  const role = useAuthStore((state) => state.role)
   const source = useMonitoringStore((state) => state.source)
   const cycleTime = useMonitoringStore((state) => state.cycleTime)
   const jobs = useMonitoringStore((state) => state.jobs)
@@ -86,21 +76,18 @@ export function JobsTable({
   const filters = useMonitoringStore((state) => state.jobFilters)
   const isJobsLoading = useMonitoringStore((state) => state.isJobsLoading)
   const fetchJobs = useMonitoringStore((state) => state.fetchJobs)
-  const fetchAll = useMonitoringStore((state) => state.fetchAll)
   const { toast } = useToast()
 
   const [logJobId, setLogJobId] = useState<string | null>(null)
-  const [logRefreshKey, setLogRefreshKey] = useState(0)
-  const [pendingAction, setPendingAction] = useState<string | null>(null)
   const [notifiedJobs, setNotifiedJobs] = useState<Set<string>>(() => new Set())
-  const pendingActionRef = useRef<string | null>(null)
 
   const page = filters.page ?? 1
   const pageSize = filters.pageSize ?? 12
   const sortKey = filters.sortBy ?? 'submitted_at'
   const sortDirection = filters.sortOrder ?? 'desc'
-  const cancelActionsEnabled = cancelControlsEnabled ?? actionsEnabled
-  const controlsVisible = logControlsEnabled || cancelActionsEnabled || diagnosticsEnabled
+  // #3179, #3394: no run action (retry, cancel) is a page control; failed-run
+  // recovery is the node-22 manual-repair marker lane.
+  const controlsVisible = logControlsEnabled || diagnosticsEnabled
   const manualRecoveryGuidance = diagnosticsDisplayReadonly
     ? '失败诊断用于交给 22 compute-control 节点处理；在 27 display_readonly 页面只做只读查看和本地通知标记，不写入数据库或审计 API。'
     : '失败诊断用于交给 22 compute-control 节点处理；当前运维页面复制诊断和本地通知标记不写入数据库或审计 API。'
@@ -116,13 +103,6 @@ export function JobsTable({
     await fetchJobs(nextFilters, { clearOnFailure })
   }, [clearOnFailure, fetchEnabled, fetchJobs])
 
-  const refreshSelectedContext = useCallback(async () => {
-    await Promise.all([
-      fetchAll({ clearOnFailure }).catch(() => undefined),
-      requestJobs().catch(() => undefined),
-    ])
-  }, [clearOnFailure, fetchAll, requestJobs])
-
   useEffect(() => {
     if (!autoFetch || !fetchEnabled) return
     void requestJobs().catch(() => undefined)
@@ -132,8 +112,6 @@ export function JobsTable({
     if (!logJobId) return
     if (!visibleJobs.some((job) => job.job_id === logJobId)) setLogJobId(null)
   }, [logJobId, visibleJobs])
-
-  const cancelActionRole = fetchEnabled && cancelActionsEnabled && canUseDevRoleActions(role) ? role : null
 
   const copyDiagnostic = async (job: PipelineJob) => {
     const diagnostic = buildDiagnosticPayload(job, {
@@ -161,45 +139,6 @@ export function JobsTable({
   const toggleSort = (key: SortKey) => {
     const nextDirection = sortKey === key && sortDirection === 'desc' ? 'asc' : 'desc'
     void requestJobs({ ...filters, sortBy: key, sortOrder: nextDirection, page: 1, pageSize }).catch(() => undefined)
-  }
-
-  // #3179: cancel is the only run action. Failed-run recovery is the node-22
-  // manual-repair marker lane, not a page control; `POST .../retry` is a 409 stub.
-  const runAction = async (job: PipelineJob, action: 'cancel') => {
-    if (!job.run_id) return
-    if (!fetchEnabled) return
-    const operatorRole = cancelActionRole
-    if (!operatorRole) return
-
-    const actionKey = `${action}:${job.run_id}`
-    if (pendingActionRef.current) return
-
-    pendingActionRef.current = actionKey
-    setPendingAction(actionKey)
-    try {
-      // The cancel operation does not declare the dev role header, so it is
-      // sent as a plain request header (same wire header as before #3179).
-      const { error } = await client.POST('/api/v1/runs/{run_id}/cancel', {
-        params: { path: { run_id: job.run_id } },
-        headers: { 'X-User-Role': operatorRole },
-      })
-      if (error) {
-        throw error
-      }
-
-      toast({ title: '取消请求已提交' })
-    } catch (error) {
-      toast({
-        title: '取消失败',
-        description: getApiErrorMessage(error, '操作失败'),
-        variant: 'destructive',
-      })
-    } finally {
-      await refreshSelectedContext()
-      setLogRefreshKey((key) => key + 1)
-      pendingActionRef.current = null
-      setPendingAction(null)
-    }
   }
 
   return (
@@ -314,17 +253,6 @@ export function JobsTable({
                               </Button>
                             </>
                           ) : null}
-                          {cancelActionRole && activeStatuses.has(job.status) && job.run_id ? (
-                            <Button
-                              variant="destructive"
-                              size="sm"
-                              disabled={Boolean(pendingAction)}
-                              onClick={() => void runAction(job, 'cancel')}
-                            >
-                              <Square className="size-3.5" />
-                              取消
-                            </Button>
-                          ) : null}
                         </div>
                       </TableCell>
                     ) : null}
@@ -377,7 +305,6 @@ export function JobsTable({
         <LogModal
           jobId={logJobId}
           open={Boolean(logJobId)}
-          refreshKey={logRefreshKey}
           strictIdentity={strictIdentity}
           onOpenChange={(open) => !open && setLogJobId(null)}
         />

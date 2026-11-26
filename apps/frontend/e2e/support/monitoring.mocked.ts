@@ -134,7 +134,6 @@ export const controlledRetryJobId = `${controlledRunId}_retry_active`
 export interface MonitoringApiMockOptions {
   /** 日志接口返回的正文；缺省为各 mock 原有的短日志（既有断言依赖缺省值）。 */
   logContent?: string
-  onCancelRequest?: (request: Request) => void
   onApiRequest?: (request: Request) => void
 }
 
@@ -195,20 +194,6 @@ export async function mockMonitoringApi(page: Page, options: MonitoringApiMockOp
         job_id: 'job-failed',
         log_uri: 's3://logs/job-failed.log',
         content: options.logContent ?? 'forecast stderr: model failed',
-      })
-    }
-    if (url.pathname === '/api/v1/runs/run-running/cancel' && request.method() === 'POST') {
-      options.onCancelRequest?.(request)
-      return fulfill(route, {
-        run_id: 'run-running',
-        cancelled_jobs: [{ ...jobs[2], status: 'cancelled' }],
-        cancelled: [{ ...jobs[2], status: 'cancelled' }],
-        failed_jobs: [],
-        slurm_failures: [],
-        partial_failure: false,
-        idempotent_jobs: [],
-        hydro_run: null,
-        forecast_cycle: null,
       })
     }
     if (url.pathname === '/api/v1/jobs') {

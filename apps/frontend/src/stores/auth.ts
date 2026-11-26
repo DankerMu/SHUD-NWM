@@ -1,24 +1,13 @@
 import { create } from 'zustand'
 
 export type AuthRole = 'viewer' | 'analyst' | 'operator' | 'model_admin' | 'sys_admin'
-export type OperatorRole = Extract<AuthRole, 'operator' | 'model_admin' | 'sys_admin'>
 
 const authRoles: AuthRole[] = ['viewer', 'analyst', 'operator', 'model_admin', 'sys_admin']
-const operatorRoles: OperatorRole[] = ['operator', 'model_admin', 'sys_admin']
 export const isRoleOverrideEnabled = import.meta.env.DEV && import.meta.env.VITE_ENABLE_ROLE_OVERRIDE === 'true'
-const isTestMode = import.meta.env.MODE === 'test'
 
 function configuredRole(): AuthRole {
   const role = import.meta.env.VITE_AUTH_ROLE
   return authRoles.includes(role as AuthRole) ? (role as AuthRole) : 'viewer'
-}
-
-function isOperatorRole(role: AuthRole): role is OperatorRole {
-  return operatorRoles.includes(role as OperatorRole)
-}
-
-export function canUseDevRoleActions(role: AuthRole): role is OperatorRole {
-  return (isRoleOverrideEnabled || isTestMode) && isOperatorRole(role)
 }
 
 interface AuthState {

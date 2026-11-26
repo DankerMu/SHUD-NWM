@@ -44,7 +44,7 @@ from tests.test_openapi_31_contract import (
 # The two enforcement surfaces the security metadata must mirror:
 # apps/api/main.protected_mutation_auth_guard (pre-body guard, static map plus
 # the dynamic basin-version and model-active pattern matches) plus the pipeline
-# retry/cancel require_action dependencies.
+# retry require_action dependency.
 ENFORCED_MUTATIONS = {
     (method, path)
     for (method, path) in _PRE_BODY_PROTECTED_MUTATIONS
@@ -58,7 +58,6 @@ ENFORCED_MUTATIONS.update(
         ("POST", "/api/v1/models/{model_id}/preflight"),
         ("POST", "/api/v1/models/{model_id}/lifecycle"),
         ("POST", "/api/v1/runs/{run_id}/retry"),
-        ("POST", "/api/v1/runs/{run_id}/cancel"),
     }
 )
 
@@ -354,7 +353,7 @@ def test_public_operations_inherit_root_anonymous_not_global_bearer() -> None:
 def test_protected_operation_set_binds_to_enforcement() -> None:
     # The documented protected set must equal the enforced surfaces. The
     # pre-body guard covers the registry mutations, the model active/
-    # lifecycle/preflight plus pipeline retry/cancel are covered by the
+    # lifecycle/preflight plus pipeline retry are covered by the
     # require_action dependencies, and the four Slurm mutations are covered by
     # the shared Slurm router dependency. This binding reddens if a route is
     # added or removed from enforcement without updating the OpenAPI override
@@ -728,29 +727,6 @@ def test_authorized_live_proof_request_reaches_retry(monkeypatch: pytest.MonkeyP
     assert error["details"]["recovery_runbook"] == "node22-control-plane-manual-recovery"
     assert "display_mode" not in error["details"]
     assert gateway.submissions == []
-
-
-def test_authorized_live_proof_request_reaches_cancel(monkeypatch: pytest.MonkeyPatch) -> None:
-    _enable_live_proof(monkeypatch)
-    from tests.test_monitoring_api import _create_job, _MockGateway, _store
-
-    with _store() as store:
-        _create_job(store, job_id="job_live_cancel", run_id="run_live_cancel", status="running")
-        gateway = _MockGateway()
-        with _client(store, gateway) as client:
-            response = client.post(
-                "/api/v1/runs/run_live_cancel/cancel",
-                headers={
-                    "X-NHMS-Internal-Live-Proof": "proof-token",
-                    "X-Live-User-ID": "live-actor",
-                    "X-Live-User-Roles": "operator",
-                },
-            )
-
-    assert response.status_code == 200
-    assert gateway.cancelled == ["slurm_1"]
-    cancelled = response.json()["data"]["cancelled_jobs"]
-    assert [job["job_id"] for job in cancelled] == ["job_live_cancel"]
 
 
 def test_missing_proof_release_blocks_retry(monkeypatch: pytest.MonkeyPatch) -> None:

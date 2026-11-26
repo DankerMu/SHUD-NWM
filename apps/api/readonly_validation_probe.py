@@ -53,7 +53,7 @@ def run_manual_action_probes(run_id: str, *, database_url: str | None = None) ->
         app.dependency_overrides[pipeline_routes.get_pipeline_store] = forbidden_dependency
         app.dependency_overrides[pipeline_routes.get_slurm_gateway] = forbidden_dependency
         with TestClient(app) as client:
-            for action in ("retry", "cancel"):
+            for action in ("retry",):
                 path = f"/api/v1/runs/{run_id}/{action}"
                 try:
                     response = client.post(path, headers=_operator_headers())

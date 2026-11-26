@@ -141,8 +141,6 @@ ACTIVE_HYDRO_STATUSES = frozenset({"created", "staged", "pending", "submitted", 
 DURABLE_HYDRO_SUCCESS_STATUSES = frozenset({"succeeded", "parsed", "published", "complete"})
 # Hydro-run statuses whose journal write clears the row's error code.
 HYDRO_RUN_CODE_CLEARING_STATUSES = frozenset({"pending", "created", "succeeded", "complete", "parsed", "published"})
-# API route: terminal hydro runs.
-HYDRO_RUN_TERMINAL_UI = frozenset({"succeeded", "parsed", "published", "failed", "cancelled", "superseded"})
 # Display: a hydro run whose product is ready to show.
 DISPLAY_PRODUCT_READY_STATUSES = frozenset({"succeeded", "parsed", "published"})
 # Forecast store: latest ready QHH run (ordered, a DB parameter).
@@ -199,21 +197,6 @@ CYCLE_STATUS_ORDER: tuple[str, ...] = (
     "cancelled",
 )
 CYCLE_STATUSES = frozenset(CYCLE_STATUS_ORDER)
-# API route: terminal met cycles.
-CYCLE_TERMINAL_UI = frozenset(
-    {
-        "complete",
-        "published",
-        "parsed_partial",
-        "failed_download",
-        "failed_convert",
-        "failed_forcing",
-        "failed_run",
-        "failed_parse",
-        "failed_publish",
-        "cancelled",
-    }
-)
 # Met store upsert: terminal cycles the upsert never overwrites (failed_* stay
 # overwritable for retries), and the full preserved tuple it concatenates.
 CYCLE_TERMINAL_UPSERT: tuple[str, ...] = ("published", "cancelled")

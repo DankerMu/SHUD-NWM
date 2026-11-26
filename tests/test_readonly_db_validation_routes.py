@@ -776,10 +776,10 @@ def test_psycopg_adapter_uses_bounded_validation_timeouts(monkeypatch: pytest.Mo
     )
 
 
-def test_display_retry_cancel_manual_action_ordering_does_not_construct_write_dependencies() -> None:
+def test_display_retry_manual_action_ordering_does_not_construct_write_dependencies() -> None:
     results = run_display_manual_action_probes("run-display-ordering")
 
-    assert {item["name"] for item in results} == {"display_retry_manual_action", "display_cancel_manual_action"}
+    assert {item["name"] for item in results} == {"display_retry_manual_action"}
     assert all(item["status"] == "PASS" for item in results)
     assert all(item["http_status"] == 409 for item in results)
     assert all(item["observed_error_code"] == "CONTROL_PLANE_MANUAL_ACTION_REQUIRED" for item in results)
