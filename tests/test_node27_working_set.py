@@ -115,8 +115,9 @@ def observations(monkeypatch, tmp_path):
     }
 
     class Cursor:
-        def __init__(self, log):
+        def __init__(self, log, events):
             self.log = log
+            self.events = events
 
         def __enter__(self):
             return self
@@ -128,6 +129,7 @@ def observations(monkeypatch, tmp_path):
             self.sql = sql
             state["queries"].append(sql)
             self.log.append(sql)
+            self.events.append(("execute", sql))
             if sql == collection.UNCOMPRESSED_CHUNKS_SQL and state["rows_failure"] is not None:
                 raise state["rows_failure"]
 
@@ -152,13 +154,14 @@ def observations(monkeypatch, tmp_path):
     class Connection:
         def __init__(self, kwargs):
             self.log = []
-            state["connections"].append({"kwargs": kwargs, "queries": self.log})
+            self.events = []
+            state["connections"].append({"kwargs": kwargs, "queries": self.log, "events": self.events})
 
         def cursor(self):
-            return Cursor(self.log)
+            return Cursor(self.log, self.events)
 
         def set_session(self, **kwargs):
-            pass
+            self.events.append(("set_session", kwargs))
 
         def close(self):
             pass
@@ -259,6 +262,11 @@ def test_cli_projection_and_threshold_overrides(
         ):
             assert field + "=" in stderr
         assert f"safety_margin_bytes={margin * GIB}" in stderr
+        days = float(flags[1]) if flags[:1] == ["--runway-critical-days"] else 3.0
+        (runway,) = [row for row in receipt["recommendations"] if row["code"] == RUNWAY]
+        assert runway["evidence"]["safety_margin_bytes"] == margin * GIB
+        assert runway["evidence"]["runway_critical_days"] == days
+        assert runway["evidence"]["daily_arrival_bytes"] == DEFAULT_RATE
     else:
         assert "RESOURCE_GOVERNANCE_CRITICAL:" not in stderr
     assert "secret" not in path.read_text()
@@ -307,6 +315,38 @@ def test_empty_set_and_missing_watermark(observations, tmp_path, capsys, empty):
 
 
 _CATALOG_SOURCES = {"timescaledb_information.chunks", "timescaledb_information.hypertables"}
+_FORBIDDEN_SQL = ("from hydro.", "from met.", "pg_class", "pg_tables", "_timescaledb_catalog")
+_CLAUSE_END = re.compile(
+    r"\b(?:where|group|order|limit|union|join|on|having|window|cross|inner|left|right|full|lateral)\b|\)|;|$",
+    re.IGNORECASE,
+)
+
+
+def _relation_sources(sql):
+    """Every relation named after FROM or JOIN, any case, comma-joined ones included.
+
+    A parenthesised FROM (the VALUES list, a subquery) names no relation itself;
+    the FROMs inside it are found on their own.
+    """
+    sources = set()
+    for match in re.finditer(r"\b(?:from|join)\s+", sql, re.IGNORECASE):
+        rest = sql[match.end() :]
+        if rest.startswith("("):
+            continue
+        clause = rest[: _CLAUSE_END.search(rest).start()]
+        for piece in clause.split(","):
+            words = piece.split()
+            sources.add(words[0].lower() if words else "")
+    return sources
+
+
+def _assert_catalog_only(sql):
+    assert "pg_total_relation_size" in sql
+    assert "from timescaledb_information.chunks" in sql.lower()
+    assert "from timescaledb_information.hypertables" in sql.lower()
+    assert _relation_sources(sql) == _CATALOG_SOURCES
+    for forbidden in _FORBIDDEN_SQL:
+        assert forbidden not in sql.lower()
 
 
 def test_working_set_query_is_catalog_only(observations):
@@ -325,17 +365,46 @@ def test_working_set_query_is_catalog_only(observations):
     ]
     assert [c["queries"] for c in others] == [["SET LOCAL statement_timeout = '5s'", DISPLAY_WATERMARK_SQL]]
     assert observations["queries"] == catalog[0]["queries"] + others[0]["queries"]
+    # Read-only, autocommit off, set once before the first statement: otherwise
+    # SET LOCAL statement_timeout would not cover the two catalog statements.
+    events = catalog[0]["events"]
+    assert [event for event in events if event[0] == "set_session"] == [
+        ("set_session", {"readonly": True, "autocommit": False})
+    ]
+    assert events[0] == ("set_session", {"readonly": True, "autocommit": False})
     for sql in catalog[0]["queries"][1:]:
         assert "FROM timescaledb_information.chunks" in sql
         assert "FROM timescaledb_information.hypertables" in sql
-        assert "pg_total_relation_size" in sql
-        assert set(re.findall(r"\b(?:FROM|JOIN)\s+([A-Za-z_][\w.]*)", sql)) == _CATALOG_SOURCES
-        for forbidden in ("FROM hydro.", "FROM met.", "pg_class", "pg_tables", "_timescaledb_catalog"):
-            assert forbidden not in sql
+        _assert_catalog_only(sql)
     assert "range_start >= CURRENT_TIMESTAMP - interval '7 days'" in collection.WORKING_SET_SQL
     assert "WHERE NOT is_compressed" in collection.UNCOMPRESSED_CHUNKS_SQL
     assert "sum(" not in collection.UNCOMPRESSED_CHUNKS_SQL.lower()
     assert "max(" not in collection.UNCOMPRESSED_CHUNKS_SQL.lower()
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        lambda sql: sql + "\nfrom hydro.river_timeseries",
+        lambda sql: sql + "\nUNION ALL SELECT 1 from met.forcing_station_timeseries",
+        lambda sql: sql.replace(
+            "FROM timescaledb_information.chunks", "FROM timescaledb_information.chunks, hydro.river_timeseries"
+        ),
+        lambda sql: sql.replace(
+            "FROM timescaledb_information.chunks", "from timescaledb_information.chunks c, met.x m"
+        ),
+        lambda sql: sql + "\njoin hydro.river_timeseries r on true",
+        lambda sql: sql + "\nJOIN pg_catalog.PG_CLASS k ON true",
+    ],
+    ids=("lower-from", "lower-union-from", "comma-join", "lower-comma-join-aliases", "lower-join", "upper-pg-class"),
+)
+def test_catalog_only_guard_rejects_a_row_source_in_any_case(tamper):
+    """The guard itself bites: a copy of the row statement with a fact table
+    (lower case, comma-joined, joined) or a catalog table is refused."""
+    _assert_catalog_only(collection.UNCOMPRESSED_CHUNKS_SQL)
+    _assert_catalog_only(collection.WORKING_SET_SQL)
+    with pytest.raises(AssertionError):
+        _assert_catalog_only(tamper(collection.UNCOMPRESSED_CHUNKS_SQL))
 
 
 def test_missing_compression_lag_does_not_report_working_set_unavailable(observations, tmp_path, monkeypatch, capsys):
@@ -673,6 +742,21 @@ def test_less_than_three_days_of_runway_is_critical(observations, tmp_path, caps
 
 # The successful catalog statuses, as the spec names them.
 _OBSERVED_STATUSES = ("ok", "no_uncompressed_chunk", "watermark_unavailable")
+
+
+def test_free_space_below_the_margin_gives_a_negative_runway(observations, tmp_path, capsys):
+    """90 GiB free under the 100 GiB margin at 44.4 GiB/day: about -0.225 days."""
+    observations.update(target=_gib(90), rows=SCENARIO_ROWS, uncompressed=_gib(373.5))
+    rc, receipt = _audit(observations, tmp_path)
+    days = receipt["working_set"]["ingest_runway_days"]
+    assert rc == 1
+    assert days < 0
+    assert days == pytest.approx(-10 / 44.4, rel=1e-9)
+    assert governance._critical_codes(receipt) == [RUNWAY]
+    lines = capsys.readouterr().err.splitlines()
+    assert lines[0] == "RESOURCE_GOVERNANCE_CRITICAL:" + RUNWAY
+    assert lines[1].startswith(f"ingest runway: ingest_runway_days={days} ")
+    assert "ingest_runway_days=-0.22" in lines[1]
 
 
 def _runway_receipt(free, rate, status="ok", **working):
