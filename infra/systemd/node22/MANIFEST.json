@@ -2,11 +2,6 @@
   "schema_version": "nhms.node22.unit_manifest.v1",
   "entries": [
     {
-      "deployed_relative_path": "nhms-compute-api.service",
-      "tracked_path": "infra/systemd/node22/nhms-compute-api.service",
-      "sha256": "c6dff9aa650bb0741401e1da0cdd0120cc66a403373d8803b214d322b7469ab7"
-    },
-    {
       "deployed_relative_path": "nhms-compute-scheduler.service",
       "tracked_path": "infra/systemd/node22/nhms-compute-scheduler.service",
       "sha256": "caacdab45a4bfe1b2b8c0ff0b1dd27e0fef3eb33e5913a14964640800847dbc5"

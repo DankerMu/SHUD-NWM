@@ -33,6 +33,7 @@ DISPLAY_RUNTIME_FORBIDDEN_ENV_KEYS = frozenset(
     }
 )
 DISPLAY_ENV_TEMPLATE = REPO_ROOT / "infra/env/display.example"
+SYSTEMD_TREE = REPO_ROOT / "infra/systemd"
 ENV_README = REPO_ROOT / "infra/env/README.md"
 REFUSED_KEYS_BULLET = "- Keys the display role refuses at startup (owner: `apps/api/runtime_mode.py`):"
 
@@ -148,17 +149,102 @@ def test_env_readme_lists_exactly_the_keys_the_display_role_refuses() -> None:
 @pytest.mark.parametrize(
     ("unit", "role"),
     [
-        ("infra/systemd/node22/nhms-compute-api.service", runtime_mode.ServiceRole.COMPUTE_CONTROL),
         ("infra/systemd/node22/nhms-slurm-gateway.service", runtime_mode.ServiceRole.SLURM_GATEWAY),
     ],
 )
 def test_compute_units_set_an_explicit_service_role(unit: str, role: runtime_mode.ServiceRole) -> None:
-    """#3231: the tracked compute API and Slurm gateway units fix ``NHMS_SERVICE_ROLE`` themselves."""
+    """#3231: the tracked Slurm gateway unit fixes ``NHMS_SERVICE_ROLE`` itself.
+
+    The compute API unit that also had a row here is retired (#3394).
+    """
 
     lines = (REPO_ROOT / unit).read_text(encoding="utf-8").splitlines()
     assignments = [line.strip() for line in lines if line.strip().startswith("Environment=NHMS_SERVICE_ROLE=")]
 
     assert assignments == [f"Environment=NHMS_SERVICE_ROLE={role.value}"]
+
+
+def starts_api_in_compute_control_role(unit_text: str) -> bool:
+    """Whether one unit file both starts ``apps.api.main`` and sets ``NHMS_SERVICE_ROLE=compute_control``.
+
+    The API counts as started only from an ``ExecStart=`` line; the role counts
+    wherever a directive line assigns it (quotes ignored). Comment lines (``#`` or
+    ``;``) are skipped and ``\\`` continuations are joined first, as systemd does.
+    """
+
+    logical: list[str] = []
+    pending = ""
+    for raw in unit_text.splitlines():
+        if raw.lstrip().startswith(("#", ";")):
+            continue
+        if raw.endswith("\\"):
+            pending += raw[:-1] + " "
+            continue
+        logical.append(pending + raw)
+        pending = ""
+    if pending:
+        logical.append(pending)
+
+    starts_api = sets_role = False
+    for line in logical:
+        key, sep, value = line.partition("=")
+        if sep and key.strip() == "ExecStart" and "apps.api.main" in value:
+            starts_api = True
+        if "NHMS_SERVICE_ROLE=compute_control" in line.replace('"', "").replace("'", ""):
+            sets_role = True
+    return starts_api and sets_role
+
+
+def _tracked_systemd_files() -> list[Path]:
+    return sorted(path for path in SYSTEMD_TREE.rglob("*") if path.is_file() and not path.name.startswith("."))
+
+
+def test_no_tracked_unit_starts_the_api_in_the_compute_control_role() -> None:
+    """#3394: the compute API unit is retired; the scheduler unit sets ``compute_control`` but starts no API."""
+
+    files = _tracked_systemd_files()
+    relative = {path.relative_to(REPO_ROOT).as_posix() for path in files}
+    # The scan reaches units at every depth and the drop-ins, and the two units that
+    # carry one half of the rule each are in it.
+    assert {
+        "infra/systemd/node22/nhms-compute-scheduler.service",
+        "infra/systemd/node22/nhms-compute-scheduler.service.d/10-slurm-gateway-token.conf",
+        "infra/systemd/nhms-display-api.service",
+        "infra/systemd/compute-system/w3/etc/systemd/system/slurmd.service.d/10-nhms-mounts.conf",
+    } <= relative
+
+    offenders = [
+        path.relative_to(REPO_ROOT).as_posix()
+        for path in files
+        if starts_api_in_compute_control_role(path.read_text(encoding="utf-8"))
+    ]
+
+    assert offenders == []
+
+
+def test_compute_control_api_rule_on_real_and_synthetic_units() -> None:
+    scheduler = (SYSTEMD_TREE / "node22/nhms-compute-scheduler.service").read_text(encoding="utf-8")
+    display = (SYSTEMD_TREE / "nhms-display-api.service").read_text(encoding="utf-8")
+    # The scheduler sets the role but starts the scheduler; the display unit starts the API without it.
+    assert "Environment=NHMS_SERVICE_ROLE=compute_control" in scheduler
+    assert starts_api_in_compute_control_role(scheduler) is False
+    assert "apps.api.main" in display
+    assert starts_api_in_compute_control_role(display) is False
+
+    api = "ExecStart=/x/.venv/bin/python -m uvicorn apps.api.main:app --port 8001\n"
+    role = "Environment=NHMS_SERVICE_ROLE=compute_control\n"
+    assert starts_api_in_compute_control_role("[Service]\n" + role + api) is True
+    assert starts_api_in_compute_control_role('[Service]\nEnvironment="NHMS_SERVICE_ROLE=compute_control"\n' + api)
+    assert starts_api_in_compute_control_role(
+        "[Service]\n" + role + "ExecStart=/x/.venv/bin/python -m uvicorn \\\n  apps.api.main:app\n"
+    )
+    assert starts_api_in_compute_control_role("[Service]\n" + role + "ExecStart = /x/python -m apps.api.main\n")
+    # Half the rule, or the other half only in a comment, passes.
+    assert starts_api_in_compute_control_role("[Service]\n" + api) is False
+    gateway = "ExecStart=/x/python -m services.slurm_gateway\n"
+    assert starts_api_in_compute_control_role("[Service]\n" + role + gateway) is False
+    assert starts_api_in_compute_control_role("[Service]\n# " + role + api) is False
+    assert starts_api_in_compute_control_role("[Service]\n" + role + "; " + api) is False
 
 
 def test_standalone_slurm_gateway_exposes_only_gateway_routes() -> None:
