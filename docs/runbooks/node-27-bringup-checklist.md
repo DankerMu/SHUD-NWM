@@ -702,7 +702,7 @@ done < "$PIN_DIR/pins.tsv"
   `/tmp/pytest-of-nwm` 把它塞满，直接阻塞了当时 PR 的 live
   receipt。2026-11-05 换盘后（14T `/dev/md0` 退役，`/data/GHDC` 现只是 `/` 上的目录）
   当前宿主 PGDATA 是 `/home/nwm/nhms-primary/pgdata`，容器 bind 仍为
-  `/home/postgres/pgdata/data`；工作集峰值须比较配置目标的实际设备与可用字节（该设备现即
+  `/home/postgres/pgdata/data`；入库余量（#3379：可用字节减 safety margin 对三天入库量）须对配置目标的实际设备与可用字节判定（该设备现即
   `/home` LV），不能用独立 `/home` telemetry 冒充，目标不可用时也不能回退到它。`/home`
   上的旧副本 `/home/nwm/nhms-pgdata` 及临时文件等 residual use 与 PGDATA 共用余量，
   但不是当前 PGDATA；冷层仍未启用。Issue

@@ -88,8 +88,35 @@ Issue #2273 修正后的源码对配置 PGDATA 直接观察 available bytes（`s
 `status`、`blockers`）才是目标容量证据，独立 `/home` telemetry 不是比较输入。
 目标 unavailable/ambiguous 必须产生 `WORKING_SET_FILESYSTEM_UNAVAILABLE` critical，
 即使工作集为空也不能跳过；既有 `du` 不可用独立产生 `PGDATA_USAGE_UNAVAILABLE`。
-目标峰值超过可用字节减 safety margin 时使用
-`PROJECTED_PEAK_EXCEEDS_WORKING_SET_FREE`，恰好相等可容纳。不更改 lag 或阈值。
+目标设备的容量 critical 判的是**入库余量**（#3379），不再是「下一次压缩前的峰值」：
+
+```text
+working_set_free_bytes − safety_margin_bytes < runway_critical_days × daily_arrival_bytes
+  → PGDATA_INGEST_RUNWAY_BELOW_CRITICAL（critical，发信）
+```
+
+- `safety_margin_bytes` 默认 100 GiB，`runway_critical_days` 默认 3（`--runway-critical-days`）；恰好相等可容纳。
+- `daily_arrival_bytes` 是目录实测的日入库速率：每张 canonical 受治理 hypertable 取其未压缩 chunk 中
+  「字节数 ÷ chunk 区间天数」最大的一个，各表相加；`_legacy` 表只计入 `uncompressed_bytes`，不计入速率。
+  receipt 里旧有的 `daily_ingest_bytes`（七天均值，被已压缩 chunk 拉低）不是比较输入。
+- 比较不依赖 watermark：目录读成功、目标容量有效就判。速率为零时退化为「可用字节低于 margin」。
+- 目录读成功却拿不到有效速率时产生 `WORKING_SET_UNAVAILABLE` critical，不会静默跳过。
+- `projected_peak_bytes` 仍写进 receipt 作证据，没有任何 recommendation 读它；
+  旧代码 `PROJECTED_PEAK_EXCEEDS_WORKING_SET_FREE` 不再发出。压缩 lag（172800 秒）不变。
+
+告警邮件与 receipt 里要看的数：`ingest_runway_days`（=（可用 − margin）÷ 速率，可以为负）、
+`daily_arrival_bytes`、`working_set_free_bytes`、safety margin、PGDATA 路径与设备、`uncompressed_bytes`。
+处置顺序：
+
+1. `uncompressed_bytes` 远大于两三天的入库量，说明压缩落后：先看压缩 lane 的 scheduled receipt 和
+   `systemd.err`，恢复压缩（细则见 `tier-node27-timeseries-storage.md` 的 per-tick capacity 一节）。
+2. 压缩正常而余量仍短：在该设备上腾空间（它就是 `/home` LV，pytest 临时文件、缓存、共享数据树都在上面）。
+3. 不要用调小 margin 或天数来消掉告警；改阈值是容量决定，单独立 issue。
+
+**这条规则看不见入库以外的增长。** 同一设备上别的目录涨得再快，`daily_arrival_bytes` 也不变；
+对它们唯一会发信的保护就是这 100 GiB margin（`HOME_FREE_BELOW_WARNING` 是 warning，不发信）。
+审计一天一次，第一封信到达时离「只剩 margin」还有两到三天的入库量。入库速率阶跃（新增流域、
+重建后的第一周）要等一个按新速率写满的日 chunk 出现后才反映出来。
 这是源码/模板契约修正，**不表示旧 pinned runtime 已部署修正或服务健康**；
 I8 前须取得批准的 #2273 目标容量 receipt，不能用旧 `/home` PASS 代替。
 
