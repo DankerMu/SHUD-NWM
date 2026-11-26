@@ -221,6 +221,8 @@ Retry jobs SHALL maintain continuity with the original run while obtaining fresh
 - **WHEN** a retry job is created
 - **THEN** a new `job_id` SHALL be generated for the retry job as the deterministic string `<base>_retry_<n>`, where
   `n` is the retry attempt and is at least 1
+- **THEN** the one exception to "at least 1" SHALL be the journal's non-master automatic retry, whose `n` is one more than
+  the caller snapshot's `retry_count` and is not clamped (requirement "The automatic retry identity differs between the non-master and the current-master path on purpose")
 - **THEN** when a `job_id` carries more than one `_retry_<n>` suffix, the last suffix SHALL be the authoritative attempt
 - **THEN** the relationship between original and retry jobs SHALL be traceable via `pipeline_event.details_json.previous_job_id`
 
@@ -2881,6 +2883,13 @@ input.
 - **THEN** those rows assert today's results, divergences included
 - **AND** changing any of them requires a separate behaviour-change issue that
   edits the row and this requirement.
+- **AND** the first of these paths, and the content of the upstream-refresh status set
+  named in the last one, are kept on purpose (#3319, decided 2026-11-26) and are stated
+  by the requirements "The automatic retry identity differs between the non-master and the current-master path on purpose" and
+  "An upstream refresh re-runs a terminal stage only from failed, submission_failed or partially_failed"; an issue that changes either
+  edits that requirement too.
+- **AND** the `failure_number - 1` term, the two `rsplit` increments, and the fact that
+  `retry.py` keeps status sets of its own are pinned as they are without such a decision.
 
 #### Scenario: A call site computes an attempt locally
 
@@ -2896,3 +2905,92 @@ input.
 - **AND** the guard is a syntactic check: every form T2 removed is caught, and
   any shape it is later found to miss is recorded in the guard and closed by
   tightening it, never by an allowlist entry.
+
+### Requirement: The automatic retry identity differs between the non-master and the current-master path on purpose
+
+When the journal schedules an automatic retry for a row whose durable record is not a current-contract
+forecast master (forcing and the downstream stages, forecast candidate rows, and forecast rows without a
+current accepted-submit contract, a legacy master row included), it SHALL take the failed row's job id as
+given, without stripping a retry suffix, and append `_retry_<n>` with `n` one more than the `retry_count`
+of the caller's snapshot of that row. The durable row's count and the suffix already carried by the id
+SHALL NOT enter `n`, and `n` SHALL NOT be clamped.
+
+When the journal schedules an automatic retry for a current-contract forecast master, the identity it
+derives SHALL strip the last retry suffix and append `_retry_<n>` with `n` one more than the effective
+attempt of the row (the larger of its last suffix and its recorded count). The cycle's inline retry of a
+master strips the last suffix as well; it counts with the inline formula, whose `failure_number - 1` term
+is pinned as it is and is not decided here.
+
+The non-master and the current-master derivation give different ids for the same input. This is intended
+(#3319, decided 2026-11-26): stacked ids are a produced shape of long standing, every parser takes the
+LAST `_retry_<n>` suffix of an id as the attempt it carries, and journals in the field hold stacked rows.
+Unifying the paths is a behaviour change that SHALL go through its own issue and SHALL show, for every
+consumer of the id, that no occupied id is minted again and no stage's attempt count restarts.
+
+#### Scenario: The non-master path stacks
+
+- **WHEN** a non-master row `job_1_retry_1` fails and the caller's snapshot carries `retry_count` 1
+- **THEN** the automatic retry is `job_1_retry_1_retry_2` with count 2
+
+#### Scenario: The non-master count comes from the caller's snapshot alone
+
+- **WHEN** the durable row of `job_1_retry_1` records `retry_count` 5 and the caller's snapshot carries 0
+- **THEN** the automatic retry is `job_1_retry_1_retry_1` with count 1
+
+#### Scenario: The non-master count has no lower bound
+
+- **WHEN** the caller's snapshot of `job_1_retry_1` carries `retry_count` -1
+- **THEN** the automatic retry is `job_1_retry_1_retry_0` with count 0
+
+#### Scenario: The current-master derivation strips
+
+- **WHEN** the identity of the next automatic retry is derived for the current master `X_retry_1` with
+  recorded count 1
+- **THEN** it is `X_retry_2` with count 2
+
+#### Scenario: The two derivations differ on the same input
+
+- **WHEN** both derivations are given the job id `X_retry_1` and the count 1
+- **THEN** the non-master one gives `X_retry_1_retry_2` and the current-master one gives `X_retry_2`
+
+#### Scenario: A stacked id parses as its last suffix
+
+- **WHEN** a parser splits `X_retry_1_retry_2`
+- **THEN** the attempt is 2 and the base is `X_retry_1`
+
+### Requirement: An upstream refresh re-runs a terminal stage only from failed, submission_failed or partially_failed
+
+A terminal stage row MAY be run again because its upstream stage finished again only when the row's
+status is `failed`, `submission_failed` or `partially_failed`, and only when the upstream finished at or
+after the row's terminal time or the row carries no terminal time. A `permanently_failed` or
+`cancelled` row SHALL NOT be run again for that reason: `cancelled` records an operator's intent and
+`permanently_failed` a spent retry budget or a non-transient error, and a refreshed upstream overrides
+neither. Both statuses remain sources of a manual retry.
+
+This set differs from the manual-retry source set by exactly `permanently_failed` and `cancelled`. The
+difference is intended (#3319, decided 2026-11-26); widening the set is a behaviour change that SHALL go
+through its own issue.
+
+#### Scenario: A failed stage is re-run after its upstream refreshed
+
+- **WHEN** a stage row is `failed`, `submission_failed` or `partially_failed`, and its upstream stage
+  finished again at or after the row's terminal time
+- **THEN** the row may be run again
+
+#### Scenario: A row of the set without a terminal time is re-run
+
+- **WHEN** a stage row is `failed`, `submission_failed` or `partially_failed`, carries no terminal
+  time, and its upstream stage finished again
+- **THEN** the row may be run again
+
+#### Scenario: A permanently failed or cancelled stage is not
+
+- **WHEN** a stage row is `permanently_failed` or `cancelled`, and its upstream stage finished again,
+  whether after the row's terminal time or with no terminal time on the row
+- **THEN** the upstream refresh does not run the row again
+- **AND** a manual retry may still select it
+
+#### Scenario: No refresh, no re-run
+
+- **WHEN** the upstream stage has not finished again, or finished before the row's terminal time
+- **THEN** the upstream refresh does not run the row again, whatever its status
