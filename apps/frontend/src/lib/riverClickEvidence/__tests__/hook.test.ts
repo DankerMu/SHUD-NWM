@@ -150,11 +150,18 @@ function makeMap(options: {
   return { map: map as typeof map & RiverClickHookMap, canvas }
 }
 
-function productClick(options: { showStationLayer?: boolean; interactive?: string[] } = {}): RiverClickProductClickContext {
+function productClick(
+  options: { showStationLayer?: boolean; interactive?: string[]; segmentCounts?: Record<string, number> | null } = {},
+): RiverClickProductClickContext {
   return {
     getInteractiveLayerIds: () => options.interactive ?? [M11_BASIN_FILL_LAYER_ID, HIT],
     resolveClickTarget: (features: RiverClickRenderedFeature[]) =>
-      resolveM11ClickTarget({ features, showStationLayer: options.showStationLayer ?? false, renderableOverlay: OVERLAY }),
+      resolveM11ClickTarget({
+        features,
+        showStationLayer: options.showStationLayer ?? false,
+        renderableOverlay: OVERLAY,
+        segmentCounts: options.segmentCounts ?? null,
+      }),
   }
 }
 
@@ -449,6 +456,45 @@ describe('river-click locate: the located point must reach the river through the
     // The same station features are ignored when stations are not shown (product parity).
     const { map } = makeMap({ boxResults: [river], pointResults: () => [layerFeature(MET_STATION_POINT_LAYER_ID), river] })
     expect((await locate(map, { productClick: productClick({ showStationLayer: false }) })).ok).toBe(true)
+  })
+
+  // shared-reach-click-ownership (#3390), scenario "The evidence hook follows the owner": two networks'
+  // segments coincide at the pin. `rn-b…` has fewer segments AND the smaller id, so the id alone would
+  // pick `rn-c…`; with both counts loaded the product walk picks `rn-b…` in either map order.
+  describe('on a reach shared by two networks', () => {
+    const nested = makeFeature({
+      id: 'feature-nested',
+      properties: { basin_id: 'basins_b', river_segment_id: 'seg-B', segment_id: 'seg-B', basin_version_id: 'bv-b', river_network_version_id: 'rn-b-net' },
+    })
+    const larger = makeFeature({
+      id: 'feature-larger',
+      properties: { basin_id: 'basins_c', river_segment_id: 'seg-C', segment_id: 'seg-C', basin_version_id: 'bv-c', river_network_version_id: 'rn-c-net' },
+    })
+    const nestedInput = selectionInput({ basinId: 'basins_b', riverSegmentId: 'seg-B', basinVersionId: 'bv-b', riverNetworkVersionId: 'rn-b-net' })
+    const largerInput = selectionInput({ basinId: 'basins_c', riverSegmentId: 'seg-C', basinVersionId: 'bv-c', riverNetworkVersionId: 'rn-c-net' })
+    const counts = { 'rn-b-net': 7971, 'rn-c-net': 25971 }
+
+    it.each([
+      ['nested first', [nested, larger]],
+      ['larger first', [larger, nested]],
+    ])('with both counts loaded (%s) the larger network is occluded and the nested network resolves', async (_label, point) => {
+      const product = productClick({ segmentCounts: counts })
+      const { map } = makeMap({ boxResults: point, pointResults: () => point })
+      expect(await locate(map, { productClick: product, input: largerInput })).toMatchObject({ ok: false, code: 'HOOK_POINT_OCCLUDED' })
+      expect(await locate(map, { productClick: product, input: nestedInput })).toMatchObject({
+        ok: true,
+        output: { normalized: { riverSegmentId: 'seg-B', riverNetworkVersionId: 'rn-b-net' } },
+      })
+    })
+
+    it.each([
+      ['nested first', [nested, larger]],
+      ['larger first', [larger, nested]],
+    ])('without counts (%s) the larger id resolves, as before', async (_label, point) => {
+      const { map } = makeMap({ boxResults: point, pointResults: () => point })
+      expect((await locate(map, { productClick: productClick(), input: largerInput })).ok).toBe(true)
+      expect(await locate(map, { productClick: productClick(), input: nestedInput })).toMatchObject({ ok: false, code: 'HOOK_POINT_OCCLUDED' })
+    })
   })
 
   it('never reaches a product selection callback: the hook takes none and a planted spy is never called', async () => {

@@ -67,6 +67,7 @@ describe('handleM11MapClick product priority walk', () => {
     handleM11MapClick(clickEvent([feature(OVERLAY_HIT), cluster, feature(MET_STATION_POINT_LAYER_ID)]), {
       showStationLayer: true,
       renderableOverlay: OVERLAY,
+      segmentCounts: null,
       mapRef,
       onOverlayClick,
     })
@@ -81,6 +82,7 @@ describe('handleM11MapClick product priority walk', () => {
     handleM11MapClick(clickEvent([feature(OVERLAY_HIT), station]), {
       showStationLayer: true,
       renderableOverlay: OVERLAY,
+      segmentCounts: null,
       mapRef,
       onOverlayClick,
     })
@@ -96,6 +98,7 @@ describe('handleM11MapClick product priority walk', () => {
     handleM11MapClick(clickEvent([feature(OVERLAY_HIT)]), {
       showStationLayer: true,
       renderableOverlay: OVERLAY,
+      segmentCounts: null,
       mapRef,
       onOverlayClick,
     })
@@ -112,24 +115,59 @@ describe('handleM11MapClick product priority walk', () => {
     const second = feature(OVERLAY_HIT, { properties: { river_segment_id: 'second' } })
     handleM11MapClick(
       clickEvent([feature(MET_STATION_CLUSTER_LAYER_ID), feature(MET_STATION_POINT_LAYER_ID), feature(M11_BASIN_FILL_LAYER_ID), first, second]),
-      { showStationLayer: false, renderableOverlay: OVERLAY, mapRef, onOverlayClick },
+      { showStationLayer: false, renderableOverlay: OVERLAY, segmentCounts: null, mapRef, onOverlayClick },
     )
     expect(queryRenderedFeatures).not.toHaveBeenCalled()
     expect(onOverlayClick).toHaveBeenCalledTimes(1)
     expect(onOverlayClick.mock.calls[0][0]).toMatchObject({ layerId: 'discharge' })
     expect(onOverlayClick.mock.calls[0][0].feature).toBe(first)
+
+    // One network under the pointer with its count loaded: still the first one the map returned.
+    const sameNetwork = (id: string) => feature(OVERLAY_HIT, { properties: { river_segment_id: id, river_network_version_id: 'rn-one' } })
+    const [a, b] = [sameNetwork('a'), sameNetwork('b')]
+    const withCounts = vi.fn()
+    handleM11MapClick(clickEvent([feature(M11_BASIN_FILL_LAYER_ID), a, b]), {
+      showStationLayer: false,
+      renderableOverlay: OVERLAY,
+      segmentCounts: { 'rn-one': 10 },
+      mapRef,
+      onOverlayClick: withCounts,
+    })
+    expect(withCounts.mock.calls[0][0].feature).toBe(a)
+  })
+
+  it('on a reach shared by two networks selects the network with fewer segments, whatever else is under the pointer (#3390)', () => {
+    // Basin fill and hidden-station features carry no network id; they are not candidates and must not
+    // switch the counts off. `rn-b` has fewer segments and the smaller id, so the id alone picks `rn-c`.
+    const { mapRef } = mapRefWith()
+    const nested = feature(OVERLAY_HIT, { properties: { river_segment_id: 'seg-b', river_network_version_id: 'rn-b' } })
+    const larger = feature(OVERLAY_HIT, { properties: { river_segment_id: 'seg-c', river_network_version_id: 'rn-c' } })
+    const others = [feature(MET_STATION_POINT_LAYER_ID), feature(M11_BASIN_FILL_LAYER_ID)]
+    for (const rivers of [[nested, larger], [larger, nested]]) {
+      const onOverlayClick = vi.fn()
+      handleM11MapClick(clickEvent([...others, ...rivers]), {
+        showStationLayer: false,
+        renderableOverlay: OVERLAY,
+        segmentCounts: { 'rn-b': 7971, 'rn-c': 25971 },
+        mapRef,
+        onOverlayClick,
+      })
+      expect(onOverlayClick).toHaveBeenCalledTimes(1)
+      expect(onOverlayClick.mock.calls[0][0]).toMatchObject({ layerId: 'discharge' })
+      expect(onOverlayClick.mock.calls[0][0].feature).toBe(nested)
+    }
   })
 
   it('selects basin fill only when no overlay hit feature is present (or no overlay is renderable)', () => {
     const { mapRef } = mapRefWith()
     const basin = feature(M11_BASIN_FILL_LAYER_ID)
     const withOverlay = vi.fn()
-    handleM11MapClick(clickEvent([basin]), { showStationLayer: false, renderableOverlay: OVERLAY, mapRef, onOverlayClick: withOverlay })
+    handleM11MapClick(clickEvent([basin]), { showStationLayer: false, renderableOverlay: OVERLAY, segmentCounts: null, mapRef, onOverlayClick: withOverlay })
     expect(withOverlay).toHaveBeenCalledTimes(1)
     expect(withOverlay.mock.calls[0][0]).toMatchObject({ layerId: 'basin-boundaries', feature: basin })
 
     const noOverlay = vi.fn()
-    handleM11MapClick(clickEvent([feature(OVERLAY_HIT), basin]), { showStationLayer: false, renderableOverlay: null, mapRef, onOverlayClick: noOverlay })
+    handleM11MapClick(clickEvent([feature(OVERLAY_HIT), basin]), { showStationLayer: false, renderableOverlay: null, segmentCounts: null, mapRef, onOverlayClick: noOverlay })
     expect(noOverlay).toHaveBeenCalledTimes(1)
     expect(noOverlay.mock.calls[0][0]).toMatchObject({ layerId: 'basin-boundaries', feature: basin })
   })
@@ -137,7 +175,7 @@ describe('handleM11MapClick product priority walk', () => {
   it('dispatches nothing when no interactive feature is at the point', () => {
     const { mapRef } = mapRefWith()
     const onOverlayClick = vi.fn()
-    handleM11MapClick(clickEvent([]), { showStationLayer: true, renderableOverlay: OVERLAY, mapRef, onOverlayClick })
+    handleM11MapClick(clickEvent([]), { showStationLayer: true, renderableOverlay: OVERLAY, segmentCounts: null, mapRef, onOverlayClick })
     expect(onOverlayClick).not.toHaveBeenCalled()
   })
 })
@@ -149,14 +187,34 @@ describe('resolveM11ClickTarget (the pure walk shared with the river-click hook)
     const river = feature(OVERLAY_HIT)
     const basin = feature(M11_BASIN_FILL_LAYER_ID)
     const resolve = (features: unknown[], showStationLayer = true) =>
-      resolveM11ClickTarget({ features: features as Array<ReturnType<typeof feature>>, showStationLayer, renderableOverlay: OVERLAY })
+      resolveM11ClickTarget({ features: features as Array<ReturnType<typeof feature>>, showStationLayer, renderableOverlay: OVERLAY, segmentCounts: null })
     expect(resolve([basin, river, station, cluster])).toEqual({ kind: 'station-cluster', feature: cluster })
     expect(resolve([basin, river, station])).toEqual({ kind: 'station', feature: station })
     expect(resolve([basin, river, station], false)).toEqual({ kind: 'overlay', layerId: 'discharge', hitLayerId: OVERLAY_HIT, feature: river })
     expect(resolve([basin, river])).toEqual({ kind: 'overlay', layerId: 'discharge', hitLayerId: OVERLAY_HIT, feature: river })
     expect(resolve([basin])).toEqual({ kind: 'basin', feature: basin })
     expect(resolve([])).toBeNull()
-    expect(resolveM11ClickTarget({ features: undefined, showStationLayer: true, renderableOverlay: OVERLAY })).toBeNull()
+    expect(resolveM11ClickTarget({ features: undefined, showStationLayer: true, renderableOverlay: OVERLAY, segmentCounts: null })).toBeNull()
+  })
+
+  it('keeps the same priority with two networks under the pointer and their counts loaded; the overlay step picks the nested one', () => {
+    const cluster = feature(MET_STATION_CLUSTER_LAYER_ID)
+    const station = feature(MET_STATION_POINT_LAYER_ID)
+    const nested = feature(OVERLAY_HIT, { properties: { river_network_version_id: 'rn-b' } })
+    const larger = feature(OVERLAY_HIT, { properties: { river_network_version_id: 'rn-c' } })
+    const basin = feature(M11_BASIN_FILL_LAYER_ID)
+    const resolve = (features: unknown[], showStationLayer = true) =>
+      resolveM11ClickTarget({
+        features: features as Array<ReturnType<typeof feature>>,
+        showStationLayer,
+        renderableOverlay: OVERLAY,
+        segmentCounts: { 'rn-b': 1, 'rn-c': 2 },
+      })
+    expect(resolve([basin, larger, nested, station, cluster])).toEqual({ kind: 'station-cluster', feature: cluster })
+    expect(resolve([basin, larger, nested, station])).toEqual({ kind: 'station', feature: station })
+    expect(resolve([basin, larger, nested, station], false)).toEqual({ kind: 'overlay', layerId: 'discharge', hitLayerId: OVERLAY_HIT, feature: nested })
+    expect(resolve([basin, nested, larger])).toEqual({ kind: 'overlay', layerId: 'discharge', hitLayerId: OVERLAY_HIT, feature: nested })
+    expect(resolve([larger, nested], true)).toEqual({ kind: 'overlay', layerId: 'discharge', hitLayerId: OVERLAY_HIT, feature: nested })
   })
 })
 

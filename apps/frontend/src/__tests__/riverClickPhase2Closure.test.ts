@@ -334,6 +334,9 @@ describe('phase2 closure: hook waits inside ONE budget and keeps one stable obje
     expect(hookEffect).not.toMatch(/onOverlayClick/)
     expect(surface).toMatch(/interactiveLayerIdsRef\.current = interactiveLayerIds/)
     expect(surface).toMatch(/showStationLayerRef\.current = showStationLayer/)
+    // #3390: the segment counts arrive with the enrichment, after the hook is installed.
+    expect(surface).toMatch(/segmentCountsRef\.current = networkSegmentCounts/)
+    expect(hookEffect).toContain('segmentCounts: segmentCountsRef.current')
   })
 })
 

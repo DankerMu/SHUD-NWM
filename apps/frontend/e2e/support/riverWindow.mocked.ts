@@ -3,7 +3,17 @@ import { readFileSync } from 'node:fs'
 import type { Page, Route } from '@playwright/test'
 
 import type { components } from '../../src/api/types'
-import { RIVER_TILE_URL_TEMPLATE, isDischargeTilePath, isRiverFixtureTilePath, riverFixture, riverTileFile } from './riverFixture'
+import {
+  RIVER_TILE_URL_TEMPLATE,
+  isDischargeTilePath,
+  isRiverFixtureTilePath,
+  riverFixture,
+  riverTileFile,
+  sharedReachFixture,
+  sharedReachTileFile,
+  type RiverFixture,
+  type SharedReachTileName,
+} from './riverFixture'
 
 /**
  * 曲线窗 e2e 的共享 mock（openspec mobile-responsive-display task 1.3；站点两条由 1.4 消费）。
@@ -183,12 +193,42 @@ const mockStationPage = {
   filters: { available: { search: true, variables: false, qc_status: false } },
 } satisfies Schemas['MetStationPage']
 
-function mockLatestProduct(source: MockSource) {
+/**
+ * 共用河道（#3390，只在 `installRiverWindowMocks(page, { sharedReach })` 时出现）：第二个流域、流域版本与
+ * 模型。它的河网 id 比夹具河网大、河段数比 `mockModel` 多——按 id 地图会选它，按河段数应选夹具河网。
+ */
+const secondIdentity = sharedReachFixture.second.identity
+const SECOND_MODEL_ID = 'e2e-model-2'
+
+export const mockSecondBasin = { ...mockBasin, basin_id: secondIdentity.basinId, basin_name: 'E2E Basin 2' } satisfies Schemas['Basin']
+
+const mockSecondBasinVersion = {
+  ...mockBasinVersion,
+  basin_version_id: secondIdentity.basinVersionId,
+  basin_id: secondIdentity.basinId,
+} satisfies Schemas['BasinVersion']
+
+export const mockSecondModel = {
+  ...mockModel,
+  model_id: SECOND_MODEL_ID,
+  model_name: 'E2E SHUD 2',
+  basin_id: secondIdentity.basinId,
+  basin_name: mockSecondBasin.basin_name,
+  basin_version_id: secondIdentity.basinVersionId,
+  river_network_version_id: secondIdentity.riverNetworkVersionId,
+  mesh_version_id: 'e2e-mesh-2-v1',
+  calibration_version_id: 'e2e-calibration-2-v1',
+  segment_count: sharedReachFixture.second.segmentCount,
+} satisfies Schemas['ModelInstance']
+
+type MockIdentity = RiverFixture['identity']
+
+function mockLatestProduct(source: MockSource, segment: MockIdentity = identity, modelId = MOCK_MODEL_ID) {
   return {
-    basin_id: identity.basinId,
-    model_id: MOCK_MODEL_ID,
-    basin_version_id: identity.basinVersionId,
-    river_network_version_id: identity.riverNetworkVersionId,
+    basin_id: segment.basinId,
+    model_id: modelId,
+    basin_version_id: segment.basinVersionId,
+    river_network_version_id: segment.riverNetworkVersionId,
     available_issue_times: [MOCK_CYCLE],
     source_id: source,
     cycle_time: MOCK_CYCLE,
@@ -224,10 +264,10 @@ function mockLatestProduct(source: MockSource) {
 }
 
 /** 河段 q_down 曲线：两个源各一条、逐 3 小时、数值不同（GFS 高于 IFS），点为 `[毫秒, 值]`。 */
-function mockRiverForecastSeries(source: MockSource) {
-  const base = source === 'GFS' ? riverFixture.value : riverFixture.value * 0.8
+function mockRiverForecastSeries(source: MockSource, segment: MockIdentity = identity, value = riverFixture.value) {
+  const base = source === 'GFS' ? value : value * 0.8
   return {
-    segment_id: identity.riverSegmentId,
+    segment_id: segment.riverSegmentId,
     issue_time: MOCK_CYCLE,
     unit: product.unit,
     series: [
@@ -315,13 +355,25 @@ export interface RiverWindowMockLog {
   unmocked: string[]
 }
 
+export interface RiverWindowMockOptions {
+  /**
+   * 共用河道（#3390）：夹具瓦片换成 `shared-reach-<name>` 那张（夹具河段与第二个河网的河段重合，按该名字的
+   * 顺序绘制），并加上第二个流域、流域版本、模型与它的 latest-product / forecast-series。不传 = 与改动前
+   * 逐字相同的单河段 mock；只有共用河道 spec 传它。
+   */
+  sharedReach?: SharedReachTileName
+}
+
 /**
  * 安装曲线窗 mock。须在 `page.goto` 之前调用；返回的记录对象随请求实时更新。
  * 夹具瓦片之外的矢量瓦片回 204（空瓦片），底图瓦片回 1×1 透明 PNG——都立即返回，地图才能到 `idle`。
  */
-export async function installRiverWindowMocks(page: Page): Promise<RiverWindowMockLog> {
+export async function installRiverWindowMocks(page: Page, options: RiverWindowMockOptions = {}): Promise<RiverWindowMockLog> {
   const log: RiverWindowMockLog = { dischargeTileRequests: [], forecastSeriesScenarios: [], unmocked: [] }
-  const riverTile = readFileSync(riverTileFile)
+  const shared = options.sharedReach !== undefined
+  const riverTile = readFileSync(options.sharedReach ? sharedReachTileFile(options.sharedReach) : riverTileFile)
+  const basins = shared ? [mockBasin, mockSecondBasin] : [mockBasin]
+  const models = shared ? [mockModel, mockSecondModel] : [mockModel]
   const json = (route: Route, data: unknown, status = 200) =>
     route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(data) })
   const ok = (route: Route, data: unknown) => json(route, { status: 'ok', data })
@@ -348,12 +400,15 @@ export async function installRiverWindowMocks(page: Page): Promise<RiverWindowMo
     }
 
     if (path === '/api/v1/runtime/config') return ok(route, mockRuntimeConfig)
-    if (path === '/api/v1/basins') return ok(route, [mockBasin] satisfies Schemas['Basin'][])
+    if (path === '/api/v1/basins') return ok(route, basins satisfies Schemas['Basin'][])
     if (path === `/api/v1/basins/${identity.basinId}/versions`) {
       return ok(route, [mockBasinVersion] satisfies Schemas['BasinVersion'][])
     }
+    if (shared && path === `/api/v1/basins/${secondIdentity.basinId}/versions`) {
+      return ok(route, [mockSecondBasinVersion] satisfies Schemas['BasinVersion'][])
+    }
     if (path === '/api/v1/models') {
-      return ok(route, { items: [mockModel], total: 1, limit: 200, offset: 0 } satisfies Schemas['ModelInstancePage'])
+      return ok(route, { items: models, total: models.length, limit: 200, offset: 0 } satisfies Schemas['ModelInstancePage'])
     }
     if (path === '/api/v1/runs') {
       const source = sourceParam(query.get('source'))
@@ -378,6 +433,9 @@ export async function installRiverWindowMocks(page: Page): Promise<RiverWindowMo
       const source = sourceParam(query.get('source'))
       const basinId = query.get('basin_id')
       if (source && (!basinId || basinId === identity.basinId)) return ok(route, mockLatestProduct(source))
+      if (shared && source && basinId === secondIdentity.basinId) {
+        return ok(route, mockLatestProduct(source, secondIdentity, SECOND_MODEL_ID))
+      }
     }
     if (
       path ===
@@ -388,6 +446,18 @@ export async function installRiverWindowMocks(page: Page): Promise<RiverWindowMo
       if (source && query.get('run_id') === MOCK_RUN_IDS[source]) {
         log.forecastSeriesScenarios.push(scenarios)
         return ok(route, mockRiverForecastSeries(source))
+      }
+    }
+    if (
+      shared &&
+      path ===
+        `/api/v1/basin-versions/${secondIdentity.basinVersionId}/river-segments/${secondIdentity.riverSegmentId}/forecast-series`
+    ) {
+      const scenarios = query.get('scenarios') ?? ''
+      const source = (Object.keys(MOCK_SCENARIOS) as MockSource[]).find((key) => MOCK_SCENARIOS[key] === scenarios)
+      if (source && query.get('run_id') === MOCK_RUN_IDS[source]) {
+        log.forecastSeriesScenarios.push(scenarios)
+        return ok(route, mockRiverForecastSeries(source, secondIdentity, sharedReachFixture.second.value))
       }
     }
 

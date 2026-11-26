@@ -40,6 +40,7 @@ import {
   nationalDischargeSourceUnresolved,
   type NationalDischargePair,
 } from '@/stores/overviewDataNationalDischarge'
+import { buildNetworkSegmentCounts } from '@/stores/overviewDataNetworkSegmentCounts'
 import {
   bootstrapFailureWord,
   buildOverviewRequestPlan,
@@ -638,6 +639,7 @@ export const useOverviewDataStore = create<OverviewDataState>((set, get) => ({
                 missingRequiredFields: [],
               }),
               basinVersionToBasinId: {},
+              networkSegmentCounts: {},
             }
         set({ mapBootstrapLoading: false, overview: placeholderOverview })
       }
@@ -703,6 +705,7 @@ export const useOverviewDataStore = create<OverviewDataState>((set, get) => ({
       for (const model of models as ApiModelInstance[]) {
         if (model.basin_version_id && model.basin_id) basinVersionToBasinId[model.basin_version_id] = model.basin_id
       }
+      const networkSegmentCounts = buildNetworkSegmentCounts(models as ApiModelInstance[])
       // 等阶段 1 settle 后再合成最终快照（bootstrap 字段需存在）；bootstrap reject 时仍生成快照
       // 但 bootstrap=null（OverviewPage 将识别为 mapBootstrap 失败态而非 ready）。
       const bootstrapForSnapshot = await bootstrapPromise.catch(() => null)
@@ -742,6 +745,7 @@ export const useOverviewDataStore = create<OverviewDataState>((set, get) => ({
         layers: layerStates,
         aggregationDecision,
         basinVersionToBasinId,
+        networkSegmentCounts,
       }
       if (isCurrentRequest()) {
         set({ overview: finalSnapshot, enrichmentLoading: false, error: partialErrors[0] ?? null })
@@ -850,6 +854,7 @@ export const useOverviewDataStore = create<OverviewDataState>((set, get) => ({
             missingRequiredFields: [],
           }),
           basinVersionToBasinId: {},
+          networkSegmentCounts: {},
         }
         wroteFallback = true
         set({ overview: fallback, mapBootstrapLoading: false, enrichmentLoading: false, error: message })
