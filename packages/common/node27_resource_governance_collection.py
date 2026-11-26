@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import os
 import subprocess
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 from packages.common.display_watermark import DisplayWatermarkError, fetch_display_watermark
-from packages.common.node27_timeseries_discovery import RUNTIME_HYPERTABLES_SQL
+from packages.common.node27_timeseries_discovery import CANONICAL_HYPERTABLES, RUNTIME_HYPERTABLES_SQL
 from packages.common.redaction import redact_payload
 
 COMPRESSION_LAG_SECONDS_ENV = "NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS"
@@ -29,6 +29,47 @@ SELECT COALESCE(sum(pg_total_relation_size(
 FROM timescaledb_information.chunks
 WHERE (hypertable_schema, hypertable_name) IN ({RUNTIME_HYPERTABLES_SQL})
 """
+
+# #3379: one row per uncompressed chunk of the governed hypertables, nothing
+# aggregated here. `daily_arrival_bytes` folds these rows in Python so the
+# per-hypertable maximum and the interval normalisation are unit-testable.
+UNCOMPRESSED_CHUNKS_SQL = f"""
+SELECT hypertable_schema, hypertable_name, range_start, range_end,
+       pg_total_relation_size(format('%I.%I', chunk_schema, chunk_name)::regclass) AS total_bytes
+FROM timescaledb_information.chunks
+WHERE NOT is_compressed
+  AND (hypertable_schema, hypertable_name) IN ({RUNTIME_HYPERTABLES_SQL})
+"""
+
+
+def daily_arrival_bytes(rows: Iterable[Mapping[str, Any]]) -> float:
+    """Uncompressed bytes arriving per day, from uncompressed-chunk rows.
+
+    For each canonical hypertable (``CANONICAL_HYPERTABLES``) the largest
+    ``total_bytes / chunk interval in days`` (fractional days) among its rows,
+    summed over those hypertables; ``0.0`` when no row is canonical. Rows of
+    any other hypertable (the ``LEGACY_HYPERTABLES`` siblings, which receive
+    no ingest) contribute nothing.
+
+    Every row, legacy included, must carry timestamp ``range_start`` and
+    ``range_end`` with ``range_end > range_start`` and an integer, non-negative
+    ``total_bytes``; any other row is a fault and raises ``ValueError``.
+    """
+    largest: dict[tuple[str, str], float] = {}
+    for row in rows:
+        start, end, size = row.get("range_start"), row.get("range_end"), row.get("total_bytes")
+        if not isinstance(start, datetime) or not isinstance(end, datetime):
+            raise ValueError("uncompressed chunk row without a time range")
+        days = (end - start).total_seconds() / 86400
+        if not days > 0:
+            raise ValueError("uncompressed chunk row with a non-positive interval")
+        if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+            raise ValueError("uncompressed chunk row without a byte size")
+        key = (row.get("hypertable_schema"), row.get("hypertable_name"))
+        if key not in CANONICAL_HYPERTABLES:
+            continue
+        largest[key] = max(largest.get(key, 0.0), size / days)
+    return float(sum(largest.values()))
 
 
 MAINTENANCE_OUTPUT_ROW_LIMIT = 50
@@ -156,6 +197,7 @@ def collect_working_set(database_url: str | None, filesystem: Mapping[str, Any])
     sample: dict[str, Any] = {
         "uncompressed_bytes": None,
         "daily_ingest_bytes": None,
+        "daily_arrival_bytes": None,
         "next_compressible_at": None,
         "working_set_free_bytes": free if binding_status == "ok" else None,
         "working_set_filesystem": binding,
@@ -174,18 +216,31 @@ def collect_working_set(database_url: str | None, filesystem: Mapping[str, Any])
             cursor.execute("SET LOCAL statement_timeout = '20s'")
             cursor.execute(WORKING_SET_SQL)
             row = cursor.fetchone()
-        sample["uncompressed_bytes"] = int(row["uncompressed_bytes"])
-        sample["daily_ingest_bytes"] = float(row["daily_ingest_bytes"])
+            cursor.execute(UNCOMPRESSED_CHUNKS_SQL)
+            chunk_rows = cursor.fetchall()
+        # #3379: no partial working set. Everything is derived into locals and
+        # checked first; any failure above or here leaves every catalog field
+        # None. The two statements run at READ COMMITTED, so the rows are only
+        # required to exist when the aggregate saw uncompressed bytes.
+        uncompressed = int(row["uncompressed_bytes"])
+        daily_ingest = float(row["daily_ingest_bytes"])
         oldest_end = row["oldest_uncompressed_range_end"]
-        if oldest_end is None:
-            sample["projection_status"] = "no_uncompressed_chunk"
-            return sample
-        sample["next_compressible_at"] = (oldest_end + timedelta(seconds=lag)).isoformat()
+        if uncompressed > 0 and not chunk_rows:
+            raise ValueError("uncompressed bytes without an uncompressed chunk row")
+        arrival = daily_arrival_bytes(chunk_rows)
+        next_compressible_at = None if oldest_end is None else (oldest_end + timedelta(seconds=lag)).isoformat()
     except Exception:
         return sample
     finally:
         if connection is not None:
             connection.close()
+    sample["uncompressed_bytes"] = uncompressed
+    sample["daily_ingest_bytes"] = daily_ingest
+    sample["daily_arrival_bytes"] = arrival
+    if next_compressible_at is None:
+        sample["projection_status"] = "no_uncompressed_chunk"
+        return sample
+    sample["next_compressible_at"] = next_compressible_at
     try:
         sample["watermark"] = fetch_display_watermark(database_url).isoformat()
     except DisplayWatermarkError:

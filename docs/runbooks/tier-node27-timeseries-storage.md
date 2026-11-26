@@ -8768,9 +8768,20 @@ before a receipt exists.
      Same-device aliases are safe; conflicting target/PGDATA-usage identities
      are ambiguous. The existing PGDATA `du` is reused, not scanned twice.
 
-     `_recommendations` compares projected peak against
-     `working_set_free_bytes - safety_margin_bytes` and emits
-     `PROJECTED_PEAK_EXCEEDS_WORKING_SET_FREE` only when greater; equality fits.
+     Since #3379 the capacity critical is an ingest runway, not a projected
+     peak: `_recommendations` emits `PGDATA_INGEST_RUNWAY_BELOW_CRITICAL` when
+     `working_set_free_bytes - safety_margin_bytes` is less than
+     `runway_critical_days * daily_arrival_bytes` (3 days by default); equality
+     fits. `daily_arrival_bytes` is read from the catalog: per canonical
+     governed hypertable the largest uncompressed chunk per day of its
+     interval, summed; `_legacy` chunks count in `uncompressed_bytes` only. The
+     comparison does not wait for the watermark, a zero rate reduces it to
+     "free below the margin", and a successful catalog read without a usable
+     rate is `WORKING_SET_UNAVAILABLE`. `projected_peak_bytes` stays in the
+     receipt as evidence and no recommendation reads it;
+     `PROJECTED_PEAK_EXCEEDS_WORKING_SET_FREE` is no longer emitted. Operator
+     reading and the limits of the rule (growth other than ingest is covered
+     only by the margin) are in `production-ops/artifacts-and-storage.md`.
      Missing/unreadable/ambiguous target evidence emits
      `WORKING_SET_FILESYSTEM_UNAVAILABLE` critical even with an empty working
      set. Unavailable existing `du` independently emits `PGDATA_USAGE_UNAVAILABLE`.
@@ -8778,15 +8789,18 @@ before a receipt exists.
      `WATERMARK_UNAVAILABLE` and `WORKING_SET_UNAVAILABLE` remain criticals,
      as do `ROOT_FREE_BELOW_CRITICAL` and `HYPERTABLE_INDEX_RATIO_HIGH`.
      Database-size recommendations remain `info`, not a critical proxy for
-     destination capacity. Peak formula, lag (172800 seconds) and thresholds
-     are unchanged.
+     destination capacity. The lag (172800 seconds), the safety margin and the
+     other thresholds are unchanged; the peak formula still fills
+     `projected_peak_bytes`.
 
      `build_receipt`, `_critical_codes` and `main` own the audit/exit contract:
      non-completed audit or any critical produces exit 1; rejected config exits
      2. Warnings alone do not trigger it. Critical stderr retains
-     `RESOURCE_GOVERNANCE_CRITICAL:<code>` and carries destination path/device,
-     available bytes, projected peak, working-set bytes and next-compressible
-     time without DSN/password/raw secret-bearing exception text. The existing
+     `RESOURCE_GOVERNANCE_CRITICAL:<code>`; the capacity criticals add the
+     destination path/device and available bytes (the runway critical also
+     `ingest_runway_days`, `daily_arrival_bytes`, the safety margin and
+     `uncompressed_bytes`; the two filesystem criticals the PGDATA usage
+     status), without DSN/password/raw secret-bearing exception text. The existing
      `node27_resource_governance_once.sh` tee/PIPESTATUS route and
      `nhms-node27-resource-governance.service` `OnFailure=` chain into
      `node27_unit_failure_alert_once.sh` preserve the journal evidence.

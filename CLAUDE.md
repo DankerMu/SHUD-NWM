@@ -31,7 +31,7 @@ Do not hand-edit this file.
 - node-27 的 readonly 是 **role-level**（`nhms_display_ro` 无 INSERT/UPDATE/DELETE），不是 standby 副本。
 - 生产 display API + 前端公网入口：`https://test.nwm.ac.cn`（27 反代对外，无需 SSH 隧穿）。
 - node-27 DB 热数据在 `pg_default`（2026-11-05 换盘后 fresh initdb 重建：宿主 `/home/nwm/nhms-primary/pgdata`，容器 bind `/home/postgres/pgdata/data`；原 14T `/dev/md0` 已退役，`/data/GHDC` 现只是根卷上的目录）。
-  - 工作集峰值必须对配置 PGDATA 的实际目标设备余量判定（该设备现即 `/home` LV，与 pytest 临时文件等共用余量），冷层仍未启用。
+  - 入库余量（可用字节减 safety margin，对三天入库量）必须对配置 PGDATA 的实际目标设备判定（该设备现即 `/home` LV，与 pytest 临时文件等共用余量），冷层仍未启用。
   - 容量核查一律 `df -h / /home` + `psql` 实测，不引用文档里的历史数字（`/` 也要看：#1765 的 `/tmp/pytest-of-nwm` 把根卷塞满过）。
   - node-27 上跑 pytest 前先 `mkdir -p /home/nwm/tmp && export TMPDIR=/home/nwm/tmp`。
   - node-27 的 integration pytest 一律经 `scripts/node27_integration_pg.py run -- <pytest 命令>` 跑在一次性实例上。

@@ -8,6 +8,21 @@ import pytest
 
 from scripts import node27_resource_governance as governance
 
+_RETIRED_CODE = "PROJECTED_PEAK_EXCEEDS_WORKING_SET_FREE"
+
+
+@pytest.fixture(autouse=True)
+def _retired_code_is_never_emitted(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#3379 spec "The retired code is not emitted", over every state this module builds."""
+    real = governance._recommendations
+
+    def checked(receipt, thresholds):
+        recommendations = real(receipt, thresholds)
+        assert _RETIRED_CODE not in {item.get("code") for item in recommendations}
+        return recommendations
+
+    monkeypatch.setattr(governance, "_recommendations", checked)
+
 
 def _base_receipt() -> dict:
     thresholds = governance.AuditThresholds()
@@ -410,6 +425,7 @@ def _audit_with_coverage_timer(
         "working_set_filesystem": {"status": "ok", "path": "/data/GHDC", "device_identity": "8:12", "blockers": []},
         "working_set_free_bytes": 900 * governance.GIB,
         "uncompressed_bytes": 1,
+        "daily_arrival_bytes": 0.0,
     }
     monkeypatch.setattr(governance, "collect_filesystem", lambda _config: json.loads(json.dumps(base["filesystem"])))
     monkeypatch.setattr(governance, "collect_postgres", lambda _url: json.loads(json.dumps(base["postgres"])))
@@ -773,6 +789,7 @@ def _healthy_receipt(maintenance_output: object = None, *, postgres_status: str 
             "working_set_filesystem": {"status": "ok", "path": "/data/GHDC", "device_identity": "8:12", "blockers": []},
             "working_set_free_bytes": 900 * governance.GIB,
             "uncompressed_bytes": 1,
+            "daily_arrival_bytes": float(44 * governance.GIB),
             "projected_peak_bytes": 1,
         },
         "postgres": postgres,
@@ -1095,3 +1112,46 @@ def test_collect_postgres_isolates_maintenance_output_failure(
     for section in ("dead_tuple_hotspots", "hypertables", "largest_chunks"):
         assert result[section] == []
     assert {"external_pg_tblspc_targets", "cold_tablespace", "cold_relation_by_tablespace"}.isdisjoint(result)
+
+
+# ---------------------------------------------------------------------------
+# #3379 — no recommendation is derived from projected_peak_bytes
+# ---------------------------------------------------------------------------
+
+
+def _runway_state(free_gib: int) -> dict:
+    receipt = _healthy_receipt(_maintenance_section([]))
+    receipt["working_set"]["working_set_free_bytes"] = free_gib * governance.GIB
+    return receipt
+
+
+@pytest.mark.parametrize(
+    ("free_gib", "expected"),
+    [(900, []), (200, ["PGDATA_INGEST_RUNWAY_BELOW_CRITICAL"])],
+    ids=("runway-fits", "runway-short"),
+)
+@pytest.mark.parametrize("status", ("ok", "watermark_unavailable", "no_uncompressed_chunk"))
+def test_projected_peak_drives_no_recommendation(free_gib: int, expected: list, status: str) -> None:
+    """Task 4.5 / D7: `projected_peak_bytes` is evidence only. Any value (absent,
+    zero, far above the free space, malformed) gives the same recommendations."""
+
+    def outcome(peak: object) -> list[tuple]:
+        receipt = _runway_state(free_gib)
+        receipt["working_set"]["projection_status"] = status
+        if peak is _ABSENT:
+            del receipt["working_set"]["projected_peak_bytes"]
+        else:
+            receipt["working_set"]["projected_peak_bytes"] = peak
+        return [
+            (item["severity"], item["code"], item["action"])
+            for item in governance._recommendations(receipt, governance.AuditThresholds())
+        ]
+
+    reference = outcome(1)
+    critical = [code for severity, code, _ in reference if severity == "critical"]
+    assert [code for code in critical if code != "WATERMARK_UNAVAILABLE"] == expected
+    for peak in (_ABSENT, None, 0, 10**18, 2000 * governance.GIB, -1.0, float("nan"), "750 GiB"):
+        assert outcome(peak) == reference, peak
+
+
+_ABSENT = object()
