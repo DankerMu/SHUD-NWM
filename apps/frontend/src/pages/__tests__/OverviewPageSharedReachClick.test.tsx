@@ -1,9 +1,11 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { RouterProvider, createMemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { OverviewPage } from '@/pages/OverviewPage'
-import { useOverviewDataStore } from '@/stores/overviewData'
+import type { M11QueryState } from '@/lib/m11/queryState'
+import { overviewSnapshotMatchesQuery, overviewSnapshotMetadataMatchesQuery, useOverviewDataStore } from '@/stores/overviewData'
+import { overviewRequestScope } from '@/stores/overviewDataRequestScope'
 import { installMaplibreStubMap } from '@/test/maplibreStub'
 import { installMobileFormMatchMedia } from '@/test/mobileFormMatchMedia'
 import { layer, mockApi, model, resetOverviewDataTestState, success } from '@/test/overviewDataFixture'
@@ -125,6 +127,44 @@ describe('OverviewPage: a click on a reach shared by two networks opens the nest
     await renderOverview()
     clickMapWith(order.map(riverFeature))
     expect(screen.getByTestId('stub-river-panel')).toBeInTheDocument()
+    expect(selectedSegment()).toBe(NESTED.segment)
+  })
+
+  it('in the valid-time correction window (only the metadata snapshot matches) the map still gets the counts', async () => {
+    mockApi({
+      '/api/v1/layers': () => success([layer]),
+      '/api/v1/models': () => success({ items: [modelRecord(LARGER), modelRecord(NESTED)], total: 2, limit: 200, offset: 0 }),
+    })
+    await renderOverview()
+    const loaded = useOverviewDataStore.getState().overview
+    expect(loaded?.networkSegmentCounts).toEqual({ [NESTED.network]: NESTED.count, [LARGER.network]: LARGER.count })
+    // The page's own query, and the same query at another valid time: a snapshot carrying the second
+    // scope matches the page by metadata (queryKey ignores validTime) but not by data (dataKey).
+    const scope = loaded!.requestScope
+    const pageQuery: M11QueryState = {
+      source: scope.source,
+      cycle: scope.cycle,
+      validTime: scope.validTime,
+      layer: scope.layer,
+      metStations: false,
+      precip: false,
+      basemap: scope.basemap,
+      basinVersionId: scope.basinVersionId,
+      riverNetworkVersionId: scope.riverNetworkVersionId,
+      segmentId: scope.segmentId,
+      q: scope.q,
+    }
+    const otherValidTime = scope.validTime === '2026-05-18T03:00:00.000Z' ? '2026-05-18T06:00:00.000Z' : '2026-05-18T03:00:00.000Z'
+    const staleScope = overviewRequestScope({ ...pageQuery, validTime: otherValidTime })
+    act(() => {
+      useOverviewDataStore.setState({ overview: { ...loaded!, requestScope: staleScope } })
+    })
+    const overview = useOverviewDataStore.getState().overview
+    expect(overviewSnapshotMatchesQuery(overview, pageQuery)).toBe(false)
+    expect(overviewSnapshotMetadataMatchesQuery(overview, pageQuery)).toBe(true)
+    expect(screen.getByTestId('m11-map-surface').getAttribute('data-registered-overlays')).toBe('discharge')
+
+    clickMapWith([NESTED, LARGER].map(riverFeature))
     expect(selectedSegment()).toBe(NESTED.segment)
   })
 

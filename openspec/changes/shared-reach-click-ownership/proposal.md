@@ -118,8 +118,9 @@ that reach.
   `/api` requests to the running display API through a Playwright route (the preview server's own
   proxy points at a port nothing listens on there). The running API is the deployed one and its model
   list has no counts, so for the branch run the route fills each list item's `segment_count` from the
-  running API's own detail endpoint for that model (read-only; this stands in for the backend half of
-  this change until it is deployed, and the run without it is reported next to it). The same script, in the same session, runs against
+  running API's own detail endpoint for that model and passes every other field and `total` through
+  untouched (read-only; this stands in for the backend half of this change until it is deployed, and
+  the run without it, which has to equal the baseline, is reported next to it). The same script, in the same session, runs against
   the public site as the baseline. Points and what each can tell:
 
   | point | baseline (public site) | branch build | tells |
@@ -135,8 +136,11 @@ that reach.
   display API on the merged head (`scripts/ops/start-display-api.sh`; the list starts to carry the
   counts) and replace the built frontend (build in a temporary worktree, swap `apps/frontend/dist`
   with a backup outside the checkout, as in the earlier frontend receipts). Either order is safe: the
-  old frontend ignores the counts, and the new frontend without counts behaves as today. After both,
-  the same script against the public site, without the stand-in.
+  old frontend ignores the counts, and the new frontend without counts behaves as today. After the
+  restart: the display receipt of the bringup checklist's C1 on the merged head
+  (`scripts/ops/display-c1-receipt.sh`), and an API readback that every item of
+  `GET /api/v1/models?active=true&limit=200` has a `segment_count` equal to its detail endpoint's.
+  After both: the same script against the public site, without the stand-in.
 
 ## Not in this change
 
