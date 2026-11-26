@@ -47,7 +47,7 @@ full API to every interface, for no caller, is a way to start something by mista
   for both receipts in an operator receipt under `docs/runbooks/receipts/`. To keep that receipt in this
   PR (no docs-only follow-up), the installed copy is moved aside before the last push, after the code
   review: probe from the production checkout (old manifest, 25 `same`), move the file into
-  `retired-20261126/`, reload the user manager, probe with this PR's manifest from a temporary clone
+  `retired-20261126/`, reload the user manager, probe with this PR's manifest from a temporary export
   (24 `same`). Between that and the fast-forward of the production checkout its own manifest still lists
   the unit, so a probe from there would report one `missing` entry; no timer runs the probe, and no
   tracked unit orders itself after or wants the retired one (the dependency ran the other way).

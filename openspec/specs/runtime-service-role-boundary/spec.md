@@ -243,9 +243,10 @@ The system SHALL expose a single runtime service role contract that distinguishe
 
 #### Scenario: Units and env templates set explicit roles
 
-- **WHEN** the tracked compute API unit, a tracked Slurm gateway unit that fixes its role, or the display env template starts a service
+- **WHEN** a tracked Slurm gateway unit that fixes its role or the display env template starts a service
 - **THEN** it sets an explicit `NHMS_SERVICE_ROLE` matching the service being started
-- **AND** the display env template also sets `NHMS_REQUIRE_SERVICE_ROLE=true`.
+- **AND** the display env template also sets `NHMS_REQUIRE_SERVICE_ROLE=true`
+- **AND** no tracked unit starts the API in the `compute_control` role: the compute API unit is retired (#3394) and the role remains a supported value of `NHMS_SERVICE_ROLE`.
 
 #### Scenario: Unknown role rejected
 
