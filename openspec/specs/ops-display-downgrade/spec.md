@@ -2,7 +2,9 @@
 
 ## Purpose
 TBD - created by archiving change m25-multibasin-frontend-production. Update Purpose after archive.
+
 ## Requirements
+
 ### Requirement: display_readonly 下运维入口降级
 
 在 `display_readonly` 运行模式下，主导航 MUST NOT 显示 `/ops` 与 `/monitoring` 入口；在 `compute_control`/`dev_monolith` 模式下 SHALL 保持现有导航不变。
@@ -37,7 +39,7 @@ TBD - created by archiving change m25-multibasin-frontend-production. Update Pur
 
 ### Requirement: 运维路由与只读边界保留
 
-`/ops` 路由 MUST 保留并可经 role-gated 方式内部访问；当 runtime config 同时明确报告 `service_role=display_readonly` 与 `display_readonly=true` 时，`/ops` 作为只读诊断面 SHALL 允许 viewer 直达，不得使用角色伪装。该例外 MUST NOT 扩展到 `/monitoring` 或 `/system/model-assets`，也不得放宽任何控制行为。display_readonly 的后端边界防护（retry/cancel 返回 `409 CONTROL_PLANE_MANUAL_ACTION_REQUIRED`、queue-depth `503`、无 Slurm 控制请求）及其测试 MUST 保持不变。
+`/ops` 路由 MUST 保留并可经 role-gated 方式内部访问；当 runtime config 同时明确报告 `service_role=display_readonly` 与 `display_readonly=true` 时，`/ops` 作为只读诊断面 SHALL 允许 viewer 直达，不得使用角色伪装。该例外 MUST NOT 扩展到 `/monitoring` 或 `/system/model-assets`，也不得放宽任何控制行为。display_readonly 的后端边界防护（retry 返回 `409 CONTROL_PLANE_MANUAL_ACTION_REQUIRED`、cancel 路径在任何角色下都不是路由（#3394）、queue-depth `503`、无 Slurm 控制请求）及其测试 MUST 保持不变。
 
 #### Scenario: 内部诊断仍可访问
 - **WHEN** 具备 operator/model_admin/sys_admin 角色的用户直接访问 `/ops`
@@ -54,7 +56,7 @@ TBD - created by archiving change m25-multibasin-frontend-production. Update Pur
 - **THEN** 按既有 RBAC 拒绝；加载等待有界，晚到的有效 readonly config 可恢复只读访问
 
 #### Scenario: 只读边界不被削弱
-- **WHEN** display_readonly 下触发 retry/cancel
+- **WHEN** display_readonly 下触发 retry
 - **THEN** 仍返回 `409 CONTROL_PLANE_MANUAL_ACTION_REQUIRED`，不发 Slurm 控制请求，不写终态
 
 ### Requirement: 前端角色来源使用 runtime config
@@ -64,4 +66,3 @@ TBD - created by archiving change m25-multibasin-frontend-production. Update Pur
 #### Scenario: 角色由 runtime config 驱动
 - **WHEN** runtime config 报告 `service_role=display_readonly`
 - **THEN** 前端据此隐藏运维入口，不依赖 build-time 角色常量
-

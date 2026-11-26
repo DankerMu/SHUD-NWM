@@ -586,7 +586,7 @@ owner-only `0600` secret source，不记录原始 DSN、文件内容或 `source`
   当前 database 的 `CREATE`，以及当前登录可继承或可 `SET ROLE` 到的 reachable role 的危险 role
   attribute 和上述对象权限。
 - 任何 catalog 可变权限、reachable writer role、DML/DDL 成功执行、current database `CREATE`，或 audited schema 内任一 sequence 可变权限都记为 `FAIL`。一旦 catalog 盘点发现任一可变能力，整个矩阵不得执行任何 DML/DDL probe，只能写入未执行的 catalog evidence；发现 sequence 可变权限时也不得执行 `nextval`、`setval`、DML 或 DDL。
-- retry/cancel 的拒绝证据必须先分出无授权 / 非运维授权的 auth rejection lane；只有拿到真实 production auth
+- retry 的拒绝证据必须先分出无授权 / 非运维授权的 auth rejection lane；只有拿到真实 production auth
   token/header 时，授权 manual-action lane 才能继续验证 `CONTROL_PLANE_MANUAL_ACTION_REQUIRED`。如果拿不到
   真实 auth 路径，本 lane 记为 `BLOCKED`，且仍然不能构造 DB write 或 Gateway 依赖。
 - #239 final manual-ops lane 的 PASS 证据必须是 `nhms.two_node_e2e.manual_ops.v1` JSON，记录
@@ -595,7 +595,7 @@ owner-only `0600` secret source，不记录原始 DSN、文件内容或 `source`
   source、当前 evidence bundle、redaction 状态，并在 artifact path/sha256 存在时可由文件 hash 复验。只写
   `production_operator_auth_evidence: true`、`write_executed: false` 这类布尔断言会被最终聚合器判为
   `BLOCKED`。
-- `scripts/validate_readonly_db_boundary.py` 内部的 retry/cancel manual-action check 使用 in-process/dev-header
+- `scripts/validate_readonly_db_boundary.py` 内部的 retry manual-action check（cancel 探针已随 #3394 删除）使用 in-process/dev-header
   方式验证后端 no-write/readonly fail-closed 行为；这只属于 readonly DB safety evidence，不能计入 #239
   production-auth manual-action `PASS`，也不能替代真实 operator token/header lane。真实 production auth
   证据必须在独立 manual-ops/API lane 记录；没有真实 auth 路径时，该 production-auth lane 保持 `BLOCKED`。
@@ -870,7 +870,7 @@ mock/historical latest、wrong run/model/source/cycle/job identity 或 27 产生
 - 27 依赖重建并通过后端/前端基础检查。
 - API `/health`、models、stations、station-series、forecast-series 可用。
 - `NHMS_SERVICE_ROLE=display_readonly` 下 `/api/v1/slurm/*` 不可用。
-- retry/cancel 控制动作在 27 返回人工处理提示，不写 DB，不调用 Gateway。
+- retry 控制动作在 27 返回人工处理提示，不写 DB，不调用 Gateway；cancel 路径不是路由（#3394），回 405。
 - latest-product 至少一个 source 返回 200。
 - latest-product 可用强身份约束锁定 22 本轮 `run_id/source/cycle/model_id`，`/ops` 的 status/stages/jobs/logs 也必须用同一 strict identity，`ops_jobs` 和 `ops_job_logs` 还要绑定 `job_id`。
 - `/` 单页地图和 `/ops` 无 mock 浏览器 E2E 通过；如果只拿到 source/cycle-only 证据，这些 lane 只能记为 `BLOCKED` 或 `PARTIAL`。

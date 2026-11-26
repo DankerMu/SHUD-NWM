@@ -2,22 +2,9 @@
 
 ## Purpose
 Keep pipeline status transitions valid against the PostgreSQL schema and aligned with the published status schema
-and OpenAPI, for cancel and automatic retry.
+and OpenAPI, for automatic retry.
 
 ## Requirements
-
-### Requirement: PostgreSQL-valid cancel status transitions
-Cancel operations SHALL write only statuses accepted by production PostgreSQL enum-backed tables.
-
-#### Scenario: Cancel updates forecast cycle with valid enum value
-- **WHEN** an operator cancels an active run through `POST /api/v1/runs/{run_id}/cancel`
-- **THEN** every status written to `met.forecast_cycle.status` or `met.forecast_cycle.current_state` MUST be present in `met.cycle_status`
-- **AND** the API response MUST identify whether the cycle was changed, preserved, or not found
-
-#### Scenario: Published or terminal cycle is preserved
-- **WHEN** a cancel request targets a run whose forecast cycle is already terminal
-- **THEN** the cycle status MUST be preserved
-- **AND** the cancel response MUST report that preservation explicitly
 
 ### Requirement: Status schema and OpenAPI alignment
 The schema and OpenAPI contracts SHALL include every externally visible status that control-plane APIs can return.

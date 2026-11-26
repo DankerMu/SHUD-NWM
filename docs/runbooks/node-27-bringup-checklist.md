@@ -113,8 +113,8 @@ DB 和 display/frontend oracle 都在 node-27。
   predicate、display unsafe-config blockers）
 - Slurm 路由按角色不挂载：`apps/api/main.py:310`；`GET /api/v1/runtime/config`
   capability flags：`main.py:283`
-- retry/cancel fail-closed
-  `409 CONTROL_PLANE_MANUAL_ACTION_REQUIRED`、queue-depth
+- retry fail-closed
+  `409 CONTROL_PLANE_MANUAL_ACTION_REQUIRED`（cancel 路由已随 #3394 退役，其路径回 405）、queue-depth
   `503 CONTROL_PLANE_QUEUE_UNAVAILABLE`：`apps/api/routes/pipeline.py`
 - artifact log
   reader（`published://`/穿越/脱敏/tail）：`services/artifacts/reader.py`；compute 侧发

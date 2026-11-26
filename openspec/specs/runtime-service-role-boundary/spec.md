@@ -33,7 +33,7 @@ The display readonly role SHALL reject or clearly block configuration that would
 #### Scenario: Display role has Slurm gateway configured
 - **WHEN** `NHMS_SERVICE_ROLE=display_readonly` and `SLURM_GATEWAY_URL` or `SLURM_GATEWAY_BACKEND=slurm` is configured
 - **THEN** startup fails or the configuration is reported as a blocker before serving requests
-- **AND** retry/cancel and `/api/v1/slurm/*` remain unavailable.
+- **AND** retry and `/api/v1/slurm/*` remain unavailable.
 
 #### Scenario: Display role has forbidden compute paths
 - **WHEN** `NHMS_SERVICE_ROLE=display_readonly` and compute-only paths such as `WORKSPACE_ROOT`, `NHMS_BASINS_ROOT`, or `SHUD_EXECUTABLE` are configured as active dependencies

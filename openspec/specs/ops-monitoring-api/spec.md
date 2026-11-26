@@ -1,8 +1,8 @@
 # ops-monitoring-api Specification
 
 ## Purpose
-Define the ops monitoring API: pipeline status, stages, jobs, logs and metrics reads, the cancel control, and the
-retry endpoint that fails closed to a manual node-22 action.
+Define the ops monitoring API: pipeline status, stages, jobs, logs, metrics and queue-depth reads, and the retry
+endpoint that fails closed to a manual node-22 action. It has no run cancel route (#3394).
 
 ## Requirements
 
@@ -143,53 +143,6 @@ The API SHALL provide a `GET /api/v1/jobs/{job_id}/logs` endpoint that returns t
 
 ---
 
-### Requirement: POST /api/v1/runs/{run_id}/cancel
-
-The API SHALL provide a `POST /api/v1/runs/{run_id}/cancel` endpoint that cancels running jobs for a given run. When the run id has no `pipeline_job` row of any status and no hydro run row, the endpoint SHALL answer HTTP 404 with the stable error envelope and `error.code` `RUN_NOT_FOUND`, SHALL NOT write any record or event, and SHALL NOT call the Slurm gateway. A run id that has at least one `pipeline_job` row or a hydro run row SHALL keep the cancel behaviour, including the idempotent HTTP 200 result when no job is active. Refusals decided before the route body runs (authentication, authorization, release block, the display-readonly manual-action refusal) SHALL take precedence over the not-found answer.
-
-#### Scenario: Successful cancellation
-
-- **WHEN** an authenticated user with `operator` role or above sends `POST /api/v1/runs/{run_id}/cancel`
-- **THEN** the API SHALL:
-  1. Identify all `pipeline_job` records for the given `run_id` with `status` IN (`submitted`, `running`)
-  2. For each active job with a valid `slurm_job_id`, invoke `scancel <slurm_job_id>`
-  3. Update each job's `status` to `cancelled`
-  4. Return HTTP 200 with `{"request_id": "...", "status": "ok", "data": {"cancelled_jobs": [<job_ids>]}}`
-
-#### Scenario: Unauthorized user
-
-- **WHEN** a user without `operator`, `model_admin`, or `sys_admin` role sends `POST /api/v1/runs/{run_id}/cancel`
-- **THEN** the API SHALL return HTTP 403 with `{"request_id": "...", "status": "error", "error": {"code": "FORBIDDEN", "message": "operator+ role required"}}`
-
-#### Scenario: No active jobs to cancel
-
-- **WHEN** a user sends cancel for a `run_id` whose jobs are all in terminal status
-- **THEN** the API SHALL return HTTP 200 with `status` `ok` and an empty `cancelled_jobs` list
-
-#### Scenario: Unknown run id
-
-- **GIVEN** a run id with no `pipeline_job` row and no hydro run row
-- **WHEN** an authorized user sends cancel for it on an API that is not display-readonly
-- **THEN** the API SHALL return HTTP 404 with `{"request_id": "...", "status": "error", "error": {"code": "RUN_NOT_FOUND", "message": "...", "details": {"run_id": "<run_id>"}}}`
-- **AND** no pipeline event is written, no record changes, and the Slurm gateway receives no call
-
-#### Scenario: Hydro run row without jobs
-
-- **GIVEN** a run id with a hydro run row and no `pipeline_job` row
-- **WHEN** an authorized user sends cancel for it
-- **THEN** the API SHALL return HTTP 200 and handle the hydro run as it does for a run with jobs
-
-#### Scenario: Earlier refusals come first
-
-- **GIVEN** a run id that names nothing
-- **WHEN** the request is unauthenticated, lacks the role, or reaches a display-readonly API
-- **THEN** the API SHALL return the 401, 403 or manual-action 409 answer it returns for any run id, not 404
-
-#### Scenario: The contract declares the not-found answer
-
-- **WHEN** the published OpenAPI document and the runtime schema are read
-- **THEN** the cancel operation SHALL declare a 404 response whose error code is `RUN_NOT_FOUND`
-
 ### Requirement: GET /api/v1/metrics/stage-duration
 
 The API SHALL provide a `GET /api/v1/metrics/stage-duration` endpoint that returns average stage durations over a configurable time window.
@@ -267,43 +220,6 @@ All monitoring API endpoints MUST return responses in a standard wrapper format.
 - **WHEN** any monitoring API endpoint returns an error response
 - **THEN** the response body MUST conform to: `{"request_id": "<uuid>", "status": "error", "error": {"code": "<ERROR_CODE>", "message": "<human-readable message>"}}`
 
-### Requirement: Slurm gateway error evidence SHALL render host paths on ops responses while persisted events keep the raw text
-
-When a Slurm gateway error reaches an ops API response body, its `message` and its `details` SHALL be rendered through the shared public evidence renderer, so that absolute host paths become `[local-path]` and URIs become `[uri]`/`[object-uri]`, including inside nested values and list elements such as the executed command's argument vector and the captured stderr snippet. Secret redaction SHALL keep its existing precedence.
-
-This SHALL apply to the cancel endpoint's 200 body — every gateway error carried under its failed and blocked job entries — and to the queue-depth endpoint's upstream-error body. The response SHALL contain no configured scheduler binary path and no workspace root text.
-
-The pipeline events persisted beside those responses SHALL keep the gateway's raw, secrets-redacted text, because operators diagnose from them and because the durable event is the system's record of what the scheduler actually reported. It is NOT an anti-laundering rule — `[local-path]` is deliberately persisted evidence elsewhere. A single rendered payload SHALL NOT be shared between a response and a persisted event: the persisted copy SHALL remain raw.
-
-The upstream-error response schema's field names SHALL NOT change; only the values are rendered. Errors that carry no gateway text, such as the control-plane manual-action error, SHALL keep their current rendering.
-
-#### Scenario: Cancel response renders a failing scancel's command and stderr
-
-- **WHEN** `scancel` fails for an active job and its error carries the configured scheduler binary path in the command vector and an absolute workspace path in the stderr snippet
-- **THEN** the cancel response's failed-job entry SHALL carry the rendered command vector and a stderr snippet in which the workspace path is `[local-path]`
-- **THEN** the response body SHALL contain neither the scheduler binary path nor the workspace root text
-
-#### Scenario: The unproven-cancellation branch renders the same way
-
-- **WHEN** the gateway's error is one the route classifies as an unproven cancellation, so the entry lands under blocked jobs
-- **THEN** the same rendering SHALL apply to that entry's error details and message
-
-#### Scenario: Queue depth upstream error renders the same way
-
-- **WHEN** the queue-depth query fails with a gateway command error carrying the same two kinds of path
-- **THEN** the upstream-error response body SHALL carry the rendered details, with the same field names as before
-
-#### Scenario: An unproven cancellation's gateway response is rendered on the wire and raw in the event
-
-- **WHEN** a cancellation returns a record whose manifest carries a workspace directory, a manifest index path or an array log directory, and the route reports it as an unproven cancellation
-- **THEN** the response's gateway-response payload SHALL be rendered like any other gateway evidence
-- **THEN** the persisted event's copy SHALL keep the raw values, as real values, not placeholders
-
-#### Scenario: Persisted cancellation events keep the raw evidence
-
-- **WHEN** the same failure is recorded as a cancellation-gap or cancel-failed pipeline event
-- **THEN** that event's persisted error details SHALL still carry the raw command vector and stderr text, with secrets redacted as before, and SHALL NOT carry any public placeholder introduced by the response rendering
-
 ### Requirement: POST /api/v1/runs/{run_id}/retry is a fail-closed manual-action endpoint
 
 The API SHALL keep the `POST /api/v1/runs/{run_id}/retry` endpoint but it SHALL NOT submit, enqueue, or record anything. After run-id validation (400 `INVALID_RUN_ID`) and RBAC (401/403), and after the existing `display_readonly` 409, every request SHALL be answered with HTTP 409 and error code `CONTROL_PLANE_MANUAL_ACTION_REQUIRED` in the standard error envelope, regardless of service role (`compute_control`, `dev_monolith`, `display_readonly`). The error details SHALL include the safe `run_id`, a `suggested_action` that names the supported operator path (the node-22 manual-repair marker lane `FileJournalRetryService.record_manual_repair`, driven by `scripts/node22_manual_retry_failed_runs.py`), and `recovery_runbook` equal to `node22-control-plane-manual-recovery`. The endpoint SHALL NOT construct a database session, a retry service, or a Slurm gateway. The published OpenAPI operation `retryRun` SHALL declare no success (2xx) response and no `RetryRunResult` schema, because none can be returned; it keeps its path, security and error responses so existing callers and deny-write probes see the same 401/403/409.
@@ -348,3 +264,15 @@ The API SHALL keep the `POST /api/v1/runs/{run_id}/retry` endpoint but it SHALL 
 - **WHEN** the published OpenAPI document (`openapi/nhms.v1.yaml`, the runtime `app.openapi()` and the generated `apps/frontend/src/api/types.ts`) is inspected
 - **THEN** `POST /api/v1/runs/{run_id}/retry` (`retryRun`) lists no 2xx response, and no `RetryRunResult` component exists
 - **AND** the operation keeps its path, `security` requirement and its `409 ControlPlaneManualActionRequired` response
+
+### Requirement: Queue-depth upstream errors SHALL render host paths through the public evidence renderer
+When a Slurm gateway error reaches an ops API response body, its `message` and its `details` SHALL be rendered through the shared public evidence renderer, so that absolute host paths become `[local-path]` and URIs become `[uri]`/`[object-uri]`, including inside nested values and list elements such as the executed command's argument vector and the captured stderr snippet. Secret redaction SHALL keep its existing precedence.
+
+This SHALL apply to the queue-depth endpoint's upstream-error body, the one ops response that carries Slurm gateway error text. The response SHALL contain no configured scheduler binary path and no workspace root text.
+
+The upstream-error response schema's field names SHALL NOT change; only the values are rendered. Errors that carry no gateway text, such as the control-plane manual-action error, SHALL keep their current rendering.
+
+#### Scenario: Queue depth upstream error renders host paths
+- **WHEN** the queue-depth query fails with a gateway command error carrying the configured scheduler binary path in the command vector and an absolute workspace path in the stderr snippet
+- **THEN** the upstream-error response body SHALL carry the rendered details, with the same field names as before
+- **THEN** the response body SHALL contain neither the scheduler binary path nor the workspace root text
