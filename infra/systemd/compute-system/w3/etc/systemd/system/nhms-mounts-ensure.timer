@@ -1,0 +1,7 @@
+[Unit]
+Description=NHMS: periodic NFS mount self-heal
+[Timer]
+OnBootSec=90s
+OnUnitActiveSec=2min
+[Install]
+WantedBy=timers.target

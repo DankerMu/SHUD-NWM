@@ -1,0 +1,5 @@
+[Unit]
+Description=NHMS: retry NFS mounts and start slurmd once they are present
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'mount -a -t nfs4 2>/dev/null; systemctl is-active -q slurmd || systemctl start slurmd || true'

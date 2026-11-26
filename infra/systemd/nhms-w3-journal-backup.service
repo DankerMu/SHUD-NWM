@@ -1,5 +1,7 @@
 [Unit]
 Description=w3: mirror the scheduler journal to NFS operator-archives (disaster-recovery copy)
+# a failed copy mails the operator, like the other node-22 oneshots (#3359)
+OnFailure=nhms-node22-unit-failure-alert@%n.service
 [Service]
 Type=oneshot
 Nice=10
@@ -8,3 +10,6 @@ IOSchedulingClass=idle
 ExecCondition=/usr/bin/test -d /scratch/frd_muziyao/nhms-prod/workspace/scheduler/journal/pipeline-jobs
 ExecStart=/usr/bin/rsync -a --delete --max-delete=5000 /scratch/frd_muziyao/nhms-prod/workspace/scheduler/journal/ /ghdc/data/nwm/operator-archives/w3-scheduler-journal/journal/
 ExecStartPost=/bin/sh -c 'date -u +%%FT%%TZ > /ghdc/data/nwm/operator-archives/w3-scheduler-journal/LAST_OK'
+# an rsync blocked on the hard NFS mount must fail rather than hang forever (#3359): the start timeout is armed anew
+# for each of the three commands above, so the worst case is 3 x 15 min = 45 min, below the hourly timer
+TimeoutStartSec=900

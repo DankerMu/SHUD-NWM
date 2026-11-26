@@ -476,7 +476,7 @@ def test_no_manifest_tracked_file_names_the_home_relative_checkout() -> None:
     assert offenders == []
 
 
-# --- scenario: seven oneshots wired, long-running units untouched (#2914, #3121)
+# --- scenario: eight oneshots wired, long-running units untouched (#2914, #3121, #3359)
 
 SYSTEMD_ROOT = REPO_ROOT / "infra/systemd"
 ON_FAILURE_LINE = "OnFailure=nhms-node22-unit-failure-alert@%n.service"
@@ -489,8 +489,10 @@ WIRED_UNITS = (
     "nhms-scheduler-state-index-capacity.service",
     # #3121: the spec delta moves the exact set from six to seven.
     "nhms-scheduler-state-index-prune.service",
+    # #3359: the w3-only journal backup; the exact set moves from seven to eight.
+    "nhms-w3-journal-backup.service",
 )
-# Paths the exact-seven scan must actually reach, so "none of these is wired" is
+# Paths the exact-eight scan must actually reach, so "none of these is wired" is
 # a measured fact rather than a vacuous one (spec: gateway and `node22/**`).
 MUST_SCAN = (
     "nhms-slurm-gateway.service",
@@ -525,7 +527,7 @@ def test_wired_unit_carries_the_alert_line_once_in_unit_section(unit: str) -> No
     assert unit_section(text, "Service").count(ON_FAILURE_LINE) == 0, unit
 
 
-def test_exactly_the_seven_oneshots_carry_the_alert_line() -> None:
+def test_exactly_the_eight_oneshots_carry_the_alert_line() -> None:
     scanned = {path.relative_to(SYSTEMD_ROOT).as_posix(): path for path in SYSTEMD_ROOT.rglob("*") if path.is_file()}
 
     assert set(MUST_SCAN) <= set(scanned), sorted(set(MUST_SCAN) - set(scanned))
@@ -550,6 +552,97 @@ def test_manifest_sha256_of_wired_unit_matches_its_content(unit: str) -> None:
     entries = [entry for entry in load_manifest()["entries"] if entry["tracked_path"] == f"infra/systemd/{unit}"]
 
     assert [entry["sha256"] for entry in entries] == [sha256_hex(SYSTEMD_ROOT / unit)]
+
+
+# --- scenario: the w3 journal backup is bounded below its timer period (#3359) --
+#
+# systemd arms the start timeout anew for each of the unit's three commands
+# (ExecCondition=, ExecStart=, ExecStartPost=), so the worst case is three times
+# the value and must stay below the hourly period of the timer.
+
+JOURNAL_BACKUP_PATH = SYSTEMD_ROOT / "nhms-w3-journal-backup.service"
+JOURNAL_BACKUP_TIMER_PATH = SYSTEMD_ROOT / "nhms-w3-journal-backup.timer"
+JOURNAL_BACKUP_TIMER_CALENDAR = "OnCalendar=*:40"
+JOURNAL_BACKUP_TIMER_PERIOD_SECONDS = 3600
+JOURNAL_BACKUP_COMMANDS = 3
+# The unit's non-comment lines as deployed before #3359 (master 88e2e8e0a), written
+# out here rather than read from git, with the two #3359 lines added: OnFailure=
+# at the end of [Unit], TimeoutStartSec= at the end of [Service].
+JOURNAL_BACKUP_DIRECTIVES = (
+    ("Unit", "Description=w3: mirror the scheduler journal to NFS operator-archives (disaster-recovery copy)"),
+    ("Unit", ON_FAILURE_LINE),
+    ("Service", "Type=oneshot"),
+    ("Service", "Nice=10"),
+    ("Service", "IOSchedulingClass=idle"),
+    (
+        "Service",
+        "ExecCondition=/usr/bin/test -d /scratch/frd_muziyao/nhms-prod/workspace/scheduler/journal/pipeline-jobs",
+    ),
+    (
+        "Service",
+        "ExecStart=/usr/bin/rsync -a --delete --max-delete=5000"
+        " /scratch/frd_muziyao/nhms-prod/workspace/scheduler/journal/"
+        " /ghdc/data/nwm/operator-archives/w3-scheduler-journal/journal/",
+    ),
+    (
+        "Service",
+        "ExecStartPost=/bin/sh -c 'date -u +%%FT%%TZ > /ghdc/data/nwm/operator-archives/w3-scheduler-journal/LAST_OK'",
+    ),
+    ("Service", "TimeoutStartSec=900"),
+)
+
+
+def timeout_start_values(section_lines: list[str]) -> list[str]:
+    return [value for line in section_lines if (value := directive_value(line, "TimeoutStartSec")) is not None]
+
+
+def timeout_fits_timer_period(value: str) -> bool:
+    """A whole number of seconds ``v`` with ``0 < commands × v < timer period``."""
+    if not re.fullmatch(r"[0-9]+", value):
+        return False
+    return 0 < JOURNAL_BACKUP_COMMANDS * int(value) < JOURNAL_BACKUP_TIMER_PERIOD_SECONDS
+
+
+def test_journal_backup_timer_is_hourly() -> None:
+    """The period the bound is checked against is the timer's, not a guess."""
+    timer_lines = unit_section(read_text(JOURNAL_BACKUP_TIMER_PATH), "Timer")
+
+    assert timer_lines == [JOURNAL_BACKUP_TIMER_CALENDAR, "Persistent=true"]
+
+
+def test_journal_backup_timeout_is_one_line_bounded_below_the_timer_period() -> None:
+    text = read_text(JOURNAL_BACKUP_PATH)
+
+    (value,) = timeout_start_values(unit_section(text, "Service"))
+    assert timeout_fits_timer_period(value), value
+    assert timeout_start_values(unit_section(text, "Unit")) == []
+
+
+def test_journal_backup_directives_are_the_deployed_lines_plus_the_two_new_ones() -> None:
+    text = read_text(JOURNAL_BACKUP_PATH)
+
+    assert unit_sections(text) == ["Unit", "Service"]
+    assert tuple(unit_directives(text)) == JOURNAL_BACKUP_DIRECTIVES
+    # Unstripped as well: a whitespace-only edit of an Exec* line is a change too.
+    raw = [line for line in text.splitlines() if line.strip() and not line.lstrip().startswith(("#", ";"))]
+    assert raw == [
+        "[Unit]",
+        *(line for section, line in JOURNAL_BACKUP_DIRECTIVES if section == "Unit"),
+        "[Service]",
+        *(line for section, line in JOURNAL_BACKUP_DIRECTIVES if section == "Service"),
+    ]
+
+
+def test_timeout_rule_function_bites() -> None:
+    assert timeout_fits_timer_period("900")
+    assert timeout_fits_timer_period("1199")
+    assert not timeout_fits_timer_period("1200")
+    assert not timeout_fits_timer_period("0")
+    assert not timeout_fits_timer_period("15min")
+    assert not timeout_fits_timer_period("-1")
+    assert not timeout_fits_timer_period("")
+    assert not timeout_fits_timer_period("infinity")
+    assert timeout_start_values(["Type=oneshot", "TimeoutStartSec=900", "TimeoutStartSec = 60"]) == ["900", "60"]
 
 
 # --- scenario: node-22 SMTPS transport wrapper (#3127) --------------------------
