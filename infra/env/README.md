@@ -97,7 +97,7 @@ Notes:
   drop only these two). The stale values change nothing; drop those two keys at
   the next edit of those two host files, and read the scheduler's lag and
   lookback from `compute.scheduler-dbfree.env` (`#3233`).
-- 部署的单元体与 drop-in 的逐字节副本在 `infra/systemd/node22/`（`MANIFEST.json`，收据 `docs/runbooks/receipts/2026-10-16-node22-live-units-snapshot.md`），本表仍是 EnvironmentFile 权威，`tests/test_node22_unit_tracking.py` 以本表校验那些文件的 `EnvironmentFile=`
+- 部署的单元体与 drop-in 的逐字节副本在 `infra/systemd/node22/`（`MANIFEST.json`，收据 `docs/runbooks/receipts/2026-10-16-node22-live-units-snapshot.md` 与 `docs/runbooks/receipts/2026-11-26-w3-gateway-runtime-path-dropin-snapshot.md`），本表仍是 EnvironmentFile 权威，`tests/test_node22_unit_tracking.py` 以本表校验那些文件的 `EnvironmentFile=`
 
 ### Where the scheduler's basin configuration actually lives
 
