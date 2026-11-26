@@ -384,6 +384,29 @@ def test_basins_has_display_product_flag_reaches_store() -> None:
     assert store.has_display_product_calls == [True, False]
 
 
+def test_model_list_item_segment_count_equals_the_detail() -> None:
+    # #3390 (shared-reach-click-ownership D6): each list item carries the same
+    # non-null segment_count as the detail of that model. This store is a fake
+    # that answers both from one dict, so it pins the wire contract only; the
+    # page SQL is pinned by test_model_registration and the real-DB integration test.
+    app.dependency_overrides[get_model_registry_store] = lambda: _ModelRegistryStore()
+    try:
+        with TestClient(app) as client:
+            listing = client.get("/api/v1/models", params={"active": "all"})
+            details = {
+                model_id: client.get(f"/api/v1/models/{model_id}") for model_id in ("active_model", "inactive_model")
+            }
+    finally:
+        app.dependency_overrides.pop(get_model_registry_store, None)
+
+    items = {item["model_id"]: item for item in _assert_success_envelope(listing.json())["items"]}
+    for model_id, response in details.items():
+        assert response.status_code == 200
+        detail_count = _assert_success_envelope(response.json())["segment_count"]
+        assert isinstance(items[model_id]["segment_count"], int)
+        assert items[model_id]["segment_count"] == detail_count
+
+
 def test_model_detail_contract_exposes_basins_asset_metadata() -> None:
     store = _ModelRegistryStore()
     app.dependency_overrides[get_model_registry_store] = lambda: store

@@ -95,6 +95,10 @@ export interface OverviewDataSnapshot {
   // 全国总览不取 basin versions（basinCount>1），但点全国 discharge 河段开流量弹窗需要
   // 由 feature.basin_version_id 反查 basin_id 去取该流域 latest-product 曲线。
   basinVersionToBasinId: Record<string, string>
+  // river_network_version_id → 该河网的河段数（`buildNetworkSegmentCounts`，同一份 model 列表派生，
+  // 与 basinVersionToBasinId 同建同清）。两个流域河网共用一段河道时，地图点击 / 悬停把它判给
+  // 河段数少的那个（#3390）；缺席 = 该河网没有可用计数。
+  networkSegmentCounts: Record<string, number>
 }
 
 export interface OverviewDataState {

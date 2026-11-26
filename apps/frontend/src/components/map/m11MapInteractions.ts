@@ -16,9 +16,17 @@ export interface M11MapOverlayInteraction {
   feature?: NonNullable<MapLayerMouseEvent['features']>[number]
 }
 
+/**
+ * `river_network_version_id` -> segment count of that network, from the model records the overview
+ * has loaded (`buildNetworkSegmentCounts`, snapshot field `networkSegmentCounts`). `null` = no records loaded.
+ */
+export type M11NetworkSegmentCounts = Readonly<Record<string, number>>
+
 interface M11InteractionContext {
   showStationLayer: boolean
   renderableOverlay: M11RegisteredOverlay | null
+  /** Per-network segment counts for the shared-reach owner rule (`chooseM11OverlayHitFeature`). */
+  segmentCounts: M11NetworkSegmentCounts | null
   mapRef: MapRef | null
   onOverlayHover?: (interaction: M11MapOverlayInteraction | null) => void
   onOverlayClick?: (interaction: M11MapOverlayInteraction) => void
@@ -46,7 +54,7 @@ export function buildM11InteractiveLayerIds({
 }
 
 export function handleM11MapMouseMove(event: MapLayerMouseEvent, context: M11InteractionContext) {
-  const { showStationLayer, renderableOverlay, mapRef, onOverlayHover } = context
+  const { showStationLayer, renderableOverlay, segmentCounts, mapRef, onOverlayHover } = context
   if (showStationLayer) {
     const stationFeature =
       findRenderedFeature(event, mapRef, MET_STATION_POINT_LAYER_ID) ??
@@ -58,7 +66,10 @@ export function handleM11MapMouseMove(event: MapLayerMouseEvent, context: M11Int
     }
   }
 
-  const overlayFeature = renderableOverlay ? findEventFeature(event, m11RegisteredOverlayHitLayerId(renderableOverlay)) : null
+  // 与点击同一个选择（shared-reach-click-ownership D5）：高亮的正是点击会打开的那个河段。
+  const overlayFeature = renderableOverlay
+    ? chooseM11OverlayHitFeature(event.features, m11RegisteredOverlayHitLayerId(renderableOverlay), segmentCounts)
+    : null
   if (renderableOverlay && overlayFeature) {
     onOverlayHover?.({ layerId: renderableOverlay.layerId, event, feature: overlayFeature })
     event.target.getCanvas().style.cursor = 'pointer'
@@ -114,9 +125,69 @@ export function createM11HoverSegmentTracker(onChange: (segmentId: string | null
   }
 }
 
-/** Minimal rendered-feature shape the click-target resolver reads (only the layer id). */
+/**
+ * Minimal rendered-feature shape the click-target resolver reads: the layer id, and
+ * `properties.river_network_version_id` for the shared-reach owner rule.
+ */
 export interface M11ClickTargetFeature {
   layer?: { id?: string } | null
+  properties?: { [key: string]: unknown } | null
+}
+
+/** A count is usable when it is a finite number greater than zero. */
+function usableSegmentCount(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null
+}
+
+function featureNetworkId(feature: M11ClickTargetFeature): string | null {
+  const value = feature.properties?.river_network_version_id
+  return typeof value === 'string' && value.length > 0 ? value : null
+}
+
+/**
+ * The overlay hit-layer feature a product click at the point opens (#3390, shared-reach-click-ownership).
+ * Candidates are the entries of `features` whose layer is `hitLayerId`, in the map's order; the first
+ * of them under this order is returned:
+ * 1. counts, all or nothing: when every candidate has a usable count in `segmentCounts` (looked up by
+ *    its `river_network_version_id`), fewer segments first; when any candidate has none (no records,
+ *    network absent, unusable count, no network id), counts are not used at all;
+ * 2. descending `river_network_version_id`, compared by UTF-16 code units (never by locale);
+ * 3. a candidate without a `river_network_version_id` after every candidate with one;
+ * 4. otherwise the map's order (features of one network keep it).
+ * Pure: no map, no DOM; `features` is not mutated and the returned feature is the map's own object.
+ */
+export function chooseM11OverlayHitFeature<F extends M11ClickTargetFeature>(
+  features: readonly F[] | null | undefined,
+  hitLayerId: string,
+  segmentCounts: M11NetworkSegmentCounts | null,
+): F | null {
+  const candidates = (features ?? [])
+    .filter((feature) => feature?.layer?.id === hitLayerId)
+    .map((feature, index) => {
+      const networkId = featureNetworkId(feature)
+      const count = networkId !== null && segmentCounts ? usableSegmentCount(segmentCounts[networkId]) : null
+      return { feature, index, networkId, count }
+    })
+  if (candidates.length === 0) return null
+  const useCounts = candidates.every((candidate) => candidate.count !== null)
+  type Candidate = (typeof candidates)[number]
+  const compare = (a: Candidate, b: Candidate): number => {
+    // Rule 1 (only when every candidate has a count).
+    if (useCounts && a.count !== b.count) return (a.count as number) < (b.count as number) ? -1 : 1
+    // Rules 2 and 3: plain `<` / `>` on strings compares UTF-16 code units.
+    if (a.networkId !== b.networkId) {
+      if (a.networkId === null) return 1
+      if (b.networkId === null) return -1
+      return a.networkId > b.networkId ? -1 : 1
+    }
+    // Rule 4.
+    return a.index - b.index
+  }
+  let chosen = candidates[0]
+  for (const candidate of candidates.slice(1)) {
+    if (compare(candidate, chosen) < 0) chosen = candidate
+  }
+  return chosen.feature
 }
 
 /** The one thing a product map click at a point would act on. */
@@ -130,7 +201,8 @@ export type M11ClickTarget<F extends M11ClickTargetFeature> =
  * Pure product click-target resolution, shared by `handleM11MapClick` and the
  * gated river-click evidence hook so the two can never drift apart. Priority
  * walk: station cluster -> station point (both only when stations are shown)
- * -> the FIRST feature in the renderable overlay's hit layer -> basin fill.
+ * -> the renderable overlay's hit-layer feature chosen by
+ * `chooseM11OverlayHitFeature` with `segmentCounts` -> basin fill.
  * `features` are the rendered features at the point in the current interactive
  * layers (what react-map-gl hands the click event). `findStationFeature` lets
  * the product keep its direct station-layer query fallback; by default a
@@ -140,11 +212,14 @@ export function resolveM11ClickTarget<F extends M11ClickTargetFeature>({
   features,
   showStationLayer,
   renderableOverlay,
+  segmentCounts,
   findStationFeature,
 }: {
   features: readonly F[] | null | undefined
   showStationLayer: boolean
   renderableOverlay: M11RegisteredOverlay | null
+  /** Required (`null` = no model records loaded): every caller states which counts it resolves with. */
+  segmentCounts: M11NetworkSegmentCounts | null
   findStationFeature?: (layerId: string) => F | null
 }): M11ClickTarget<F> | null {
   const firstIn = (layerId: string): F | null => features?.find((feature) => feature?.layer?.id === layerId) ?? null
@@ -157,7 +232,7 @@ export function resolveM11ClickTarget<F extends M11ClickTargetFeature>({
   }
   if (renderableOverlay) {
     const hitLayerId = m11RegisteredOverlayHitLayerId(renderableOverlay)
-    const overlayFeature = firstIn(hitLayerId)
+    const overlayFeature = chooseM11OverlayHitFeature(features, hitLayerId, segmentCounts)
     if (overlayFeature) return { kind: 'overlay', layerId: renderableOverlay.layerId, hitLayerId, feature: overlayFeature }
   }
   const basinFeature = firstIn(M11_BASIN_FILL_LAYER_ID)
@@ -166,12 +241,13 @@ export function resolveM11ClickTarget<F extends M11ClickTargetFeature>({
 }
 
 export function handleM11MapClick(event: MapLayerMouseEvent, context: M11InteractionContext) {
-  const { showStationLayer, renderableOverlay, mapRef, onOverlayClick, onMapClick } = context
+  const { showStationLayer, renderableOverlay, segmentCounts, mapRef, onOverlayClick, onMapClick } = context
   onMapClick?.()
   const target = resolveM11ClickTarget({
     features: event.features,
     showStationLayer,
     renderableOverlay,
+    segmentCounts,
     findStationFeature: (layerId) => findRenderedFeature(event, mapRef, layerId),
   })
   if (target === null) return

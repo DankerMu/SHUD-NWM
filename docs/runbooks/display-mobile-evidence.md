@@ -26,9 +26,12 @@
   pin 只能由操作者按上面的 id 族直接给出：河段清单端点 `/api/v1/basin-versions/{bv}/river-segments` 已由 #2866 退役（回 404），API 不再提供可供挑选河段的清单；它当年返回的派生 `…_seg_…` id 也从来不是 detail 认的 id。
 - **选流域时同时要满足气象代站一侧的两个条件**（河段与气象代站共用同一个流域 pin）：
   1. 该流域要有站点要素。页面为全部已解析流域取站点（#2867：有限并发、不按 `basin_id` 顺序截断；流域数 500 / 站点数 50000 的上限只是远高于现量的安全阀，触发时页面左上角提示“N 个流域未加载（超出客户端上限）”），所以流域在 `basin_id` 顺序里的位置不影响它有没有站点要素。没有站点要素的流域只剩两种：站点清单本身为空（该流域版本没有可展示的 forecast run），或该流域的站点请求失败（页面左上角提示“N 个流域加载失败”）；钩子对它的每个候选都回 `STATION_HOOK_NOT_RENDERED`。
-  2. 嵌套 / 重叠流域的代站坐标重合（同一格点上叠着另一个流域的站点），钩子回 `STATION_HOOK_POINT_OCCLUDED`；这类流域的 `…_riv_000001` 河段也常与另一张河网的河段重合，河段钩子回 `HOOK_POINT_OCCLUDED`。
+  2. 嵌套 / 重叠流域的代站坐标重合（同一格点上叠着另一个流域的站点），钩子回 `STATION_HOOK_POINT_OCCLUDED`。
+     河段一侧自 #3390 起有明文归属：两张河网的河段落在同一段河道上时，点击（和悬停高亮）取**段数少的那张河网**的河段（页面已加载的 model 记录里的
+     `segment_count`；两张河网都有可用段数时才比段数，否则与段数相同时一样，取 `river_network_version_id` 较大的）。所以共享河段上，归属方河网的 pin 可用；
+     另一张河网在这段河道上的河段从地图上点不开，钩子对它回 `HOOK_POINT_OCCLUDED`，这种 pin 要换。
 
-  所以选一个有站点、不与其他流域重叠的流域。2026-10-09 实测可用的一组：`basins_heihe` / `basins_heihe_shud_shud_riv_000001`（`basins_byh` 因重叠两侧都被拒；`basins_qhh` 当时被拒是因为排在旧的 5000 站截断之后，#2867 起这个原因不再存在）。产品身份会变，这组值每次使用前按上面的命令重新确认。
+  所以选一个有站点、站点不与其他流域重合的流域。2026-10-09 实测可用的一组：`basins_heihe` / `basins_heihe_shud_shud_riv_000001`（`basins_byh` 当时因重叠两侧都被拒：站点一侧至今如此，河段一侧在 #3390 的前端部署后归 `basins_byh`；`basins_qhh` 当时被拒是因为排在旧的 5000 站截断之后，#2867 起这个原因不再存在）。产品身份会变，这组值每次使用前按上面的命令重新确认。
 - **站点**默认由脚本自己取：用 GFS latest-product 的 `model_id` 请求 `/api/v1/met/stations?basin_version_id=<bv>&model_id=<model_id>&limit=200`（按 `offset` 翻页取全），按 `station_id` 排序后取前 5 个有坐标的依次尝试。要钉住某一个站点时加 `--station-id <station_id>`（必须在同一份清单里）。
 
 ## 两个预设
@@ -134,7 +137,7 @@ node scripts/node27_display_v2_browser_evidence.mjs --base-url "$BASE_URL" --out
 
 | 失败信息里的关键字 | 含义 | 处置 |
 |---|---|---|
-| `HOOK_POINT_OCCLUDED` | 河段定位点被遮挡：锚点落在控制条或启动器下，或该点的产品点击会落到另一个要素上 | 换一个河段 pin |
+| `HOOK_POINT_OCCLUDED` | 河段定位点被遮挡：锚点落在控制条或启动器下，或该点的产品点击会落到另一个要素上（含：该点是共享河段，而 pin 属于不拥有它的那张河网，见「前置」） | 换一个河段 pin |
 | `HOOK_FEATURE_MISMATCH` | discharge 图层在该点渲染的不是这个 id | pin 用 `…_shud_riv_…` id 族，见「前置」 |
 | `no station could be located after N candidate(s)`，全部 `STATION_HOOK_NOT_RENDERED` | 该流域没有站点要素（站点清单为空，或该流域的站点请求失败；见「前置」） | 换一个流域 pin |
 | 同上，含 `STATION_HOOK_POINT_OCCLUDED` / `STATION_HOOK_CLUSTERED` | 候选站点被另一个流域的重合站点盖住或被聚合 | 换一个不重叠的流域，或用 `--station-id` 指定一个 |

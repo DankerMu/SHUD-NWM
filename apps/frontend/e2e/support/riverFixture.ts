@@ -48,6 +48,26 @@ const { product } = riverFixture
 /** 入库的最小矢量瓦片（由 `fixtures/generate-river-tile.mjs` 生成）。 */
 export const riverTileFile = fixtureFile(`river-tile-${z}-${x}-${y}.pbf`)
 
+/**
+ * 共用河道夹具（shared-reach-click-ownership task 4.6，#3390）：第二份描述
+ * `fixtures/shared-reach-tile.fixture.json` 只写第二个河网的身份、它的河段数与各张瓦片的要素顺序；
+ * 几何、所属产品与瓦片坐标沿用 `riverFixture`——两个河网的河段完全重合。第一个河网就是 `riverFixture` 的那个。
+ */
+export interface SharedReachFixture {
+  second: { identity: RiverFixture['identity']; value: number; segmentCount: number }
+  /** 每张瓦片：名字与要素顺序（按 `river_network_version_id`，即瓦片里的绘制顺序）。 */
+  tiles: Array<{ name: SharedReachTileName; order: string[] }>
+}
+
+export type SharedReachTileName = 'nested-drawn-first' | 'nested-drawn-last'
+
+export const sharedReachFixture = JSON.parse(readFileSync(fixtureFile('shared-reach-tile.fixture.json'), 'utf8')) as SharedReachFixture
+
+/** 共用河道的一张入库瓦片（由 `fixtures/generate-river-tile.mjs --shared-reach` 生成）。 */
+export function sharedReachTileFile(name: SharedReachTileName): string {
+  return fixtureFile(`shared-reach-${name}-${z}-${x}-${y}.pbf`)
+}
+
 /** 径流瓦片模板（与后端全国 source/cycle 目录同形）。 */
 export const RIVER_TILE_URL_TEMPLATE = `/api/v1/tiles/hydro-national/{source}/{cycle}/${product.variable}/{valid_time}/{z}/{x}/{y}.pbf`
 

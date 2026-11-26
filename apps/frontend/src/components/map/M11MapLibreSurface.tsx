@@ -28,6 +28,7 @@ import {
   resolveM11ClickTarget,
   resolveM11HoveredSegmentId,
   type M11MapOverlayInteraction,
+  type M11NetworkSegmentCounts,
 } from '@/components/map/m11MapInteractions'
 import {
   M11BasinLabelMarkers,
@@ -85,7 +86,7 @@ export {
   type M11RegisteredOverlay,
   type SelectedSegmentFeatureCollection,
 } from '@/components/map/m11MapBuilders'
-export type { M11MapOverlayInteraction } from '@/components/map/m11MapInteractions'
+export type { M11MapOverlayInteraction, M11NetworkSegmentCounts } from '@/components/map/m11MapInteractions'
 export { m11MapStyleUrls, type M11MapCameraFit, type M11MapCameraFlyTo, type M11SheetAutoPan } from '@/components/map/m11MapRuntime'
 export { m11NationalRiverPaint, type M11StationFeatureCollection } from '@/components/map/m11MapPrimitives'
 
@@ -122,6 +123,11 @@ interface M11MapLibreSurfaceProps {
   loading?: boolean
   /** 静态底图几何加载中：额外抑制"流域边界未就绪"瞬态（静态边界回填晚于 overview 接口时）。 */
   boundaryLoading?: boolean
+  /**
+   * 各河网的河段数（overview 快照的 `networkSegmentCounts`）：两个流域河网共用一段河道时，点击与
+   * 悬停判给河段数少的那个（#3390）。不传 / null = 未加载，按河网 id 定（即改动前的绘制顺序）。
+   */
+  networkSegmentCounts?: M11NetworkSegmentCounts | null
   className?: string
   fitTo?: M11MapCameraFit | null
   flyTo?: M11MapCameraFlyTo | null
@@ -146,6 +152,7 @@ export function M11MapLibreSurface({
   precipOverlay = null,
   loading = false,
   boundaryLoading = false,
+  networkSegmentCounts = null,
   className,
   fitTo,
   flyTo,
@@ -250,6 +257,9 @@ export function M11MapLibreSurface({
   interactiveLayerIdsRef.current = interactiveLayerIds
   const showStationLayerRef = useRef(showStationLayer)
   showStationLayerRef.current = showStationLayer
+  // 河段数随 enrichment 晚到：钩子在挂载时装一次，必须经 ref 读到之后才到的计数（#3390）。
+  const segmentCountsRef = useRef(networkSegmentCounts)
+  segmentCountsRef.current = networkSegmentCounts
   useEffect(() => {
     if ((window as { __NHMS_E2E_HOOKS__?: unknown }).__NHMS_E2E_HOOKS__ !== true) return
     // 单调代次 token：每个挂载 owner 独有一份；riverClickInstalledGeneration 记录
@@ -277,6 +287,7 @@ export function M11MapLibreSurface({
             features,
             showStationLayer: showStationLayerRef.current,
             renderableOverlay: overlayRef.current,
+            segmentCounts: segmentCountsRef.current,
           }),
       },
       elementFromPoint: (x, y) => document.elementFromPoint(x, y),
@@ -317,6 +328,7 @@ export function M11MapLibreSurface({
             features,
             showStationLayer: showStationLayerRef.current,
             renderableOverlay: overlayRef.current,
+            segmentCounts: segmentCountsRef.current,
           }),
       },
       elementFromPoint: (x, y) => document.elementFromPoint(x, y),
@@ -331,11 +343,12 @@ export function M11MapLibreSurface({
       handleM11MapMouseMove(event, {
         showStationLayer,
         renderableOverlay,
+        segmentCounts: networkSegmentCounts,
         mapRef: mapRef.current,
         onOverlayHover: handleOverlayHover,
       })
     },
-    [handleOverlayHover, renderableOverlay, showStationLayer],
+    [handleOverlayHover, networkSegmentCounts, renderableOverlay, showStationLayer],
   )
 
   const handleMouseLeave = useCallback(
@@ -355,12 +368,13 @@ export function M11MapLibreSurface({
       handleM11MapClick(event, {
         showStationLayer,
         renderableOverlay,
+        segmentCounts: networkSegmentCounts,
         mapRef: mapRef.current,
         onOverlayClick,
         onMapClick,
       })
     },
-    [onMapClick, onOverlayClick, renderableOverlay, showStationLayer],
+    [networkSegmentCounts, onMapClick, onOverlayClick, renderableOverlay, showStationLayer],
   )
 
   // 移动形态不渲染缩放 / 指北控件（openspec mobile-responsive-display D7）；手势配置不动。

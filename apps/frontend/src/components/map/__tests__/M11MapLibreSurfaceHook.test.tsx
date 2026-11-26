@@ -138,7 +138,7 @@ function makeStubCanvas() {
   return canvas
 }
 
-function installStubMap(options: { pointFeatures?: (layers: string[]) => unknown[] } = {}) {
+function installStubMap(options: { pointFeatures?: (layers: string[]) => unknown[]; boxFeatures?: unknown[] } = {}) {
   const canvas = makeStubCanvas()
   const layers = new Set(['m11-discharge-line-hit', 'met-stations-point', 'clusters'])
   const map = {
@@ -152,7 +152,7 @@ function installStubMap(options: { pointFeatures?: (layers: string[]) => unknown
     queryRenderedFeatures: vi.fn((geometry: unknown, query: { layers: string[] }) => {
       const point = options.pointFeatures ? options.pointFeatures(query.layers) : [ORDINARY_CLICK_FEATURE]
       if (!Array.isArray(geometry)) return [VIEWPORT_OTHER_FEATURE, ...point]
-      if (typeof geometry[0] !== 'number') return [ORDINARY_CLICK_FEATURE]
+      if (typeof geometry[0] !== 'number') return options.boxFeatures ?? [ORDINARY_CLICK_FEATURE]
       return point
     }),
     getLayer: vi.fn((id: string) => (layers.has(id) ? { id } : undefined)),
@@ -272,6 +272,28 @@ describe('M11MapLibreSurface river-click hook', () => {
     rerender(surface({ onOverlayClick: vi.fn(), metStations: true, stationFeatureCollection: STATIONS }))
     expect(currentHook()).toBe(hook)
     await expect(hook.locateRenderedRiver(LOCATE_INPUT)).rejects.toMatchObject({ code: 'HOOK_POINT_OCCLUDED' })
+  })
+
+  it('reads the segment counts through a ref: counts that arrive after the hook is installed make the larger network occluded (#3390)', async () => {
+    ;(window as unknown as Record<string, unknown>).__NHMS_E2E_HOOKS__ = true
+    // A nested network's segment coincides with the pinned one (`rn-001`); its id is smaller, so
+    // before the counts arrive the id decides for the pinned segment.
+    const nested = {
+      ...ORDINARY_CLICK_FEATURE,
+      id: 'feature-nested',
+      properties: { ...ORDINARY_CLICK_FEATURE.properties, river_segment_id: 'seg-N', segment_id: 'seg-N', river_network_version_id: 'rn-000' },
+    }
+    installStubMap({ pointFeatures: () => [nested, ORDINARY_CLICK_FEATURE], boxFeatures: [ORDINARY_CLICK_FEATURE, nested] })
+    const { rerender } = renderSurface(vi.fn())
+    const hook = currentHook()
+    await expect(hook.locateRenderedRiver(LOCATE_INPUT)).resolves.toMatchObject({ riverSegmentId: 'seg-001' })
+    rerender(surface({ onOverlayClick: vi.fn(), networkSegmentCounts: { 'rn-000': 5, 'rn-001': 50 } }))
+    expect(currentHook()).toBe(hook)
+    await expect(hook.locateRenderedRiver(LOCATE_INPUT)).rejects.toMatchObject({ code: 'HOOK_POINT_OCCLUDED' })
+    await expect(hook.locateRenderedRiver({ ...LOCATE_INPUT, riverSegmentId: 'seg-N', riverNetworkVersionId: 'rn-000' })).resolves.toMatchObject({
+      riverSegmentId: 'seg-N',
+      riverNetworkVersionId: 'rn-000',
+    })
   })
 
   it('rejects with a closed hook code when zero features match and dispatches nothing', async () => {

@@ -86,7 +86,7 @@ function harness(options: {
   } as unknown as Harness['map']
   state.map = map
   const resolveClickTarget = vi.fn((features: RiverClickRenderedFeature[]) =>
-    resolveM11ClickTarget({ features, showStationLayer: state.showStationLayer, renderableOverlay: OVERLAY }),
+    resolveM11ClickTarget({ features, showStationLayer: state.showStationLayer, renderableOverlay: OVERLAY, segmentCounts: null }),
   )
   const hook = createStationLocateEvidenceHook({
     getMap: () => state.map,

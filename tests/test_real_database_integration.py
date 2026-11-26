@@ -322,6 +322,66 @@ def test_list_models_real_db_returns_basin_id_and_basin_name(
     assert item["basin_name"] == "Issue 126 Integration Basin"
 
 
+def test_list_models_real_db_returns_river_network_segment_count(
+    integration_database_url: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # #3390 (shared-reach-click-ownership D6): the list item carries the seeded
+    # network's `core.river_network_version.segment_count` (2), the same value
+    # as the detail endpoint.
+    apply_migrations_from_zero(integration_database_url)
+    object_root = tmp_path / "object-store"
+    seed_issue_126_data(integration_database_url, object_root=object_root)
+    set_integration_env(integration_database_url, object_root, monkeypatch)
+
+    with TestClient(app) as client:
+        listing = client.get("/api/v1/models", params={"active": "all"})
+        detail = client.get(f"/api/v1/models/{MODEL_ID}")
+
+    assert listing.status_code == 200, listing.text
+    assert detail.status_code == 200, detail.text
+    item = next((m for m in listing.json()["data"]["items"] if m["model_id"] == MODEL_ID), None)
+    assert item is not None, f"seeded MODEL_ID={MODEL_ID} not in /api/v1/models items"
+    assert item["river_network_version_id"] == RIVER_NETWORK_VERSION_ID
+    assert item["segment_count"] == 2
+    assert detail.json()["data"]["segment_count"] == item["segment_count"]
+
+    # "The list is otherwise unchanged" over every filter combination the route
+    # accepts (`basin_version_id`; `active` in true/false/all or omitted = true).
+    # `core.river_network_version` also has `basin_version_id` and `created_at`,
+    # so an unqualified WHERE / ORDER BY column would only fail here, on Postgres.
+    # The seeded model has active_flag=true under a non-evidence basin group:
+    # present for omitted/true/all, absent for false; the basin_version_id filter
+    # keeps it and only rows of that basin version.
+    expected_present = {None: True, "true": True, "false": False, "all": True}
+    with TestClient(app) as client:
+        for basin_version_filter in (None, BASIN_VERSION_ID):
+            for active, present in expected_present.items():
+                params: dict[str, Any] = {"limit": 500}
+                if active is not None:
+                    params["active"] = active
+                if basin_version_filter is not None:
+                    params["basin_version_id"] = basin_version_filter
+                response = client.get("/api/v1/models", params=params)
+                assert response.status_code == 200, (params, response.text)
+                data = response.json()["data"]
+                if data["total"] <= params["limit"]:
+                    assert data["total"] == len(data["items"]), params
+                seeded = [m for m in data["items"] if m["model_id"] == MODEL_ID]
+                assert len(seeded) == (1 if present else 0), params
+                if present:
+                    assert seeded[0]["segment_count"] == 2, params
+                if basin_version_filter is not None:
+                    assert all(m["basin_version_id"] == basin_version_filter for m in data["items"]), params
+        nothing = client.get(
+            "/api/v1/models", params={"active": "all", "basin_version_id": "it3390_no_such_basin_version"}
+        )
+    assert nothing.status_code == 200, nothing.text
+    assert nothing.json()["data"]["items"] == []
+    assert nothing.json()["data"]["total"] == 0
+
+
 # ---------------------------------------------------------------------------
 # PR 6 (issue #566): post-ingest no-cross-gap invariant on real PostGIS.
 # Covers tasks.md 6.2: every reach polyline is single-part, non-trivial, and

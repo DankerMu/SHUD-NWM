@@ -1,0 +1,16 @@
+{
+  "second": {
+    "identity": {
+      "basinId": "e2e-basin-2",
+      "basinVersionId": "e2e-basin-2-v1",
+      "riverNetworkVersionId": "e2e-rivnet-v2",
+      "riverSegmentId": "e2e-seg-2-0001"
+    },
+    "value": 61.5,
+    "segmentCount": 3
+  },
+  "tiles": [
+    { "name": "nested-drawn-first", "order": ["e2e-rivnet-v1", "e2e-rivnet-v2"] },
+    { "name": "nested-drawn-last", "order": ["e2e-rivnet-v2", "e2e-rivnet-v1"] }
+  ]
+}

@@ -7,6 +7,7 @@ import {
   M11MapLibreSurface,
   type M11MapCameraFit,
   type M11MapOverlayInteraction,
+  type M11NetworkSegmentCounts,
   type M11SheetAutoPan,
   type M11StationFeatureCollection,
 } from '@/components/map/M11MapLibreSurface'
@@ -141,6 +142,7 @@ function M11FullscreenMap({
   precipLegend,
   loading,
   boundaryLoading,
+  networkSegmentCounts,
   fitTo,
   mapLabel,
   controlBarInput,
@@ -171,6 +173,8 @@ function M11FullscreenMap({
   precipLegend?: import('@/api/types').components['schemas']['PrecipLegendEntry'][] | null
   loading?: boolean
   boundaryLoading?: boolean
+  /** 各河网的河段数（快照 `networkSegmentCounts`），原样交给地图组件判共用河道的归属。 */
+  networkSegmentCounts?: M11NetworkSegmentCounts | null
   fitTo?: M11MapCameraFit | null
   mapLabel: string
   /** 底部控制条的派生入参（模型在控制条区域内派生）。null / 不传 = 不渲染任何控制条 DOM。 */
@@ -292,6 +296,7 @@ function M11FullscreenMap({
           precipOverlay={precipOverlay}
           loading={loading}
           boundaryLoading={boundaryLoading}
+          networkSegmentCounts={networkSegmentCounts}
           fitTo={fitTo}
           onOverlayHover={onOverlayHover}
           onOverlayClick={onOverlayClick}
@@ -480,6 +485,8 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
   const precipLegend = state.precip ? (precipCatalog.layer?.metadata?.legend ?? null) : null
   // basin_version_id → basin_id：全国点河段开流量弹窗时反查所属流域去取该流域 latest-product。
   const basinVersionToBasinId = currentOverview?.basinVersionToBasinId ?? mapOverview?.basinVersionToBasinId ?? {}
+  // 河网 → 河段数：共用河道的点击 / 悬停归属（#3390）。与上面同源同口径；缺快照时给 null（不造新对象）。
+  const networkSegmentCounts = currentOverview?.networkSegmentCounts ?? mapOverview?.networkSegmentCounts ?? null
   const visibleBasinIdList = useMemo(() => basins.map((basin) => basin.basinId), [basins])
   const visibleBasinSet = useMemo(() => new Set(visibleBasinIdList), [visibleBasinIdList])
   const basinIdToActiveVersionId = useMemo(() => {
@@ -713,6 +720,7 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
       precipLegend={precipLegend}
       loading={surfaceSettling}
       boundaryLoading={nationalGeo.loading}
+      networkSegmentCounts={networkSegmentCounts}
       fitTo={basinFit}
       mapLabel="全国总览地图"
       controlBarInput={controlBarInput}

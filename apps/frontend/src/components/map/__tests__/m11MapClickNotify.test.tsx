@@ -58,7 +58,7 @@ describe('handleM11MapClick map-click notification', () => {
   it('notifies once on a click that hits nothing, and dispatches no overlay click', () => {
     const onMapClick = vi.fn()
     const onOverlayClick = vi.fn()
-    handleM11MapClick(clickEvent([]), { showStationLayer: true, renderableOverlay: OVERLAY, mapRef, onOverlayClick, onMapClick })
+    handleM11MapClick(clickEvent([]), { showStationLayer: true, renderableOverlay: OVERLAY, segmentCounts: null, mapRef, onOverlayClick, onMapClick })
 
     expect(onMapClick).toHaveBeenCalledTimes(1)
     expect(onOverlayClick).not.toHaveBeenCalled()
@@ -72,7 +72,7 @@ describe('handleM11MapClick map-click notification', () => {
     const onMapClick = vi.fn()
     const onOverlayClick = vi.fn()
     const hit = feature(layerId)
-    handleM11MapClick(clickEvent([hit]), { showStationLayer: true, renderableOverlay: OVERLAY, mapRef, onOverlayClick, onMapClick })
+    handleM11MapClick(clickEvent([hit]), { showStationLayer: true, renderableOverlay: OVERLAY, segmentCounts: null, mapRef, onOverlayClick, onMapClick })
 
     expect(onMapClick).toHaveBeenCalledTimes(1)
     expect(onOverlayClick).toHaveBeenCalledTimes(1)
@@ -85,6 +85,7 @@ describe('handleM11MapClick map-click notification', () => {
     handleM11MapClick(clickEvent([feature(MET_STATION_CLUSTER_LAYER_ID, { cluster_id: 7 })]), {
       showStationLayer: true,
       renderableOverlay: OVERLAY,
+      segmentCounts: null,
       mapRef,
       onOverlayClick,
       onMapClick,

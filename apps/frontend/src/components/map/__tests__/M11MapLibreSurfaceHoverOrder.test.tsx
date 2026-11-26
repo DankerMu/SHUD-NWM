@@ -319,6 +319,85 @@ describe('M11MapLibreSurface hover state (#2628)', () => {
     expect(onOverlayHover).toHaveBeenLastCalledWith(null)
   })
 
+  // shared-reach-click-ownership (#3390): the hovered segment is the one a click at that point opens.
+  it('hover shows what the click opens on a shared reach: the network with fewer segments, in either order', () => {
+    const shared = (segmentId: string, networkId: string) => ({
+      ...riverFeature(segmentId),
+      properties: { ...riverFeature(segmentId).properties, river_network_version_id: networkId },
+    })
+    // `rn-b` has fewer segments and the smaller id: without the counts the id would pick `rn-c`.
+    const nested = shared('seg-B', 'rn-b')
+    const larger = shared('seg-C', 'rn-c')
+    for (const order of [[nested, larger], [larger, nested]]) {
+      const onOverlayHover = vi.fn<(interaction: M11MapOverlayInteraction | null) => void>()
+      const onOverlayClick = vi.fn<(interaction: M11MapOverlayInteraction) => void>()
+      const view = render(
+        <M11MapLibreSurface
+          state={state}
+          layers={[dischargeLayer]}
+          networkSegmentCounts={{ 'rn-b': 7971, 'rn-c': 25971 }}
+          onOverlayHover={onOverlayHover}
+          onOverlayClick={onOverlayClick}
+        />,
+      )
+      const event = move(order)
+      expect(surface().getAttribute('data-hovered-segment-id')).toBe('seg-B')
+      expect(layerFilter('m11-discharge-line-hover-halo')).toEqual(expectedSegmentFilter('seg-B'))
+      expect(layerFilter('m11-discharge-line-hover-line')).toEqual(expectedSegmentFilter('seg-B'))
+      expect(onOverlayHover).toHaveBeenCalledTimes(1)
+      expect(onOverlayHover.mock.calls[0][0]).toEqual({ layerId: 'discharge', event, feature: nested })
+      expect(onOverlayHover.mock.calls[0][0]?.feature).toBe(nested)
+      act(() => {
+        maplibreMapStubProps.current?.onClick?.(mouseEvent(order))
+      })
+      expect(onOverlayClick).toHaveBeenCalledTimes(1)
+      expect(onOverlayClick.mock.calls[0][0].feature).toBe(nested)
+      view.unmount()
+    }
+  })
+
+  // #3390, production order of events: the first render has no counts; the enrichment then brings the
+  // model records and NOTHING else changes. The mouse-move and click handlers must see the new counts.
+  it('counts that arrive in a later render, alone, reach the hover and click handlers', () => {
+    const shared = (segmentId: string, networkId: string) => ({
+      ...riverFeature(segmentId),
+      properties: { ...riverFeature(segmentId).properties, river_network_version_id: networkId },
+    })
+    // `rn-b` has fewer segments and the smaller id: before the counts the id picks `rn-c`.
+    const nested = shared('seg-B', 'rn-b')
+    const larger = shared('seg-C', 'rn-c')
+    // Every other prop keeps its identity across the rerender, so only `networkSegmentCounts` changes.
+    const layers = [dischargeLayer]
+    const onOverlayHover = vi.fn<(interaction: M11MapOverlayInteraction | null) => void>()
+    const onOverlayClick = vi.fn<(interaction: M11MapOverlayInteraction) => void>()
+    const view = render(
+      <M11MapLibreSurface state={state} layers={layers} onOverlayHover={onOverlayHover} onOverlayClick={onOverlayClick} />,
+    )
+    move([nested, larger])
+    expect(surface().getAttribute('data-hovered-segment-id')).toBe('seg-C')
+    move([])
+
+    view.rerender(
+      <M11MapLibreSurface
+        state={state}
+        layers={layers}
+        networkSegmentCounts={{ 'rn-b': 7971, 'rn-c': 25971 }}
+        onOverlayHover={onOverlayHover}
+        onOverlayClick={onOverlayClick}
+      />,
+    )
+    onOverlayHover.mockClear()
+    move([nested, larger])
+    expect(surface().getAttribute('data-hovered-segment-id')).toBe('seg-B')
+    expect(layerFilter('m11-discharge-line-hover-line')).toEqual(expectedSegmentFilter('seg-B'))
+    expect(onOverlayHover.mock.calls[0][0]?.feature).toBe(nested)
+    act(() => {
+      maplibreMapStubProps.current?.onClick?.(mouseEvent([nested, larger]))
+    })
+    expect(onOverlayClick).toHaveBeenCalledTimes(1)
+    expect(onOverlayClick.mock.calls[0][0].feature).toBe(nested)
+  })
+
   it('resets on overlay switch so hovering the same segment after switching back highlights again', () => {
     const { rerender } = render(<M11MapLibreSurface state={state} layers={[dischargeLayer]} />)
     move([riverFeature('seg-A')])

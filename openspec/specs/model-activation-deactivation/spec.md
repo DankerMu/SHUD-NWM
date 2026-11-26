@@ -1,8 +1,13 @@
 # model-activation-deactivation Specification
 
 ## Purpose
-TBD - created by archiving change m18-model-asset-operations. Update Purpose after archive.
+The lifecycle of a registered model and what the model list says about each model: the audited activation and
+deactivation operations and their state transitions within a `(basin_id, basin_version_id)` scope, the basin
+fields every lifecycle response carries, and the fields a list item carries from its joined tables (`basin_id`,
+`basin_name`, and the `segment_count` of the model's river network).
+
 ## Requirements
+
 ### Requirement: Model Activation and Deactivation
 The backend SHALL expose audited model activation and deactivation operations with deterministic state transitions.
 
@@ -46,3 +51,31 @@ AND it MUST locate the response item where `model_id == MODEL_ID` (the seeded va
 AND it MUST assert that item's `basin_id == BASIN_ID` (literal constant) AND `basin_name == "Issue 126 Integration Basin"` (literal seeded value)
 AND the test MUST fail loudly if future schema drift causes either field to be null or contain a different value
 
+### Requirement: The model list SHALL carry the segment count of each model's river network
+
+Every item of `GET /api/v1/models` SHALL carry `segment_count` equal to
+`core.river_network_version.segment_count` of the item's `river_network_version_id`, the same value
+`GET /api/v1/models/{model_id}` returns for that model. Which models are listed, their order, `total`,
+`limit`, `offset` and every other field of an item SHALL be unchanged by this; the count query SHALL
+count the same rows the page query returns. The overview derives its per-network segment counts from
+this list, so a list without the value leaves the map's shared-reach rule on its fallback.
+
+#### Scenario: A listed model carries its network's segment count
+
+- **WHEN** a model is registered on a river network whose `segment_count` is 2 and
+  `GET /api/v1/models?active=all` is requested
+- **THEN** the model's item has `segment_count` 2
+- **AND** `GET /api/v1/models/{model_id}` returns the same `segment_count`
+
+#### Scenario: The list is otherwise unchanged
+
+- **WHEN** the list is requested with and without `basin_version_id` and with each value of `active`
+- **THEN** the items, their order and `total` are the ones returned before this requirement, with
+  `segment_count` filled in
+
+#### Scenario: A real-database test pins the value
+
+- **WHEN** the CI `real-db-integration` job runs
+- **THEN** a test under `pytest.mark.integration` seeds a model on a network with a known
+  `segment_count`, requests `GET /api/v1/models?active=all` through the FastAPI TestClient and asserts
+  the seeded model's item carries that count

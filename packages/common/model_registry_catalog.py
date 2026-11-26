@@ -454,6 +454,12 @@ class _RegistryCatalogMixin:
         # unqualified WHERE form raises 'column reference is ambiguous' once the
         # JOIN is in place. The mechanical rewrite below is load-bearing, not
         # defensive: do NOT remove it.
+        # #3390: the page query also joins `core.river_network_version` for
+        # `rnv.segment_count` (parity with get_model_internal; the overview derives
+        # the map's per-network counts from this list). `river_network_version_id`
+        # is NOT NULL with a foreign key, so the inner join drops no row and the
+        # count query stays without it; `rnv` also has `basin_version_id`, which the
+        # rewrite already pins to `mi.`.
         join_where = where.replace("basin_version_id", "mi.basin_version_id").replace(
             "active_flag", "mi.active_flag"
         )
@@ -471,10 +477,11 @@ class _RegistryCatalogMixin:
             total = int(cursor.fetchone()["total"])
             cursor.execute(
                 f"""
-                SELECT mi.*, b.basin_id, b.basin_name
+                SELECT mi.*, b.basin_id, b.basin_name, rnv.segment_count
                 FROM core.model_instance mi
                 JOIN core.basin_version bv ON bv.basin_version_id = mi.basin_version_id
                 JOIN core.basin b ON b.basin_id = bv.basin_id
+                JOIN core.river_network_version rnv ON rnv.river_network_version_id = mi.river_network_version_id
                 {join_where}
                 ORDER BY mi.created_at DESC, mi.model_id
                 LIMIT %s OFFSET %s
