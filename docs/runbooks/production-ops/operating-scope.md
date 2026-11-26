@@ -15,7 +15,8 @@ This section is a live snapshot, not a permanent fact. Refresh it during handoff
 - node-27 display API listens on `127.0.0.1:8080`; local and public `/health`
   both returned `ok` after port alignment.
 - node-22 Slurm Gateway process is active; node-22 diagnostic API `/health` on
-  `:8001` returned `ok`.
+  `:8001` returned `ok` (that unit, `nhms-compute-api.service`, was retired by
+  #3394).
 
 ### 7.1 2026-08-07：hhe 退出业务化（当时业务集 17 流域）
 
