@@ -193,7 +193,8 @@ def _model_instance_schema() -> dict:
 
     1. ``model_registry_public._model_public_projection`` over
        ``_RegistryCatalogMixin.list_models`` rows (its
-       ``SELECT mi.*, b.basin_id, b.basin_name`` page query).
+       ``SELECT mi.*, b.basin_id, b.basin_name, rnv.segment_count`` page query,
+       joined to ``core.river_network_version`` since #3390).
     2. ``model_registry_public._model_asset_detail`` over
        ``_RegistryCatalogMixin.get_model_internal`` rows.
     3. ``_model_public_projection`` again, over the lifecycle rows behind
@@ -208,8 +209,9 @@ def _model_instance_schema() -> dict:
     but neither contains the other, so only the ``core.model_instance`` columns
     every producer writes are ``required``:
 
-    * the list projection omits ``segment_count``/``mesh_uri``/``mesh_checksum``/
-      ``model_name`` and the nine ``MODEL_ASSET_LINEAGE_KEYS``;
+    * the list projection omits ``mesh_uri``/``mesh_checksum``/``model_name`` and
+      the nine ``MODEL_ASSET_LINEAGE_KEYS``; it does carry ``segment_count``
+      (``rnv.segment_count``), the same value the detail returns for that model;
     * only the detail projection derives those nine lineage keys (none is a
       ``core.model_instance`` column) and normalizes ``model_name``;
     * only the lifecycle rows carry ``basin_checksum``/``river_network_checksum``

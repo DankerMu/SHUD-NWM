@@ -3361,6 +3361,69 @@ def test_list_models_projects_river_network_segment_count_from_join(
     assert isinstance(item["segment_count"], int)
 
 
+@pytest.mark.parametrize("basin_version_id", [None, "basins_byh_vbasins"])
+@pytest.mark.parametrize("active", [None, True, False])
+def test_list_models_sql_qualifies_every_filter_with_the_river_network_join(
+    monkeypatch: pytest.MonkeyPatch, basin_version_id: str | None, active: bool | None
+) -> None:
+    # #3390 "the list is otherwise unchanged": `core.river_network_version` also
+    # has `basin_version_id` (and `created_at`), so once `rnv` is joined every
+    # WHERE column must name its table. Postgres would reject an unqualified one
+    # as ambiguous; this pins the SQL text for each filter combination the route
+    # can produce (`active=all` -> None). The real-DB test runs the same matrix.
+    import re
+
+    from packages.common.model_registry_contracts import EVIDENCE_ONLY_BASIN_GROUP
+
+    statements: list[tuple[str, tuple[Any, ...]]] = []
+
+    class FakeCursor:
+        def __init__(self) -> None:
+            self._result: Any = None
+
+        def execute(self, statement: str, parameters: tuple[Any, ...]) -> None:
+            statements.append((statement, parameters))
+            self._result = {"total": 0} if "SELECT COUNT" in statement else []
+
+        def fetchone(self) -> dict[str, Any]:
+            return self._result
+
+        def fetchall(self) -> list[dict[str, Any]]:
+            return self._result
+
+    class FakeTransaction:
+        def __enter__(self) -> FakeCursor:
+            return FakeCursor()
+
+        def __exit__(self, *_args: object) -> bool:
+            return False
+
+    monkeypatch.setattr(PsycopgModelRegistryStore, "_transaction", lambda _self: FakeTransaction())
+    PsycopgModelRegistryStore("postgresql://example").list_models(
+        basin_version_id=basin_version_id, active=active, limit=10, offset=0
+    )
+
+    (count_sql, count_params), (page_sql, page_params) = statements
+    rnv_join = "JOIN core.river_network_version rnv ON rnv.river_network_version_id = mi.river_network_version_id"
+    assert rnv_join in page_sql
+    assert "rnv.segment_count" in page_sql
+    assert "river_network_version" not in count_sql
+    expected_filters = (["mi.basin_version_id = %s"] if basin_version_id is not None else []) + (
+        ["mi.active_flag = %s"] if active is not None else []
+    )
+    for sql in (count_sql, page_sql):
+        where = re.search(r"WHERE (.*?)\s*(?:ORDER BY|$)", sql, re.S)
+        assert where is not None, sql
+        conditions = [condition.strip() for condition in where.group(1).split(" AND ")]
+        assert conditions == [*expected_filters, "b.basin_group IS DISTINCT FROM %s"], conditions
+        for condition in conditions:
+            assert re.match(r"^(mi|b)\.\w+ ", condition), f"unqualified WHERE column: {condition}"
+    assert "ORDER BY mi.created_at DESC, mi.model_id" in page_sql
+    leading = [value for value in (basin_version_id, active) if value is not None]
+    assert list(count_params) == [*leading, EVIDENCE_ONLY_BASIN_GROUP]
+    assert list(page_params) == [*leading, EVIDENCE_ONLY_BASIN_GROUP, 10, 0]
+
+
 def test_fetch_active_model_for_scope_joins_basin() -> None:
     # Mirror of test_list_models_exposes_basin_id_and_basin_name_from_join for the
     # lifecycle sibling path. `_fetch_active_model_for_scope` feeds lifecycle response
