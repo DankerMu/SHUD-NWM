@@ -108,8 +108,11 @@ working_set_free_bytes − safety_margin_bytes < runway_critical_days × daily_a
 `daily_arrival_bytes`、`working_set_free_bytes`、safety margin、PGDATA 路径与设备、`uncompressed_bytes`。
 处置顺序：
 
-1. `uncompressed_bytes` 远大于两三天的入库量，说明压缩落后：先看压缩 lane 的 scheduled receipt 和
-   `systemd.err`，恢复压缩（细则见 `tier-node27-timeseries-storage.md` 的 per-tick capacity 一节）。
+1. 先判压缩是否落后，看压缩 lane 的 scheduled receipt 和 `systemd.err`：有 deferred / failed 的 chunk，
+   或还有 `range_end` 早于「display watermark − lag」的未压缩 chunk，就是落后，先恢复压缩
+   （细则见 `tier-node27-timeseries-storage.md` 的 per-tick capacity 一节）。`uncompressed_bytes` 的绝对值
+   不是判据：压缩正常时它本来就有六到八天的入库量（lag 内的日 chunk 加 forecast-horizon chunk；
+   2026-11 实测 290–375 GiB），只有明显高出当时的基线才指向压缩。
 2. 压缩正常而余量仍短：在该设备上腾空间（它就是 `/home` LV，pytest 临时文件、缓存、共享数据树都在上面）。
 3. 不要用调小 margin 或天数来消掉告警；改阈值是容量决定，单独立 issue。
 
