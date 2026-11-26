@@ -677,6 +677,48 @@ def test_classify_moves_a_free_slot_to_the_next_hypertable_newest_first() -> Non
     assert [c.chunk_name for c in skipped] == ["river-inside-lag"]
 
 
+def test_bound_three_drains_overdue_forcing_chunks_newest_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3380: one river chunk plus a forcing backlog under bound 3.
+
+    The river chunk takes the first slot and the two newest forcing chunks
+    the other two; the older forcing chunks stay deferred for later ticks.
+    """
+    env = _base_env(
+        tmp_path,
+        override={
+            "NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND": "3",
+            "NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS": str(_LAG_SECONDS),
+        },
+    )
+    config = compression.config_from_args(_args(enforce=False), env)
+    river = [_day_chunk("hydro", "river_timeseries", "river-d03", range_end=_NOW - timedelta(days=3))]
+    # Catalog order is range_end ASC: oldest forcing chunk first.
+    forcing = [
+        _day_chunk("met", "forcing_station_timeseries", f"forcing-d{age:02d}", range_end=_NOW - timedelta(days=age))
+        for age in (7, 6, 5, 4, 3)
+    ]
+    _calls, fake_fetch, fake_measure, fake_compress = _install_stubs(monkeypatch, chunks=river + forcing)
+
+    receipt = compression.build_receipt(
+        config,
+        now_utc=_NOW,
+        fetch_chunks=fake_fetch,
+        measure_chunk_bytes=fake_measure,
+        compress_chunk=fake_compress,
+    )
+
+    assert receipt["per_tick_bound"] == 3
+    assert [d["chunk_name"] for d in receipt["selected"]] == ["river-d03", "forcing-d03", "forcing-d04"]
+    assert [(d["chunk_name"], d["defer_reason"]) for d in receipt["deferred"]] == [
+        ("forcing-d05", "per-tick bound reached"),
+        ("forcing-d06", "per-tick bound reached"),
+        ("forcing-d07", "per-tick bound reached"),
+    ]
+    assert receipt["skipped"] == []
+
+
 def test_classify_order_is_deterministic_for_a_shuffled_catalog() -> None:
     """The within-table order is a sort on range_end, not a reversal of input.
 
@@ -1857,7 +1899,7 @@ def test_env_template_literals_survive_the_catch_up_invariant(tmp_path: Path) ->
     ``_DEFAULT_COMPRESS_TIMEOUT_MS`` is the threshold AND has been retuned once
     (#1352). A future lowering would keep every constant-based assertion green
     while the template's literal timeout became a "raised" one and node-27's
-    ``PER_TICK_BOUND=2`` tick started failing closed. The template is the
+    ``PER_TICK_BOUND=3`` tick started failing closed. The template is the
     deployment source, so pin the template's own numbers.
     """
 
@@ -1882,7 +1924,7 @@ def test_env_template_literals_survive_the_catch_up_invariant(tmp_path: Path) ->
     assert config.compress_timeout_ms == int(override["NODE27_TIMESERIES_COMPRESSION_COMPRESS_TIMEOUT_MS"])
     assert config.per_tick_bound == int(override["NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND"])
     assert config.lag_seconds == 172800
-    assert config.per_tick_bound == 2
+    assert config.per_tick_bound == 3
     assert "one chunk width" not in text
 
 
@@ -2102,7 +2144,7 @@ def test_compression_env_example_pins_the_per_tick_capacity_target() -> None:
     exports). Derivation: runbook §4 "Per-tick capacity".
     """
     text = _ENV_EXAMPLE_PATH.read_text(encoding="utf-8")
-    assert re.findall(r"(?m)^NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND=(\d+)$", text) == ["2"]
+    assert re.findall(r"(?m)^NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND=(\d+)$", text) == ["3"]
 
 
 def test_replay_service_is_explicit_no_timer_supervisor_lane() -> None:

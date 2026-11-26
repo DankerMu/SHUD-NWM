@@ -74,8 +74,8 @@ def test_direct_runner_config_accepts_no_pair_declarations_as_coherent_defaults(
     assert config.compress_timeout_ms == 3_600_000
     assert config.wrapper_wall_seconds == 3900
     assert config.systemd_wall_seconds == 3941
-    # #2425: the in-code default for direct invocations follows the template.
-    assert config.per_tick_bound == 2
+    # #2425 / #3380: the in-code default for direct invocations follows the template.
+    assert config.per_tick_bound == 3
     assert "NODE27_COLD_RESIDENCY_ENV_FILE" not in _base_env(tmp_path)
     assert not any(key.startswith("NODE27_COLD_") for key in _base_env(tmp_path))
 
