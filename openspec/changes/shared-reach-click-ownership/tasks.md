@@ -11,7 +11,8 @@ Fixture level: `standard`. Risk packs: user-visible map interaction; evidence-ho
   prefetch behave as today.
 - The evidence hooks expose the same methods and closed error codes; without
   `window.__NHMS_E2E_HOOKS__ === true` they are absent.
-- No tile, API or cache change; no new request.
+- No tile or cache change; no new request; the model list returns the same models in the same order
+  with the same `total`, and no field other than `segment_count` changes.
 - The existing mocked e2e tile fixture and spec are unchanged.
 - When the model records are missing or failed, every click resolves as it does today.
 
@@ -79,6 +80,23 @@ Fixture level: `standard`. Risk packs: user-visible map interaction; evidence-ho
       - red run: with the choice replaced by "first", exactly one of the two fixtures fails (this
         proves the two fixtures really present the two orders).
 
+## 7. The model list carries the count (added after the first live check, see D6)
+
+- [ ] 7.1 `packages/common/model_registry_catalog.py` `list_models`: the page query joins
+      `core.river_network_version` on the model's `river_network_version_id` and selects
+      `rnv.segment_count`; the count query, the filters, the order and the evidence-only exclusion are
+      untouched. The requalification of the filter columns must still be right with the extra join
+      (no ambiguous column).
+- [ ] 7.2 Tests: the executed list SQL contains the join and the column (the pattern of the existing
+      `basin_id` / `basin_name` SQL tests); the API contract test of the list asserts a non-null
+      `segment_count` equal to the detail endpoint's for the same model; a real-database integration
+      test next to `test_list_models_real_db_returns_basin_id_and_basin_name` asserts the seeded
+      count. Red run: the column removed from the projection.
+- [ ] 7.3 OpenAPI and the generated frontend types are unchanged (`segment_count` is already declared
+      nullable on the list item); `check:api-types` and the OpenAPI drift test pass.
+- [ ] 7.4 node-27: the touched backend test files in a detached worktree; the integration test
+      through `scripts/node27_integration_pg.py run --` on the throwaway instance.
+
 ## 5. Docs (orchestrator)
 
 - [ ] 5.1 `docs/runbooks/display-mobile-evidence.md`: a pin on a shared reach is valid when it belongs
@@ -90,7 +108,8 @@ Fixture level: `standard`. Risk packs: user-visible map interaction; evidence-ho
       the mocked spec of 4.6 passes locally.
 - [ ] 6.2 node-27, live and read-only, before any deployment: the table of the proposal's evidence
       plan, baseline (public site) and branch build (loopback preview, `/api` passed to the running
-      display API by a Playwright route) in one session; table in the PR.
+      display API by a Playwright route) in one session, the branch build with and without the
+      stand-in for the list's counts; table in the PR.
 - [ ] 6.3 Code review (two seats: interaction correctness; test evidence); CI green including every
       mocked e2e shard.
 

@@ -40,6 +40,9 @@ that reach.
   a click opens.
 - The gated river-click evidence hook and the station-locate hook already ask the product's own
   resolver; they follow the rule through it and get the same counts.
+- `GET /api/v1/models` fills `segment_count` on every item. Its response model has always declared the
+  field and the detail endpoint fills it, but the list query never selected it: on production all 66
+  items carry `null` (read 2026-11-26), so the client has no counts at all.
 - `docs/runbooks/display-mobile-evidence.md`: a pin on a shared reach is valid when it belongs to the
   owning network; the other network's pin on that reach still has to be replaced.
 
@@ -49,8 +52,19 @@ that reach.
   or mark features in the tile. MapLibre's result order is draw order, a consequence of rendering and
   not a contract; a tile property would change tile bytes of four layers whose cache keys hash neither
   SQL nor binds (two version constants and, for the per-run and per-basin layers, the schema version
-  would have to move, and every cached tile be regenerated). The client already holds what the rule
-  needs: the model records the overview loads carry `river_network_version_id` and `segment_count`.
+  would have to move, and every cached tile be regenerated). The client already loads the records
+  that are meant to carry what the rule needs: the model list has `river_network_version_id` and a
+  declared `segment_count`.
+- **D6. The model list has to deliver the count it declares.** Found by this change's own live check:
+  the first branch build, served against the running display API, changed nothing on the
+  `basins_byh` reach, because every list item's `segment_count` is `null`. The list query selects
+  `mi.*`, the basin id and name; the detail query additionally joins `core.river_network_version`
+  and returns the count (7,971 for `basins_byh`). The list query gets the same join and column.
+  `core.model_instance.river_network_version_id` is `NOT NULL` with a foreign key, so the join cannot
+  drop a row. A second request per model or a new endpoint would be more code for the same number.
+  One more consumer of the field becomes live with it: the overview sums it into each basin's
+  `riverCount`, which feeds the `river_count` property of the basin features (no component displays
+  that property today).
 - **D2. "Fewer segments" is `segment_count` of the model record of the feature's
   `river_network_version_id`.** It is `core.river_network_version.segment_count`: the record count of
   the network's reach shapefile. (`core.river_segment` holds twice as many rows per network, the reach
@@ -94,13 +108,18 @@ that reach.
 
 - Unit tests of the choice, the resolver, the hover path and both hooks; a wiring test that the counts
   reach the handlers from the overview's model records.
+- Backend: a unit test of the list query's projection, the API contract tests, and a real-database
+  integration test (CI's `real-db-integration` job; on node-27 through the throwaway instance).
 - A mocked Playwright spec with a tile that holds two coincident segments of two networks and model
   records with different counts, the network with fewer segments having the smaller id: a real click
   opens the nested network's segment, in both orders of the features in the tile.
 - **Live, read-only, before any deployment.** On node-27: the branch's production build in a temporary
   worktree, served on a loopback port by a static preview server; the browser script passes the page's
   `/api` requests to the running display API through a Playwright route (the preview server's own
-  proxy points at a port nothing listens on there). The same script, in the same session, runs against
+  proxy points at a port nothing listens on there). The running API is the deployed one and its model
+  list has no counts, so for the branch run the route fills each list item's `segment_count` from the
+  running API's own detail endpoint for that model (read-only; this stands in for the backend half of
+  this change until it is deployed, and the run without it is reported next to it). The same script, in the same session, runs against
   the public site as the baseline. Points and what each can tell:
 
   | point | baseline (public site) | branch build | tells |
@@ -112,13 +131,18 @@ that reach.
   | a `basins_cj_main` reach away from any nested network | `basins_cj_main` | `basins_cj_main` | the larger network is still reachable elsewhere |
 
   Nothing public changes; the worktree and the server are removed afterwards.
-- **Deployment of the built frontend on node-27 is a production action and waits for the owner's
-  go-ahead** (build in a temporary worktree, swap `apps/frontend/dist` with a backup outside the
-  checkout, as in the earlier frontend receipts). After it, the same script against the public site.
+- **Deployment on node-27 is two production actions and waits for the owner's go-ahead**: restart the
+  display API on the merged head (`scripts/ops/start-display-api.sh`; the list starts to carry the
+  counts) and replace the built frontend (build in a temporary worktree, swap `apps/frontend/dist`
+  with a backup outside the checkout, as in the earlier frontend receipts). Either order is safe: the
+  old frontend ignores the counts, and the new frontend without counts behaves as today. After both,
+  the same script against the public site, without the stand-in.
 
 ## Not in this change
 
 - Tile SQL, tile properties, tile caches.
+- Any use of `segment_count` other than filling the declared list field (no display of a basin's
+  river count is added).
 - A chooser that offers every segment under the click (option 2 of the issue).
 - Hiding one network's line on a shared reach (option 3).
 - Station overlap between nested basins (the station hook's `STATION_HOOK_POINT_OCCLUDED` cases).
@@ -130,6 +154,7 @@ that reach.
   `stores/overviewDataTypes.ts`; the counts become a derived snapshot field next to the existing
   `basinVersionToBasinId`), the overview page that feeds the surface; tests; the mocked e2e harness
   (tile generator, river fixture, mocks) and one spec.
+- Code (backend): `packages/common/model_registry_catalog.py` (`list_models`), tests.
 - Specs: `map-feature-popups` (new requirement), `m11-river-hover-highlight` (the hovered feature is
-  the one a click would open).
+  the one a click would open), `model-activation-deactivation` (the list carries the count).
 - Docs: `docs/runbooks/display-mobile-evidence.md`.
