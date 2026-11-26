@@ -1,8 +1,12 @@
 """#2910: the node-22 live user units are tracked byte-exactly with a manifest.
 
-`infra/systemd/node22/` holds byte-exact copies of the seven deployed files in
-the read-only receipt `docs/runbooks/receipts/2026-10-16-node22-live-units-snapshot.md`,
-and `infra/systemd/node22/MANIFEST.json` lists every file deployed on node-22
+`infra/systemd/node22/` holds byte-exact copies of eight deployed files: seven
+recorded in the read-only receipt
+`docs/runbooks/receipts/2026-10-16-node22-live-units-snapshot.md` and, since
+#3359, the gateway's `20-runtime-path.conf` drop-in recorded in
+`docs/runbooks/receipts/2026-11-26-w3-gateway-runtime-path-dropin-snapshot.md`.
+The two receipts do not overlap and together record exactly the eight.
+`infra/systemd/node22/MANIFEST.json` lists every file deployed on node-22
 (`{deployed_relative_path, tracked_path, sha256}`), including the fourteen
 top-level oneshot units tracked at `infra/systemd/<name>` (twelve until #3121)
 and, since #3345, the two journal-backup units that exist only on w3, the
@@ -24,6 +28,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 NODE22_DIR = REPO_ROOT / "infra/systemd/node22"
 MANIFEST_PATH = NODE22_DIR / "MANIFEST.json"
 RECEIPT_PATH = REPO_ROOT / "docs/runbooks/receipts/2026-10-16-node22-live-units-snapshot.md"
+# #3359: the gateway runtime-path drop-in the 2026-10-16 snapshot did not record.
+GATEWAY_DROPIN_RECEIPT_PATH = REPO_ROOT / "docs/runbooks/receipts/2026-11-26-w3-gateway-runtime-path-dropin-snapshot.md"
+RECEIPT_PATHS = (RECEIPT_PATH, GATEWAY_DROPIN_RECEIPT_PATH)
 ENV_README_PATH = REPO_ROOT / "infra/env/README.md"
 
 MANIFEST_SCHEMA_VERSION = "nhms.node22.unit_manifest.v1"
@@ -42,6 +49,8 @@ NODE22_DEPLOYED_FILES = (
     "nhms-compute-scheduler.service.d/20-runtime-path.conf",
     "nhms-slurm-gateway.service",
     "nhms-slurm-gateway.service.d/10-node22-live.conf",
+    # #3359: deployed on w3, recorded by the 2026-11-26 snapshot receipt.
+    "nhms-slurm-gateway.service.d/20-runtime-path.conf",
 )
 TOP_LEVEL_ONESHOTS = tuple(
     f"{name}.{suffix}"
@@ -181,6 +190,16 @@ def receipt_sha256_table(receipt_text: str) -> dict[str, str]:
     return table
 
 
+def union_of_receipt_tables(tables: list[dict[str, str]]) -> tuple[dict[str, str], set[str]]:
+    """The receipts' rows merged, and every path recorded by more than one receipt."""
+    union: dict[str, str] = {}
+    overlap = set()
+    for table in tables:
+        overlap |= set(union) & set(table)
+        union.update(table)
+    return union, overlap
+
+
 def load_manifest() -> dict:
     return json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
 
@@ -240,8 +259,21 @@ def test_every_node22_file_is_listed_in_the_manifest() -> None:
 # --- (c) node22/ copies equal the receipt --------------------------------------
 
 
+def test_the_two_receipts_record_disjoint_sets_that_together_equal_the_eight() -> None:
+    snapshot, gateway_dropin = (receipt_sha256_table(path.read_text(encoding="utf-8")) for path in RECEIPT_PATHS)
+    union, overlap = union_of_receipt_tables([snapshot, gateway_dropin])
+
+    assert set(snapshot) == set(NODE22_DEPLOYED_FILES) - {"nhms-slurm-gateway.service.d/20-runtime-path.conf"}
+    assert set(gateway_dropin) == {"nhms-slurm-gateway.service.d/20-runtime-path.conf"}
+    assert overlap == set()
+    assert set(union) == set(NODE22_DEPLOYED_FILES), sorted(set(union) ^ set(NODE22_DEPLOYED_FILES))
+
+
 def test_node22_copies_match_the_receipt_table() -> None:
-    receipt = receipt_sha256_table(RECEIPT_PATH.read_text(encoding="utf-8"))
+    receipt, overlap = union_of_receipt_tables(
+        [receipt_sha256_table(path.read_text(encoding="utf-8")) for path in RECEIPT_PATHS]
+    )
+    assert overlap == set()
     assert set(receipt) == set(NODE22_DEPLOYED_FILES), sorted(set(receipt) ^ set(NODE22_DEPLOYED_FILES))
 
     node22_entries = [
@@ -384,3 +416,11 @@ def test_tracked_file_walk_skips_dotfiles(tmp_path: Path) -> None:
     (tmp_path / "MANIFEST.json").write_text("{}", encoding="utf-8")
 
     assert tracked_node22_files(tmp_path) == [tmp_path / "unit.service", tmp_path / "unit.service.d" / "10-x.conf"]
+
+
+def test_receipt_union_reports_a_path_recorded_twice() -> None:
+    first = receipt_sha256_table(f"| `a.service` | `{'0' * 64}` | t |\n| `b.service` | `{'1' * 64}` | t |\n")
+    second = receipt_sha256_table(f"| `relative path` | sha256 | mtime |\n| `b.service` | `{'2' * 64}` | t |\n")
+
+    assert union_of_receipt_tables([first, {}]) == (first, set())
+    assert union_of_receipt_tables([first, second]) == ({"a.service": "0" * 64, "b.service": "2" * 64}, {"b.service"})

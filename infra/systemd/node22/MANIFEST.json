@@ -112,9 +112,14 @@
       "sha256": "de28aa310e7ba456578f07d558a7fb932e6cd0ff30f4b4ac561e924e40e4ef2f"
     },
     {
+      "deployed_relative_path": "nhms-slurm-gateway.service.d/20-runtime-path.conf",
+      "tracked_path": "infra/systemd/node22/nhms-slurm-gateway.service.d/20-runtime-path.conf",
+      "sha256": "ae59e26c2440c3a9e886c1f2914d6f4907c67f881feb5ca49d7d1555b1d66a97"
+    },
+    {
       "deployed_relative_path": "nhms-w3-journal-backup.service",
       "tracked_path": "infra/systemd/nhms-w3-journal-backup.service",
-      "sha256": "4e3ce187e958ab392e035411f5ed8e8d530ba8cd65bed98e9aadf94381ad4807"
+      "sha256": "d7af3929bfc08044f4c10375454f4f13817030aba3d53376294526570c797a2f"
     },
     {
       "deployed_relative_path": "nhms-w3-journal-backup.timer",
