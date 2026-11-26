@@ -1690,7 +1690,8 @@ def test_the_two_inline_status_sets_differ() -> None:
 
 
 # Owner-held status sets (9.4).  ``retry_identity`` owns both sets; the two
-# predicate sites read them by name.  ``retry.py``'s sets stay separate (#3319).
+# predicate sites read them by name.  ``retry.py``'s sets stay separate: the
+# separation is pinned as it is, and merging them needs its own issue.
 
 
 def test_owner_manual_retryable_statuses() -> None:
@@ -1790,6 +1791,12 @@ _AFTER_REFRESH = "2026-05-01T06:00:01+00:00"
         pytest.param(
             {"status": "partially_failed", "finished_at": _BEFORE_REFRESH}, _REFRESHED_AT, True, id="partial-before"
         ),
+        pytest.param(
+            {"status": "submission_failed", "finished_at": _BEFORE_REFRESH},
+            _REFRESHED_AT,
+            True,
+            id="submission-before",
+        ),
         pytest.param({"status": "failed"}, None, False, id="refreshed-none"),
         pytest.param({"status": "failed", "finished_at": _AFTER_REFRESH}, _REFRESHED_AT, False, id="failed-after"),
         pytest.param(
@@ -1801,7 +1808,11 @@ _AFTER_REFRESH = "2026-05-01T06:00:01+00:00"
             False,
             id="permanently-failed-before",
         ),
+        pytest.param({"status": "permanently_failed"}, _REFRESHED_AT, False, id="permanently-failed-no-time"),
         pytest.param({"status": "cancelled"}, _REFRESHED_AT, False, id="cancelled-no-time"),
+        pytest.param(
+            {"status": "cancelled", "finished_at": _BEFORE_REFRESH}, _REFRESHED_AT, False, id="cancelled-before"
+        ),
         pytest.param({"status": None}, _REFRESHED_AT, False, id="status-none"),
         pytest.param({}, _REFRESHED_AT, False, id="status-missing"),
         pytest.param({"status": "FAILED"}, _REFRESHED_AT, False, id="upper-case"),
