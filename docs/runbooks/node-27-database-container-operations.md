@@ -123,6 +123,25 @@ shred -u /tmp/nhms-db.env
 display API `active` 且本地 `:8080` 与公网 `https://test.nwm.ac.cn` 均 200；
 行数抽查（`met.met_station`、`core.river_segment`）与 `pg_database_size` 对得上。
 
+### 4.1 存在 PGDATA 里的服务器设置（`ALTER SYSTEM`）
+
+用 `ALTER SYSTEM` 改的设置写在 PGDATA 的 `postgresql.auto.conf` 里：容器重启、按本节重建容器都会保留（PGDATA 是 bind mount），
+**fresh initdb 会丢**，重建 cluster 后要按下表重新设置并回读。
+
+| 设置 | 值 | 何时、为何 |
+|---|---|---|
+| `log_lock_waits` | `on` | 2026-11-26（#3380）。等锁超过 `deadlock_timeout`（默认 1 s）时写一行日志，带上持锁会话；2026-11-19 压缩 tick 等锁一小时，当时没开，持锁者无法还原。 |
+
+服务器日志走 stderr（`logging_collector = off`），即 `docker logs nhms-db`。设置与回读（不需要重启）：
+
+```bash
+docker exec -i nhms-db sh -c 'psql -X -U "$POSTGRES_USER" -d nhms' <<'SQL'
+ALTER SYSTEM SET log_lock_waits = on;
+SELECT pg_reload_conf();
+SELECT name, setting, source, pending_restart FROM pg_settings WHERE name = 'log_lock_waits';
+SQL
+```
+
 ## 5. Historical selective-cold installer and tablespace procedure
 
 Archive status:
