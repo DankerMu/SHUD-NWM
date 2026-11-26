@@ -56,7 +56,7 @@ consumer of the id, that no occupied id is minted again and no stage's attempt c
 
 A terminal stage row MAY be run again because its upstream stage finished again only when the row's
 status is `failed`, `submission_failed` or `partially_failed`, and only when the upstream finished at or
-after the row's terminal time or the row carries no readable terminal time. A `permanently_failed` or
+after the row's terminal time or the row carries no terminal time. A `permanently_failed` or
 `cancelled` row SHALL NOT be run again for that reason: `cancelled` records an operator's intent and
 `permanently_failed` a spent retry budget or a non-transient error, and a refreshed upstream overrides
 neither. Both statuses remain sources of a manual retry.
@@ -73,8 +73,8 @@ through its own issue.
 
 #### Scenario: A row of the set without a terminal time is re-run
 
-- **WHEN** a stage row is `failed`, `submission_failed` or `partially_failed`, carries no readable
-  terminal time, and its upstream stage finished again
+- **WHEN** a stage row is `failed`, `submission_failed` or `partially_failed`, carries no terminal
+  time, and its upstream stage finished again
 - **THEN** the row may be run again
 
 #### Scenario: A permanently failed or cancelled stage is not
@@ -170,12 +170,13 @@ input.
 - **THEN** those rows assert today's results, divergences included
 - **AND** changing any of them requires a separate behaviour-change issue that
   edits the row and this requirement.
-- **AND** the first and the last of these paths are kept on purpose (#3319, decided
-  2026-11-26) and are stated by the requirements "The automatic retry identity differs between the non-master and the current-master path on purpose" and
+- **AND** the first of these paths, and the content of the upstream-refresh status set
+  named in the last one, are kept on purpose (#3319, decided 2026-11-26) and are stated
+  by the requirements "The automatic retry identity differs between the non-master and the current-master path on purpose" and
   "An upstream refresh re-runs a terminal stage only from failed, submission_failed or partially_failed"; an issue that changes either
   edits that requirement too.
-- **AND** the `failure_number - 1` term and the two `rsplit` increments are pinned as
-  they are without such a decision.
+- **AND** the `failure_number - 1` term, the two `rsplit` increments, and the fact that
+  `retry.py` keeps status sets of its own are pinned as they are without such a decision.
 
 #### Scenario: A call site computes an attempt locally
 

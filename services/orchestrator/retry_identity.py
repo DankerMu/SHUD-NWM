@@ -35,13 +35,20 @@ RETRY_JOB_ID_MARKER = "_retry_"
 DEFAULT_RETRY_LIMIT = 3
 
 #: Statuses a terminal stage row is manually retried from
-#: (``_terminal_stage_needs_manual_retry``).
+#: (``_terminal_stage_needs_manual_retry``).  A superset of
+#: :data:`UPSTREAM_REFRESH_RETRYABLE_STATUSES`: ``permanently_failed`` and
+#: ``cancelled`` stay manual-retry sources (#3319, decided 2026-11-26; see the
+#: upstream-refresh set below).
 MANUAL_RETRYABLE_STATUSES = frozenset(
     {"failed", "submission_failed", "permanently_failed", "cancelled", "partially_failed"}
 )
 
 #: Statuses a terminal stage row may be re-run from after its upstream refreshed
-#: (``_terminal_stage_can_retry_after_upstream_refresh``).
+#: (``_terminal_stage_can_retry_after_upstream_refresh``).  Leaves out
+#: ``permanently_failed`` and ``cancelled`` on purpose (#3319, decided
+#: 2026-11-26): they record a spent budget or a non-transient error, and an
+#: operator's intent, and a refreshed upstream overrides neither.  Both remain
+#: sources of a manual retry (:data:`MANUAL_RETRYABLE_STATUSES`).
 UPSTREAM_REFRESH_RETRYABLE_STATUSES = frozenset({"failed", "submission_failed", "partially_failed"})
 
 MANUAL_RETRY_CLAIM_IGNORED_LOG_TOKEN = "MANUAL_RETRY_ATTEMPT_CLAIM_IGNORED"
@@ -124,8 +131,9 @@ def stage_job_sort_attempt(job_id: str, persisted_attempt: int) -> tuple[str, in
     A non-negative ``persisted_attempt`` wins outright (no max with the suffix);
     otherwise the attempt is the last suffix tail read with ``int()``, unclamped,
     and an unparsable tail reads 0.  The base drops only the last suffix layer.
-    Deliberately not :func:`effective_retry_attempt`: the two differ today
-    (#3319 owns any behaviour change).
+    Deliberately not :func:`effective_retry_attempt`: the two differ, and the
+    difference is pinned as it is; changing it needs its own behaviour-change
+    issue.
     """
 
     base_job_id = str(job_id).removesuffix("_retry_0")
@@ -210,8 +218,8 @@ def next_manual_attempt(previous_attempt: int) -> int:
     """The scheduler-side manual new attempt: one past ``previous_attempt``, unclamped.
 
     Deliberately not :func:`next_effective_attempt` and never clamped: a negative
-    previous attempt yields a negative or zero new attempt today (#3319 owns any
-    behaviour change).
+    previous attempt yields a negative or zero new attempt.  This is pinned as it
+    is; changing it needs its own behaviour-change issue.
     """
 
     return previous_attempt + 1
@@ -230,7 +238,11 @@ def next_after_failure_non_master(job_id: Any, retry_count: Any) -> tuple[str, i
     """A non-master auto retry's identity: ``job_id`` unstripped (stacks), count unclamped.
 
     Deliberately not :func:`retry_job_id` / ``_coerce_attempt``: this path differs
-    from the master path today (#3319 owns any behaviour change).
+    from the master path, and the difference is kept on purpose (#3319, decided
+    2026-11-26).  Stacked ids are a produced shape of long standing, every parser
+    reads the LAST suffix, and journals in the field hold stacked rows; unifying
+    the paths needs its own behaviour-change issue that shows no occupied id is
+    minted again.
     """
 
     count = int(retry_count or 0) + 1
