@@ -139,6 +139,13 @@ scenarios that forbid the command, this change's own among them, match it.
 - **A term stays on one line.** The topology gate reads lines, and it recognises a role term only
   inside one line (#3403). Rewritten prose does not break a term across a line end ("compute" at the
   end of a line, "role" at the start of the next).
+- **A compound of the codename becomes an open phrase.** The gate reads a hyphenated longer name
+  as an identifier, not as a name of the role (#3403), so "node-22-local" is not rewritten to a
+  term plus "-local" but to words ("local to the compute hosts").
+- **A denial stays with the name it denies.** For a role term or a host name the gate's
+  local-database leg reads one clause: a denial on the next line or in the next sentence does not
+  cover it, where with the codename a following line could. A rewritten sentence that denies
+  keeps the denial in the clause of the name.
 - **Sentences.** The new sentence is written from a read of the whole page or function, not by
   substitution: the subject is chosen from §1 by what the sentence is about (who does it, which
   machine, the set of machines). The PR's reviewer checks each rewritten sentence against §1.

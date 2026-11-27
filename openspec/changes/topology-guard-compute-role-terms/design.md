@@ -30,7 +30,9 @@ Must add/change:
   written (Chinese has no token boundary; a longer word that starts with one, such as "计算节点数",
   matches). A term is matched inside one physical line: the gate reads lines, and a term broken
   across a line end is not a name. The umbrella change gains the rule that rewritten prose does not
-  break a term across a line end.
+  break a term across a line end. A hyphenated compound of a term (`<r>-local`) is not a name in
+  any leg, as `<h>-local` is not, while the compound of the codename is one: the umbrella change
+  gains the rule that such a compound is rewritten to an open phrase.
 - D3. Runs are the runs of #3358, over all names: names joined only by spaces, `/`, `、`, `和`,
   `and`, `or` are one name ("`<r>` `<h>`"). Brackets and `+` do not join: "`<r>` (`<h>` / `<h>`)"
   is rewritten to two names, which changes no verdict of a claim line.
@@ -39,20 +41,26 @@ Must add/change:
   node-27's own database) becomes a finding of that leg, three times (the source and the two
   generated roots). The row is about node-27. Rule, for the leg #3358 added: a line whose first
   non-blank character is `|` is a table row; when its first cell (emphasis marks and code font
-  aside) contains `node-27` and no name of the compute role, the leg evaluates each cell on its
-  own. Any other line is read as before. The rule holds for host names too, which changes #3358
-  for exactly this shape of row.
+  aside) is exactly `node-27`, the leg evaluates each cell on its own; a cell ends at a `|` that
+  is not escaped. Any other line is read as before, also a row whose first cell is a longer name
+  that contains `node-27` (a file name) or names the role as well. The rule holds for host
+  names too, which changes #3358 for exactly this shape of row.
 - D5. The gate's own contract. With the vocabulary added, three lines of
   `production-topology-contract` ("Static guardrails block topology drift") that describe the
   checks become findings: one sentence of the requirement body and two scenario titles.
   - The body sentence is rewritten in this change's delta so that no line of it carries a name of
     the role together with writer and database words.
   - A MODIFIED block cannot retitle a scenario (the validator refuses to drop one), so the two
-    titles stay. Rule: a line whose text starts with `#### Scenario:` and contains the word
-    "flagged" (any letter case) after it is a statement about the gate. It is decided on the shape
+    titles stay. Rule: a line whose text starts with `#### Scenario:` and contains "is flagged"
+    or "are flagged" (any letter case) after it is a statement about the gate. A title that says
+    something "is not flagged" is an ordinary line. It is decided on the shape
     of the line alone, in any scanned file. It applies to the writer check, for every name of the
-    role including the codename, and to the leg #3358 added. It does not excuse the lines around
-    it. No phrase is added to the guard-meta vocabulary, and that leg gets no other allowance.
+    role including the codename, and to the leg #3358 added. It excuses no other line. (The
+    guard-meta phrases of the context rules read a claim's window as before: a title whose words
+    are guard meta can still cover an unterminated claim on the line above it, under any name.
+    Unchanged by this change.) No phrase is added to the guard-meta vocabulary, and that leg gets
+    no other allowance. For a title of this shape under the codename or a host name that no
+    guard-meta phrase covered, the verdict changes from a finding to none: the PR records it.
 - D6. One line of `openspec/changes/sweep-compute-role-narration/design.md` (§2, the sentence that
   describes the leg #3358 added) used the words that leg matches. It is already reworded in this
   branch.

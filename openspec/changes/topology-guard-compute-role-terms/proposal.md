@@ -30,10 +30,10 @@ for a role term and `<h>` for a host name.
   segment that is exactly a term is read as the term, as one that is exactly a host name is.
 - A term is matched inside one line. A term and host names joined only by the separators that join
   host names today are one name.
-- A table row about node-27 is not a claim about the role: in a row whose first cell names node-27,
+- A table row about node-27 is not a claim about the role: in a row whose first cell is `node-27`,
   the leg #3358 added reads each cell on its own. This holds for host names as well.
 - The contract's own sentences about the checks are worded so the gate reads them as statements
-  about the gate, and a scenario title of a spec that says what is flagged is not a claim.
+  about the gate, and a scenario title of a spec that says its subject "is flagged" is not a claim.
 - `production-topology-contract`: requirement titles leave the list of identifiers that keep the
   codename (the sweep renames 14 of them later).
 

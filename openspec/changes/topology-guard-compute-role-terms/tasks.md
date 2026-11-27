@@ -28,7 +28,7 @@ In `tests/test_entropy_audit_topology_db_boundary.py`, with its existing helpers
   - A path segment that is exactly a hyphenated English term (`docs/<r>/x.md`) is rewritten.
   - Unchanged: `compute_control`, `compute-role-x`, `non-compute host`, `x.compute-host.y`,
     `scripts/compute_node/db.py`, `compute_node_count`, `compute  role` (two spaces), `computing
-    role`; the existing unchanged-lines test with its input "no compute host is named here"
+    role`, `compute hostname`, `xcompute role`, `compute-host_x`; the existing unchanged-lines test with its input "no compute host is named here"
     replaced by "no host of the role is named here", and "no compute host is named here" added as a
     rewritten case (design, Must preserve).
 - [ ] 2.2 Flagged as `production-topology-node22-db-writer`, for every term:
@@ -60,11 +60,15 @@ In `tests/test_entropy_audit_topology_db_boundary.py`, with its existing helpers
   - D4: `| node-27 | reads artifacts; the <r> local PostgreSQL | x |` (one cell holds both).
   - D4: `| notes | the <r> | local PostgreSQL |` (first cell is neither).
   - D4: `| node-27 / <r> | x | local PostgreSQL |` (first cell names the role as well).
+  - D4: `| node-27-bringup-checklist.md | <r> | local PostgreSQL |` and `| not node-27 | <r> | local
+    PostgreSQL |` (first cell only contains the name of node-27).
+  - D4: `| node-27 | <r> \| local PostgreSQL |` (an escaped pipe does not end a cell).
 - [ ] 2.5 Not flagged by that leg, for every term:
   - `The <r> has no local PostgreSQL.` / `<r>没有本地 PG。` / `Do not use a local PostgreSQL on the <r>.`
   - D4: the node-27 row of the instructions' hosts table, verbatim from
     `instructions/agents/shared.md`; `| node-27 | reads the <r> artifacts | local PostgreSQL :55432 |`
-    is not a finding of that leg (and the same with `<h>`).
+    is not a finding of that leg (and the same with `<h>`); the same row with the first cell
+    written `**node-27**` and in code font.
   - The boundary rows of 2.3 with `local PostgreSQL` in place of the writer wording.
   - The other legs: `The <r> rollback mirror keeps a copy.` is not a finding.
 - [ ] 2.6 D5. The first two titles run for a term and for `<h>`; the codename runs only in the
@@ -74,15 +78,18 @@ In `tests/test_entropy_audit_topology_db_boundary.py`, with its existing helpers
     - `#### Scenario: A database-writer claim about a <r> is flagged`
     - `#### Scenario: A local PostgreSQL of a <r> is flagged unless denied`
     - `#### Scenario: A <c> database-writer claim is flagged`
-    - one title with "Flagged" and one with "FLAGGED"
+    - one title with "is Flagged" and one with "IS FLAGGED"
   - Findings: each of those sentences without the `#### Scenario:` prefix; `#### Scenario: The <r> is
     the active database writer` (no "flagged"); a line `The <r> is the active database writer` (no
-    full stop) directly above a flagged title is a finding on its own line.
+    full stop) directly above a flagged title is a finding on its own line; titles that say "is not
+    flagged" (`#### Scenario: <c> writing the active primary database is not flagged`, the same
+    with `<h>` and `<r>`, and `#### Scenario: <h> local PostgreSQL is not flagged when archived`).
 - [ ] 2.7 Mutations, recorded in the PR, each restored: one term removed from the pattern (its rows
   of 2.1, 2.2 and 2.4 go red); the run rule off (the `<r> <h>` rewrite row goes red); D4 off (the
   instructions row of 2.5 goes red); D5 off (the titles of 2.6 go red); D4 made unconditional (the
   D4 rows of 2.4 whose first cell is the role, is neither, or names both go red; the row with both
-  in one cell stays a finding).
+  in one cell stays a finding); D4 by substring (the file-name row of 2.4 goes red); D5 for any
+  "flagged" (the "is not flagged" titles of 2.6 go red).
 - [ ] 2.8 Every pre-existing test of `tests/test_entropy_audit_topology_db_boundary.py` and
   `tests/test_entropy_audit_topology_authority.py` passes unedited, the one named input aside.
 

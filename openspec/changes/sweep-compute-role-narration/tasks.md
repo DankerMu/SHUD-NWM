@@ -25,6 +25,7 @@ its tasks here in its final push.
   outside this change's directory and apart from tests' own synthetic inputs (each listed in the PR).
 - No rewritten line ends inside a role term (`design.md` §3): a search of the PR's files for lines
   that end with "compute" or "compute control" finds none that continues the term on the next line.
+- No rewritten line joins a role term to another word with a hyphen (`design.md` §3, compounds).
 - History, persisted values and the gate's existing vocabulary are not edited (`design.md` §3).
 
 ## 1. Gate vocabulary

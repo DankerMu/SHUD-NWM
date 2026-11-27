@@ -100,8 +100,9 @@ surfaces.
 
 The guard reports on the compute role under each of its names: the codename,
 the two host names (`w3`, `w2`) and the role terms. The role terms are "compute
-role", "compute control host", "compute host" and "compute node" (singular or
-plural, the two words joined by a space or a hyphen, in any letter case) and
+role", "compute control host", "compute host" and "compute node" (the words joined by
+one space or one hyphen, in any letter case; "host" and "node" also in the
+plural) and
 计算角色, 计算控制主机, 计算主机, 计算节点.
 The local-PostgreSQL check SHALL have a compute-host leg that recognises the two
 host names and the role terms. Its other legs SHALL NOT recognise them.
@@ -168,12 +169,15 @@ host names joined only by the separators that join host names are one name.
 
 #### Scenario: A scenario title that says what is flagged is not a claim
 
-- **WHEN** the text of a line starts with `#### Scenario:` and contains the word
-  "flagged" after it, in any scanned file
+- **WHEN** the text of a line starts with `#### Scenario:` and contains "is
+  flagged" or "are flagged" after it (any letter case), in any scanned file
 - **THEN** the guard reports no database-writer finding for that line, whichever
   name of the role it uses, and no compute-host-leg finding
 - **AND** the same words without the title prefix are still reported
-- **AND** a claim on a neighbouring line is still reported
+- **AND** a title that says something "is not flagged" is read as any other
+  line
+- **AND** the rule excuses no other line: a claim on a neighbouring line is
+  judged as it would be without the rule
 
 #### Scenario: A role term inside a longer name is not a name of the role
 
@@ -183,14 +187,15 @@ host names joined only by the separators that join host names are one name.
 
 #### Scenario: A table row about node-27 is not a claim about the compute role
 
-- **WHEN** a line starts with `|` and its first cell names node-27 and no name
-  of the compute role
+- **WHEN** a line starts with `|` and its first cell, emphasis marks and code
+  font aside, is exactly `node-27`
 - **THEN** the compute-host leg reads each cell of the row on its own, so a name
   of the role in one cell and node-27's own PostgreSQL in a different cell are
   not a claim
 - **AND** a cell that holds both is still reported
-- **AND** a row whose first cell is a name of the role, or names neither, is
-  read as a whole line
+- **AND** a cell ends at a `|` that is not escaped
+- **AND** a row with any other first cell (a name of the role, a longer name
+  that contains `node-27`, both, neither) is read as a whole line
 
 #### Scenario: Text that only looks like a host name is not flagged
 
