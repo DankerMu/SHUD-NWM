@@ -190,7 +190,7 @@ scenarios that forbid the command, this change's own among them, match it.
 | `qhh-controlled-failure-retry-evidence.md` | 94 | none outside the family |
 | `two-node-production-e2e-plan.md` | 893 | two tests of `tests/test_readonly_db_validation_routes.py`; a scenario of `evidence-boundary-hardening`; three pointer sentences that name it as the authority for the display env; links in `two-node-deployment-overview.md` and one governance inventory |
 | `node22-db-retirement-runbook.md` | 151 | one test that walks the runbook and its receipt (the runbook leaves the tuple, the receipt stays) |
-| `qhh-22-business-bringup.md` | 510 | group 6: script header comments, a front-matter test, an authority-invariant test that forbids its name, three citations in a forcing note, pointers in two production-ops pages, an inventory row |
+| `qhh-22-business-bringup.md` | 510 | group 6: script header comments, a front-matter test, an authority-invariant test that forbids its name, three citations in a forcing note, pointers in two production-ops pages, a link in a test fixture's README, an inventory row |
 | `qhh-backend-smoke.md` | 254 | group 6: about 12 lines move to `scripts/diagnostic/qhh/README.md`; a freshness anchor in the governance schema, the synthetic instruction files that mirror it, and `apps/api/AGENTS.md`; a citation in a forcing note; rows of both governance inventories |
 
 **Tests that protect something real get a successor, not a deletion:**
@@ -228,8 +228,9 @@ live or is read by a spec).
 - The two units under `infra/systemd/node22/` are pinned byte-exactly to the read-only receipt of
   2026-10-16 by `tests/test_node22_unit_tracking.py`, and `node22-unit-tracking` says which receipt
   records which file. Receipts are history. The redeploy therefore writes a new receipt for the two
-  files (as #3359 did for the gateway drop-in), the test's partition of files over receipts gains it,
-  and the spec sentence follows in the same slice.
+  files (as #3359 did for the gateway drop-in). Unlike that drop-in, the two paths are already in the
+  2026-10-16 receipt, so the test's rule that no path is in two receipts becomes: the latest receipt
+  that records a path holds its sha. The spec sentence follows in the same slice.
 
 ## 6. Order and why
 

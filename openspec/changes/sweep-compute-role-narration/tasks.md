@@ -140,8 +140,9 @@ Minimal mergeable slice: 5.1 - the family's followers are two test entries, one 
 - [ ] 6.2 `qhh-22-business-bringup.md`: script header comments and the authority-invariant test (a
   header names no deleted runbook); the front-matter test in
   `tests/test_node22_entrypoint_invariant.py` goes; the three citations in the forcing note reworded;
-  the pointers in `current-production-ops.md` and `stuck-detection.md` removed; its inventory row;
-  delete.
+  the pointers in `current-production-ops.md` and `stuck-detection.md` and the link in
+  `tests/fixtures/basins/qhh-sample/README.md` removed; its inventory row; delete. The PR shows a
+  repository-wide search for the file name, outside history, returning nothing.
 
 Suggested fixture level: compact - a pinned recipe and a guard's anchor move to another file; no runtime behaviour.
 Minimal mergeable slice: 6.2 - none of its followers is shared with a deletion of group 5; 6.1 is independent of 6.2 and depends on 5.1 and 5.2 (shared inventory bullets).
@@ -182,9 +183,11 @@ Minimal mergeable slice: 8.1 - backend text and its generated chain, verified by
   states the subject, and no installed file changes: the script runs from the production checkout.
 - [ ] 9.2 `Description=` of the 16 manifest units (`design.md` §5) and the unit comments;
   `MANIFEST.json` shas; the example unit `infra/systemd/nhms-slurm-gateway.service`. For the two units
-  under `infra/systemd/node22/`: a new read-only receipt, the receipt partition of
-  `tests/test_node22_unit_tracking.py`, and `node22-unit-tracking` (which receipt records which file;
-  the spec's own narration and title) in the slice's own change. **Stop: needs the owner's go-ahead
+  under `infra/systemd/node22/`: a new read-only receipt, the receipt rule of
+  `tests/test_node22_unit_tracking.py` (the two paths are in the 2026-10-16 receipt with their old
+  shas, so "no path in two receipts" becomes "the latest receipt that records a path holds its
+  sha"; red run: the old sha restored), and `node22-unit-tracking` (which receipt records which
+  file; the spec's own narration and title) in the slice's own change. **Stop: needs the owner's go-ahead
   for the production action.** On the compute control host, before the PR's last push, at a pass
   boundary: drift probe before, install, `daemon-reload` (no restart), drift probe after with the PR's
   manifest, operator receipt in the PR. No test mail is sent.
