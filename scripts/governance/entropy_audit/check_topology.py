@@ -7,11 +7,12 @@ document tests, the declared-current-authority front-matter parser, and the
 context-window extractors (``_topology_line_context`` and the three fixed-width
 wrappers over it).
 
-#3358: the node-22 database-writer and local-PostgreSQL checks cover the compute
-role by codename and by host name. The database-writer family reads the lines
-with host names rewritten to the codename; the local-PostgreSQL check adds a
-compute-host leg. The retired-host legs and the display-env check read the
-original lines."""
+#3358 and #3403: the node-22 database-writer and local-PostgreSQL checks cover the
+compute role by codename, by host name and by role term. The database-writer
+family reads the lines with host names and role terms rewritten to the codename;
+the local-PostgreSQL check adds a compute-host leg. The retired-host legs and the
+display-env check read the original lines. A scenario title that says what is
+flagged opens neither a database-writer claim nor a compute-host-leg finding."""
 
 from __future__ import annotations
 
@@ -39,6 +40,7 @@ from scripts.governance.entropy_audit.topology_display_env import (
 from scripts.governance.entropy_audit.topology_predicates import (
     _topology_line_has_compute_host_local_postgres_drift,
     _topology_line_has_node22_local_postgres_or_mirror_drift,
+    _topology_line_is_flagged_scenario_title,
     _topology_line_may_have_node22_db_writer_drift,
     _topology_line_may_start_node22_db_writer_claim,
     _topology_normalized,
@@ -65,7 +67,10 @@ def _check_production_topology_drift(root: Path) -> list[FindingSpec]:
         emitted_display_contexts: set[str] = set()
         for index, line in enumerate(lines, start=1):
             writer_line = writer_lines[index - 1]
-            if _topology_line_may_start_node22_db_writer_claim(writer_line):
+            # A scenario title that says what is flagged describes the gate; it opens no
+            # claim under any name of the role, and it excuses no neighbouring line.
+            is_flagged_title = _topology_line_is_flagged_scenario_title(line)
+            if not is_flagged_title and _topology_line_may_start_node22_db_writer_claim(writer_line):
                 writer_context = _topology_node22_writer_claim_context(writer_lines, index)
                 # The de-duplication key reads the original lines over the same window, so a
                 # codename line and an otherwise equal host-name line stay two claims.
@@ -97,7 +102,9 @@ def _check_production_topology_drift(root: Path) -> list[FindingSpec]:
                             ),
                         )
                     )
-            has_local_postgres_drift = _topology_line_has_compute_host_local_postgres_drift(line)
+            has_local_postgres_drift = not is_flagged_title and _topology_line_has_compute_host_local_postgres_drift(
+                line
+            )
             has_node22_pg_or_mirror_drift = _topology_line_has_node22_local_postgres_or_mirror_drift(line)
             has_node22_database_url_scan_drift = False
             contract_context = ""

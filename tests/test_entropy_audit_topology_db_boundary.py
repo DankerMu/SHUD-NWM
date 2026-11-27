@@ -1110,13 +1110,303 @@ def test_topology_rewrite_compute_hosts_leaves_lookalikes_unchanged(host: str, t
     "line",
     [
         "show30s flag",
-        "no compute host is named here",
+        "no host of the role is named here",
         "see docs/runbooks/w2-w3-compute-topology.md",
         "the change record-compute-role-on-w3-w2 is archived",
     ],
 )
 def test_topology_rewrite_compute_hosts_leaves_lines_without_a_host_unchanged(line: str) -> None:
     assert _rewrite_compute_hosts(line) == line
+
+
+# --- #3403: the compute role named by its role terms ------------------------
+# The same checks recognise the role terms. A sentence on one line means the
+# same to the gate whichever name of the compute role it uses.
+
+
+def _joint_spellings(*words: str) -> list[str]:
+    # Every spelling with one space or one hyphen at each joint.
+    spellings = [words[0]]
+    for word in words[1:]:
+        spellings = [f"{head}{joint}{word}" for head in spellings for joint in (" ", "-")]
+    return spellings
+
+
+COMPUTE_ROLE_TERMS_EN = tuple(
+    spelling
+    for words in (
+        ("compute", "role"),
+        ("compute", "control", "host"),
+        ("compute", "control", "hosts"),
+        ("compute", "host"),
+        ("compute", "hosts"),
+        ("compute", "node"),
+        ("compute", "nodes"),
+    )
+    for spelling in _joint_spellings(*words)
+)
+COMPUTE_ROLE_TERMS_ZH = ("计算角色", "计算控制主机", "计算主机", "计算节点")
+COMPUTE_ROLE_TERMS = (*COMPUTE_ROLE_TERMS_EN, *COMPUTE_ROLE_TERMS_ZH)
+TERMS_AND_HOSTS = (*COMPUTE_ROLE_TERMS, *COMPUTE_HOSTS)
+# The node-27 row of the hosts table in the agent instructions, verbatim.
+INSTRUCTIONS_NODE27_HOSTS_ROW = (
+    "| node-27 | `ssh -p 32099 nwm@210.77.77.27`，`/home/nwm/NWM` | active primary PG + ingest + display "
+    "API(:8080) + 前端；自己读 NFS 上计算节点的产物 | **本机 PG :55432**（自写自读） |"
+)
+D4_TABLE_ROWS_THAT_ARE_FINDINGS = (
+    "| {h} | compute | local PostgreSQL |",
+    "| node-27 | reads artifacts; the {h} local PostgreSQL | x |",
+    "| notes | the {h} | local PostgreSQL |",
+    "| node-27 / {h} | x | local PostgreSQL |",
+)
+D5_FLAGGED_TITLES_IN_OTHER_LETTER_CASE = (
+    "#### Scenario: A database-writer claim about a compute role is Flagged",
+    "#### Scenario: A database-writer claim about a compute role is FLAGGED",
+)
+D5_FLAGGED_TITLES = (
+    *(
+        row
+        for template in (
+            "#### Scenario: A database-writer claim about a {h} is flagged",
+            "#### Scenario: A local PostgreSQL of a {h} is flagged unless denied",
+        )
+        for row in _with_host(template, TERMS_AND_HOSTS)
+    ),
+    "#### Scenario: A node-22 database-writer claim is flagged",
+    *D5_FLAGGED_TITLES_IN_OTHER_LETTER_CASE,
+)
+
+
+@pytest.mark.parametrize("term", COMPUTE_ROLE_TERMS)
+@pytest.mark.parametrize(
+    ("template", "expected"),
+    [
+        ("the {r} is up", "the  node-22  is up"),
+        ("{r}是主库", " node-22 是主库"),
+        ("{r} w3", " node-22 "),
+        ("{r} w3 / w2", " node-22 "),
+        ("the {r} (w3 / w2) is up", "the  node-22  ( node-22 ) is up"),
+    ],
+)
+def test_topology_rewrite_compute_hosts_rewrites_role_terms(term: str, template: str, expected: str) -> None:
+    assert _rewrite_compute_hosts(template.format(r=term)) == expected
+
+
+@pytest.mark.parametrize("term", COMPUTE_ROLE_TERMS_EN)
+@pytest.mark.parametrize("spelling", [str.title, str.upper])
+def test_topology_rewrite_compute_hosts_rewrites_role_terms_in_any_letter_case(term: str, spelling) -> None:
+    assert _rewrite_compute_hosts(f"{spelling(term)} is up") == " node-22  is up"
+
+
+@pytest.mark.parametrize("term", [term for term in COMPUTE_ROLE_TERMS_EN if " " not in term])
+def test_topology_rewrite_compute_hosts_rewrites_a_path_segment_that_is_a_hyphenated_term(term: str) -> None:
+    assert _rewrite_compute_hosts(f"docs/{term}/x.md") == "docs/ node-22 /x.md"
+
+
+def test_topology_rewrite_compute_hosts_rewrites_a_sentence_that_names_a_role_term() -> None:
+    assert _rewrite_compute_hosts("no compute host is named here") == "no  node-22  is named here"
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "compute_control",
+        "compute-role-x",
+        "non-compute host",
+        "x.compute-host.y",
+        "scripts/compute_node/db.py",
+        "compute_node_count",
+        "compute  role",
+        "computing role",
+    ],
+)
+def test_topology_rewrite_compute_hosts_leaves_role_term_lookalikes_unchanged(line: str) -> None:
+    assert _rewrite_compute_hosts(line) == line
+
+
+@pytest.mark.parametrize("term", COMPUTE_ROLE_TERMS)
+@pytest.mark.parametrize(
+    "template",
+    [
+        "Current NHMS production says the {r} is the active database writer.",
+        "Current NHMS production says the {r} hosts the active primary PostgreSQL.",
+        "当前生产{r}是主库，写入数据库。",
+        "The {r} (w3 / w2) is the active database writer.",
+        "{R} is the active database writer.",
+        "slurmdbd on the {r} is the active primary PostgreSQL writer.",
+    ],
+)
+def test_entropy_audit_topology_guardrails_flag_role_term_db_writer_claims(
+    tmp_path: Path,
+    term: str,
+    template: str,
+) -> None:
+    statement = template.format(r=term, R=term.title())
+    findings = _topology_findings_for_lines(tmp_path, statement)
+
+    assert [finding for finding in findings if finding[0] == DB_WRITER_CHECK] == [
+        (DB_WRITER_CHECK, CURRENT_RUNBOOK, 1)
+    ]
+
+
+@pytest.mark.parametrize("term", COMPUTE_ROLE_TERMS)
+@pytest.mark.parametrize("anchor", ["{r}:", "| {r} |"])
+def test_entropy_audit_topology_guardrails_flag_role_term_standalone_anchor_claims(
+    tmp_path: Path,
+    term: str,
+    anchor: str,
+) -> None:
+    findings = _topology_findings_for_lines(tmp_path, anchor.format(r=term), "is the active database writer.")
+
+    assert [finding for finding in findings if finding[0] == DB_WRITER_CHECK] == [
+        (DB_WRITER_CHECK, CURRENT_RUNBOOK, 1)
+    ]
+
+
+@pytest.mark.parametrize("term", COMPUTE_ROLE_TERMS)
+def test_entropy_audit_topology_guardrails_keep_codename_and_role_term_claims_apart(
+    tmp_path: Path,
+    term: str,
+) -> None:
+    findings = _topology_findings_for_lines(
+        tmp_path,
+        "Current NHMS production says node-22 is the active database writer.",
+        f"Current NHMS production says {term} is the active database writer.",
+    )
+
+    assert [finding for finding in findings if finding[0] == DB_WRITER_CHECK] == [
+        (DB_WRITER_CHECK, CURRENT_RUNBOOK, 1),
+        (DB_WRITER_CHECK, CURRENT_RUNBOOK, 2),
+    ]
+
+
+def _term_versions_of_allowed_negative_sentences() -> list[str]:
+    sentences = (*NODE22_EXPLICIT_NEGATIVE_DB_ACCESS_SENTENCES, *NODE22_COORDINATED_NEGATIVE_DB_ACCESS_SENTENCES)
+    return [re.sub(r"node[-_ ]?22", term, sentence) for sentence in sentences for term in COMPUTE_ROLE_TERMS]
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        *_term_versions_of_allowed_negative_sentences(),
+        *_with_host("slurmdbd on the {h} writes Slurm accounting to its local database.", COMPUTE_ROLE_TERMS),
+        *_with_host("The {h} writes Slurm job records to its local MariaDB database.", COMPUTE_ROLE_TERMS),
+        "compute_control is the active database writer role.",
+        "compute-role-x hosts the active primary PostgreSQL.",
+        "scripts/compute_node/db.py is the active database writer.",
+        "x.compute-host.y hosts the active primary PostgreSQL.",
+    ],
+)
+def test_entropy_audit_topology_guardrails_allow_role_term_negatives_and_lookalikes(
+    tmp_path: Path,
+    statement: str,
+) -> None:
+    assert _topology_findings_for_lines(tmp_path, statement) == []
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        *_with_host("The {h} uses its local PostgreSQL.", COMPUTE_ROLE_TERMS),
+        *_with_host("{h}使用本机 PG。", COMPUTE_ROLE_TERMS),
+        *_with_host("The {h} local PostgreSQL is archived and stopped.", COMPUTE_ROLE_TERMS),
+        *(
+            row
+            for template in D4_TABLE_ROWS_THAT_ARE_FINDINGS
+            for row in _with_host(template, TERMS_AND_HOSTS)
+        ),
+    ],
+)
+def test_entropy_audit_topology_guardrails_flag_role_term_local_postgres(
+    tmp_path: Path,
+    statement: str,
+) -> None:
+    findings = _topology_findings_for_lines(tmp_path, statement)
+
+    assert [finding for finding in findings if finding[0] == LOCAL_POSTGRES_CHECK] == [
+        (LOCAL_POSTGRES_CHECK, CURRENT_RUNBOOK, 1)
+    ]
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        *_with_host("The {h} has no local PostgreSQL.", COMPUTE_ROLE_TERMS),
+        *_with_host("{h}没有本地 PG。", COMPUTE_ROLE_TERMS),
+        *_with_host("Do not use a local PostgreSQL on the {h}.", COMPUTE_ROLE_TERMS),
+        INSTRUCTIONS_NODE27_HOSTS_ROW,
+        *_with_host(
+            "| node-27 | reads the {h} artifacts | local PostgreSQL :55432 |",
+            TERMS_AND_HOSTS,
+        ),
+        "compute_control hosts its local PostgreSQL.",
+        "compute-role-x hosts its local PostgreSQL.",
+        "scripts/compute_node/db.py uses a local PostgreSQL.",
+        "x.compute-host.y hosts its local PostgreSQL.",
+        *_with_host("The {h} rollback mirror keeps a copy.", COMPUTE_ROLE_TERMS),
+    ],
+)
+def test_entropy_audit_topology_guardrails_allow_role_term_local_postgres_denials_and_node27_rows(
+    tmp_path: Path,
+    statement: str,
+) -> None:
+    assert _topology_findings_for_lines(tmp_path, statement) == []
+
+
+@pytest.mark.parametrize("title", D5_FLAGGED_TITLES)
+def test_entropy_audit_topology_guardrails_flagged_scenario_title_is_not_a_claim(
+    tmp_path: Path,
+    title: str,
+) -> None:
+    assert _topology_findings_for_lines(tmp_path, title) == []
+
+
+@pytest.mark.parametrize(
+    ("statement", "check_id"),
+    [
+        *(
+            (row, DB_WRITER_CHECK)
+            for row in _with_host("A database-writer claim about a {h} is flagged", TERMS_AND_HOSTS)
+        ),
+        *(
+            (row, LOCAL_POSTGRES_CHECK)
+            for row in _with_host(
+                "A local PostgreSQL of a {h} is flagged unless denied", TERMS_AND_HOSTS
+            )
+        ),
+        ("A node-22 database-writer claim is flagged", DB_WRITER_CHECK),
+        *(
+            (title.removeprefix("#### Scenario: "), DB_WRITER_CHECK)
+            for title in D5_FLAGGED_TITLES_IN_OTHER_LETTER_CASE
+        ),
+        *(
+            (row, DB_WRITER_CHECK)
+            for row in _with_host("#### Scenario: The {h} is the active database writer", COMPUTE_ROLE_TERMS)
+        ),
+    ],
+)
+def test_entropy_audit_topology_guardrails_title_words_without_flagged_title_shape_are_findings(
+    tmp_path: Path,
+    statement: str,
+    check_id: str,
+) -> None:
+    findings = _topology_findings_for_lines(tmp_path, statement)
+
+    assert [finding for finding in findings if finding[0] == check_id] == [(check_id, CURRENT_RUNBOOK, 1)]
+
+
+@pytest.mark.parametrize("term", COMPUTE_ROLE_TERMS)
+def test_entropy_audit_topology_guardrails_claim_above_a_flagged_title_is_a_finding(
+    tmp_path: Path,
+    term: str,
+) -> None:
+    findings = _topology_findings_for_lines(
+        tmp_path,
+        f"The {term} is the active database writer",
+        f"#### Scenario: A database-writer claim about a {term} is flagged",
+    )
+
+    assert findings == [(DB_WRITER_CHECK, CURRENT_RUNBOOK, 1)]
 
 
 # #1707: the four lines the pre-narrowing fallback reported are inlined verbatim, not read
