@@ -263,5 +263,5 @@ curl -sS 'https://test.nwm.ac.cn/api/v1/met/stations/heihe_forc_001/series?model
 - `docs/runbooks/display-readonly-live-mvt.md`：live MVT 历史 receipt、开关和重启脚本口径；
   当前 display DB/env 以 `infra/env/display.example`、`docs/governance/ROLE_BOUNDARY.md`、
   `docs/runbooks/two-node-deployment-overview.md` 和
-  `docs/runbooks/two-node-production-e2e-plan.md` 为准。
+  `docs/runbooks/node-27-bringup-checklist.md` 为准。
 - `docs/runbooks/production-service-config.md`：生产配置模板中的 object-store env 分类。
