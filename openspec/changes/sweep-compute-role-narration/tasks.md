@@ -5,7 +5,8 @@ which). The order between tasks of different groups is the table of `design.md` 
 named there depends only on groups 1 and 2. Every PR carries in its body the counter output of
 `design.md` §3 before and after
 (`uv run --no-sync python -I openspec/changes/sweep-compute-role-narration/narration_count.py`, and
-`--tokens` for the name tokens) and the hard-gate finding counts before and after. Every PR ticks
+`--tokens` for the name tokens) and the hard-gate finding multiset (check id, path, matched line)
+before and after. Every PR ticks
 its tasks here in its final push.
 
 ## Must preserve (all groups)
@@ -19,8 +20,9 @@ its tasks here in its final push.
   the PR lists it.
 - Commands that remain in a live runbook are the ones the page had, minus the literal `ssh` to the
   retired host; `uv` discipline lines for the compute hosts stay as they are.
-- A renamed heading takes every inbound link with it; the PR shows a repository-wide search for the
-  old slug returning nothing.
+- A renamed heading takes every inbound link with it, and a deleted file every reference to it. The
+  PR shows a repository-wide search for the old slug or file name returning nothing outside history,
+  outside this change's directory and apart from tests' own synthetic inputs (each listed in the PR).
 - History, persisted values and the gate's existing vocabulary are not edited (`design.md` §3).
 
 ## 1. Gate vocabulary
@@ -89,7 +91,7 @@ Minimal mergeable slice: 3.1 - three pages with no pinned sentence, no command t
   statement of `ROLE_BOUNDARY.md` stays.
 - [ ] 4.2 `docs/spec/*`, `docs/modules/*`, the two forcing notes under `docs/`, the host line of
   `docs/VALIDATION.md`, the two narration lines of `docs/governance/LEGACY_DEAD_CODE_INVENTORY.md`,
-  `scripts/diagnostic/qhh/README.md` (its pin follows).
+  `scripts/diagnostic/qhh/README.md` (the tokens its test pins stay).
 - [ ] 4.3 `infra/env/README.md`: the body, the authority heading with its two tests and three inbound
   links; the comments of `infra/env/*.example`.
 - [ ] 4.4 Live runbooks without a banner: `failed-basin-retry.md`,
@@ -141,11 +143,10 @@ Minimal mergeable slice: 5.1 - the family's followers are two test entries, one 
   header names no deleted runbook); the front-matter test in
   `tests/test_node22_entrypoint_invariant.py` goes; the three citations in the forcing note reworded;
   the pointers in `current-production-ops.md` and `stuck-detection.md` and the link in
-  `tests/fixtures/basins/qhh-sample/README.md` removed; its inventory row; delete. The PR shows a
-  repository-wide search for the file name, outside history, returning nothing.
+  `tests/fixtures/basins/qhh-sample/README.md` removed; its inventory row; delete.
 
 Suggested fixture level: compact - a pinned recipe and a guard's anchor move to another file; no runtime behaviour.
-Minimal mergeable slice: 6.2 - none of its followers is shared with a deletion of group 5; 6.1 is independent of 6.2 and depends on 5.1 and 5.2 (shared inventory bullets).
+Minimal mergeable slice: 6.2 - its followers are its own except one inventory row it shares with 5.1, which it follows; 6.1 is independent of 6.2 and depends on 5.1 and 5.2 (shared inventory bullets).
 
 ## 7. Human text in scripts, services, packages, workers
 
@@ -163,7 +164,8 @@ Minimal mergeable slice: 7.1 - about 65 lines in packages no script imports text
 
 ## 8. API and UI text
 
-- [ ] 8.1 The retry message and its suggested action (the test that asserts it follows); the two
+- [ ] 8.1 The retry message and both suggested actions of the control-plane refusal (the test that
+  asserts one of them follows); the two
   OpenAPI description chains (patching code, `openapi/nhms.v1.yaml`, generated types); drift test and
   `check:api-types`. `ops-monitoring-api`, all of it: the sentence of the retry requirement in the
   slice's own change, the Purpose line edited at archive.
@@ -181,7 +183,8 @@ Minimal mergeable slice: 8.1 - backend text and its generated chain, verified by
 
 - [ ] 9.1 Alert mail subject and host fallback with their tests; the script's comments. No spec text
   states the subject, and no installed file changes: the script runs from the production checkout.
-- [ ] 9.2 `Description=` of the 16 manifest units (`design.md` §5) and the unit comments;
+- [ ] 9.2 `Description=` of the 16 manifest units (`design.md` §5) and the unit comments (17 manifest
+  files change: the 16, and `nhms-w3-journal-backup.service` by one comment);
   `MANIFEST.json` shas; the example unit `infra/systemd/nhms-slurm-gateway.service`. For the two units
   under `infra/systemd/node22/`: a new read-only receipt, the receipt rule of
   `tests/test_node22_unit_tracking.py` (the two paths are in the 2026-10-16 receipt with their old
@@ -190,7 +193,8 @@ Minimal mergeable slice: 8.1 - backend text and its generated chain, verified by
   file; the spec's own narration and title) in the slice's own change. **Stop: needs the owner's go-ahead
   for the production action.** On the compute control host, before the PR's last push, at a pass
   boundary: drift probe before, install, `daemon-reload` (no restart), drift probe after with the PR's
-  manifest, operator receipt in the PR. No test mail is sent.
+  manifest, operator receipt in the PR that lists every installed file. The tests that read the unit
+  files are green before the host step. No test mail is sent.
 
 Suggested fixture level: expanded - deployed unit bytes and the text of a production alert.
 Minimal mergeable slice: 9.1 - script and tests only, deployed by the next checkout sync; 9.2 is independent of it and atomic, because the manifest, the tracked bytes, the receipts and the installed copies have to agree when it merges.
@@ -206,8 +210,9 @@ the titles `appendix-titles.md` assigns to it, edits Purpose lines directly at a
 
 - [ ] 10.1 The specs with one to three mentions that 10.2 and 10.3 do not name (about 30), with
   `hydro-result-ingest-and-publish` and `multibasin-product-discovery`, which Appendix B misses.
-- [ ] 10.2 The contract specs' remaining requirements (`production-topology-contract`,
-  `production-ops-readiness`) and the specs named after the codename (`node22-db-retirement-cutover`,
+- [ ] 10.2 The remaining narration of the contract specs (`production-topology-contract`,
+  `production-ops-readiness`), including the other sentences of the requirements 1.4, 3.6 and 4.5
+  touched, and the specs named after the codename (`node22-db-retirement-cutover`,
   `node22-dbfree-runtime`, `node22-env-hygiene`, `node22-unit-failure-alert`,
   `slurm-gateway-node22-deployment`): statements about the retired host get the retired-host phrase.
 - [ ] 10.3 The scheduler and pipeline specs with several mentions (`production-scheduler-orchestration`,

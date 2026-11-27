@@ -92,5 +92,5 @@ its deltas from the main spec text of that day, and archives it in its PR's last
 - Docs: about 55 files rewritten, 8 deleted. Specs: about 50 capability specs touched by deltas.
 - Code: human-read strings and comments only, plus the gate's vocabulary (behaviour) and the alert
   script's subject line (deployed text).
-- Hosts: one redeploy of 16 unit files on the compute control host (group 9); one frontend rebuild and
+- Hosts: one redeploy of 17 unit files (16 descriptions, one comment) on the compute control host (group 9); one frontend rebuild and
   one display API restart on node-27 (group 8). Each is a production action with its own go-ahead.

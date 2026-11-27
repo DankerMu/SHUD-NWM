@@ -217,10 +217,10 @@ live or is read by a spec).
 |---|---|---|
 | monitoring hint "失败诊断用于交给 22 compute-control 节点处理；…" (`JobsTable.tsx`, `BasinFailures.tsx`, both variants each), the fake page's text, three tests, the two "22-node" lines of `display-readonly-ops-ui`, the frontend comment lines | "…交给计算控制主机处理…" | frontend rebuild on node-27 |
 | the C4 probe `c4DisplayEvidence/dom.ts` | its main test is the element `ops-manual-recovery-guidance`, which does not change; its fallback text ("需要恢复时在 22 compute-control") follows the fake page | with the frontend; the probe passes on the old and on the new page, so the C4 live receipt can be taken at any time after the deployment |
-| retry 409 message and its `suggested_action` ("Ask a node 22 operator …", asserted by `tests/test_retry_cancel_consistency.py`) | name the compute role | display API restart |
+| retry 409 message and the two `suggested_action` texts of the control-plane refusal ("Ask a node 22 operator …"; the retry one is asserted by `tests/test_retry_cancel_consistency.py`) | name the compute role | display API restart |
 | two OpenAPI description chains (the retired retry lane; the "compute_control runbook on node 22" sentence), each patching code → `openapi/nhms.v1.yaml` → generated types | name the compute role | display API restart; `check:api-types` |
 | messages and help of scripts and services (one asserted by two tests) | §1 | next sync of the production checkout |
-| `Description=` of 16 manifest units: 14 say "NHMS node-22 …", and the scheduler and gateway units under `infra/systemd/node22/` end with "(node 22 user)" | "NHMS compute …"; "(compute role user)" | manifest shas; redeploy on the compute control host at a pass boundary; `daemon-reload`, no restart (a description is metadata); drift probe before and after; operator receipt in the PR (the pattern of #3401) |
+| `Description=` of 16 manifest units: 14 say "NHMS node-22 …", and the scheduler and gateway units under `infra/systemd/node22/` end with "(node 22 user)"; unit comments (one more manifest unit, `nhms-w3-journal-backup.service`, changes by a comment only: 17 files) | "NHMS compute …"; "(compute role user)" | manifest shas; redeploy on the compute control host at a pass boundary; `daemon-reload`, no restart (a description is metadata); drift probe before and after; operator receipt in the PR (the pattern of #3401) |
 | the example unit `infra/systemd/nhms-slurm-gateway.service` (two comments, its `Description=`) | §1 | none: not installed |
 | alert mail subject `[NHMS node-22] unit failed: …` and the `HOST` fallback `node-22` | `[NHMS compute] unit failed: …`; fallback `compute` | next sync of the production checkout (the script runs from it; it is not an installed file); a mail filter on the old subject stops matching (the owner chose to change it) |
 
@@ -257,6 +257,7 @@ file:
 |---|---|---|
 | 5.2 | 5.1 | `evidence-boundary-hardening`; both governance inventories |
 | 6.1 | 5.1, 5.2 | one bullet of each governance inventory names files of all three |
+| 6.2 | 5.1 | one row of `LEGACY_DEAD_CODE_INVENTORY.md` names the bring-up runbook and `qhh-continuous.md` |
 | 3.4 | 6.2 | the bring-up pointer in `stuck-detection.md` |
 | 3.5 | 3.4 | the §8.5 link lines in `file-provider-refresh.md` and `gateway-and-services.md` |
 | 3.6 | 3.1 to 3.5, 6.2 | the banner explains every production-ops page; the §5.8 and §8.5 link lines and the bring-up pointers in `current-production-ops.md`; the `ssh` test is green only when the last command is gone |
@@ -270,7 +271,7 @@ file:
 | 10.3 | the owner's decision on `fix-node22-keliya-forecast-output-recompute` | that change holds a MODIFIED block of "Backend scheduler entrypoint", which 10.3 rewrites; archived later, it would put the old text back |
 | 11.1 | every other task | leftover literals |
 
-Tasks not named in the left column (3.1, 3.2, 3.3, 4.1, 4.6, 5.1, 6.2, 7.1, 8.1, 8.2, 9.1, 9.2, 10.1)
+Tasks not named in the left column (3.1, 3.2, 3.3, 4.1, 4.6, 5.1, 7.1, 8.1, 8.2, 9.1, 9.2, 10.1)
 depend only on groups 1 and 2. A capability spec has one owning task (`tasks.md`, group 10 lists
 the exclusions), so no two slices generate a block for the same requirement from the same text.
 
