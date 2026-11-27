@@ -46,7 +46,7 @@ has no page left.
 - Specs: `production-topology-contract` (one requirement REMOVED and ADDED under a new title; the
   archive appends it at the end of the spec).
 - Docs: the two runbooks.
-- Tests: two constants of one test file.
+- Tests: two constants and two docstrings of one test file.
 - No runtime behaviour, no deployed file.
 - What replaces the banner rule: the requirement "Live text names the compute role and keeps the
   codename for names" of `sweep-compute-role-narration`, which reaches the main spec when that

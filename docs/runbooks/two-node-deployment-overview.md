@@ -133,9 +133,9 @@ M22 设计里，它必须能访问计算角色调度任务所需的共享路径�
 
 ### 3.3 node-27：只读展示面
 
-node-27 运行角色为 `display_readonly`。
+node-27 的展示面（display API 和前端）运行角色为 `display_readonly`。本节说的是这个展示面；同一台主机上还有 active primary PG 和 ingest，它们写活动数据库，见 [`ROLE_BOUNDARY.md`](../governance/ROLE_BOUNDARY.md)。
 
-它负责：
+展示面负责：
 
 - 运行 FastAPI 和前端静态资源入口。
 - 提供 `/` 单页地图水文气象展示。
@@ -143,7 +143,7 @@ node-27 运行角色为 `display_readonly`。
 - 只读查询 PostgreSQL 中的模型、气象、水文、pipeline 和 ops 状态。
 - 只读读取 published artifacts 中的展示产品、manifest 和日志；只读读取 shared object-store mirror 中的完整运行产物。
 
-它不负责：
+展示面不负责：
 
 - 不运行正式生产调度。
 - 不提交 Slurm job。
@@ -177,7 +177,7 @@ M22 设计里，计算角色拥有全部自动化能力（计算 + 发布的读�
 | `/ghdc/data/nwm/object-store` 写 | 写（publish/copyback only） | 禁止（只读挂载） |
 | Slurm Gateway / job 提交 | 拥有 | 禁止（不调用、不安装 CLI） |
 
-node-27 出现任何写/调度能力（可写 DB、可写 published、可提交 Slurm、可触发 retry/cancel），都视为
+node-27 的展示面出现任何写/调度能力（可写 DB、可写 published、可提交 Slurm、可触发 retry/cancel），都视为
 角色边界破坏，按第 7.3 节处理，不能临时把 node-27 改成单机控制面。
 
 ## 4. 节点之间共享什么
@@ -228,7 +228,7 @@ node-27 使用：
 - 本地真实环境文件：`infra/env/display.env`，不提交
 - systemd 单元：[`infra/systemd/nhms-display-api.service`](../../infra/systemd/nhms-display-api.service)，由 [`scripts/ops/start-display-api.sh`](../../scripts/ops/start-display-api.sh) 安装和重启
 
-node-27 的环境文件需要配置 readonly DB、readonly published artifact root、只读对象存储凭证或只读 shared object-store mirror 挂载、CORS 和端口。不能配置 Slurm Gateway、workspace、Basins/model assets、Docker socket、`NHMS_OBJECT_STORE_COPYBACK_ROOT` 或其他计算控制能力。
+display API 的环境文件需要配置 readonly DB、readonly published artifact root、只读对象存储凭证或只读 shared object-store mirror 挂载、CORS 和端口。不能配置 Slurm Gateway、workspace、Basins/model assets、Docker socket、`NHMS_OBJECT_STORE_COPYBACK_ROOT` 或其他计算控制能力。
 
 当前 node-27 published artifact host root 使用 `/home/ghdc/nwm/published`。
 
@@ -242,7 +242,7 @@ systemd 不是新的应用运行模式，也不会改变计算角色与 node-27 
 
 ### 6.1 计算角色的产物（M22 设计）
 
-M22 设计里，计算角色会产生或更新（今天 PostgreSQL 状态由 node-27 ingest 写，retry/cancel 入口已退役）：
+M22 设计里，计算角色会产生或更新下面这些。今天 PostgreSQL 状态由 node-27 ingest 写；pipeline API 的 retry 入口已由 #3157 退役，人工重试的现行入口见第 7.2 节：
 
 - PostgreSQL 中的 run、stage、job、event、met、hydro、ops 状态。
 - workspace 中的计算中间态和任务工作目录。
@@ -299,7 +299,7 @@ node-27 的关键交付是“只读展示链路可用，并且物理上没有控
 
 ### 7.3 只读边界异常
 
-如果 node-27 出现下面任一情况，不能继续声明部署通过：
+如果 node-27 的展示面出现下面任一情况，不能继续声明部署通过：
 
 - `/api/v1/slurm/*` 可访问。
 - node-27 上出现真实 retry/cancel 控制按钮或控制 POST。
@@ -319,6 +319,8 @@ fail-open：失败不影响 stage 结果，只在回执里留证据，所以判�
 `state_save_qc` / 终态契约 `forecast_state_save_qc` 上，已由 #2069 取代）：唯一的 profile
 围栏是 `NHMS_OBJECT_STORE_COPYBACK_ROOT`，未配即不镜像也不发回执。因此
 `state_save_qc` 整个周期都提交失败时，降水镜像**仍在**——两条生命周期无关。
+
+下面两条 `jq` 在计算控制主机上以生产用户执行（主机与角色见 [`w2-w3-compute-topology.md`](w2-w3-compute-topology.md#1-主机与角色) §1）。原 node-22 主机上的 journal 副本停在 2026-11-23T02:34Z，**不要**在那里读。
 
 DB-free 下回执落在文件 journal，目录按 **normalize 后的** source 分（`gfs` / `IFS`，不是
 cycle id 里的小写 `ifs`）；journal 会轮转出 `<cycle>.1.jsonl`、`<cycle>.2.jsonl`，所以必须
@@ -376,7 +378,9 @@ jq -c 'select(.record_type == "pipeline_event"
 ### 8.1 两边都要确认
 
 - 计算主机的生产 checkout 和 node-27 的 checkout 在同一个 git commit。
-- 本机依赖按 Linux 环境重建，不复用其他机器的 `.venv` 或 `node_modules`。
+- node-27 的依赖按 Linux 环境在本机初始化，不从 macOS 或别的端拷 `.venv` 或 `node_modules`。
+- 计算主机的生产 checkout 共用一个 `.venv`（Python 3.11.x，经 NFS 被 `w3`、`w2` 上的 Slurm 作业和 scheduler 定时器共用）：**禁止**在那里 `uv sync` 或裸 `uv run`，系统 Python 也不是替代。
+  只有部署改了 `uv.lock`，且 scheduler 定时器已停、没有在跑的 pass、Slurm 队列里没有 NWM 作业时才同步环境；细则见 [`w2-w3-compute-topology.md`](w2-w3-compute-topology.md)。
 - 磁盘空间、`TMPDIR` 和 evidence root 已记录。
 - 本地 env 文件权限为 `0600`，且没有被提交。
 - 项目生成的临时产物写入仓库 ignored 的 `artifacts/` 或 `/scratch/frd_muziyao/`。
@@ -433,7 +437,7 @@ jq -c 'select(.record_type == "pipeline_event"
   需一次性删除旧 `grid.json` 并清空对应 interp_weights，让其用区域场重建（否则 canonical
   会因 grid signature 不匹配 fail-loud）。
 
-### 8.3 node-27 重点确认
+### 8.3 node-27 展示面重点确认
 
 - `NHMS_SERVICE_ROLE=display_readonly`。
 - `DATABASE_URL` 是 readonly 账号，并有 denied write probe 证据。
@@ -442,7 +446,7 @@ jq -c 'select(.record_type == "pipeline_event"
 - `/api/v1/runtime/config` 返回 display readonly 能力。
 - `/ops` 不请求 Slurm 队列深度，不显示真实控制按钮。
 
-## 9. 验收边界
+## 9. 验收边界（M22 设计）
 
 可以声明的：
 

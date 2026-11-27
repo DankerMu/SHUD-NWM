@@ -3,7 +3,7 @@
 本文的命令都在**计算控制主机**上以生产用户执行；主机与角色、怎么进入见
 [`w2-w3-compute-topology.md`](w2-w3-compute-topology.md#1-主机与角色) §1。
 计算角色自 2026-11-23 起由 `w3`（计算控制主机）和 `w2` 承载；原 node-22 主机 `210.77.77.22` 已退出 NWM 计算，仅作 rollback archive，
-本文的任何命令都**不得**在那台主机上执行。`node22` 是计算角色的代号，留在本文的文件名、slug、脚本名和 unit 名里。
+本文的任何命令都**不得**在那台主机上执行。`node22` 是计算角色的代号，留在本文的文件名、slug、脚本名和 unit 目录名里。
 
 > **回滚提示**：原 node-22 主机上的 scheduler journal 副本停在 2026-11-23T02:34Z。回滚到那台主机不是"把定时器
 > 开回来"——必须先停 `w3` 的 scheduler 定时器，再把 `w3` 的 journal（或 NFS 上
@@ -244,7 +244,7 @@ receipt 字段：`evidence_root`（**实际扫描的** root，按上面那条自
      翻成 `3`；仓内不存在「清单该含多少模型」的权威，与本 change 拒绝为时间窗发明阈值同理。
      查法：直接比 `registry.model_count` 与 `active_model_count` 的差值，别去 `exclusions` 里找。
      2026-09-16 实测每一趟 `model_count = active = runnable = selected = 76`、`exclusions = []`，
-     无一例外落差为零——这条边界今天在生产上是空的，但它结构上存在。
+     无一例外落差为零——这条边界当时在生产上是空的，但它结构上存在。
   4. **发现面收回（discovery retraction）**：`0` 对「更早、更宽的配置能看见而当前配置看不见的
      cycle 上的待办」**不作任何断言**。第 2 条的缓解之所以带「只要 cycle 仍在发现范围内」这个限定，
      就是因为它依赖**重新发现**，而重新发现跨配置变更不成立：小时过滤
@@ -271,8 +271,7 @@ receipt 字段：`evidence_root`（**实际扫描的** root，按上面那条自
   这批候选不在那几类之列，于是本命令在管线已经死了一天多的情况下**照契约返回 `exit 0`**。
   **不要拿它当健康检查**，管线是否推进看各自的监控面。
 - **窗口之外看不见**：只扫最近 `--passes` 趟，这是定义不是缺陷；`3` 的存在就是为了不把"窗口内
-  没看见"说成"没有"。需要更宽的窗口就加大 `--passes`（无上限，但每份 pass 文件接近 5 MB，按需
-  加）。
+  没看见"说成"没有"。需要更宽的窗口就加大 `--passes`（无上限；2026-09-16 记录时每份 pass 文件接近 5 MB，`w3` 上未重测，按需加）。
 - **摘要 pass 的 `null` 字段怎么读**。bounded 摘要（`limit.candidate_lists=summarized`）丢了
   `state_evidence`，但保留 `decision`、`recorded_init_state_id`，以及 `retry_attempt` /
   `retry_limit` / `retry_occurrences` / `manual_retry_required` 里**产出臂实际写过的那几个**
@@ -328,7 +327,7 @@ receipt 字段：`evidence_root`（**实际扫描的** root，按上面那条自
      id 与 `State`；另一个还在跑就先等或升级。
    - `name_window_count`：窗口里至少有一个 master 的 `SubmitLine` 缺失/无 key/不一致，只能按
      名字+窗口计数；用下面的只读 `sacct` 看是哪一个。
-   - 字段**不存在**：计算角色的生产 checkout 早于 #2655，`git pull --ff-only` 后会按 SubmitLine
+   - 字段**不存在**：计算主机的生产 checkout 早于 #2655，`git pull --ff-only` 后会按 SubmitLine
      精确 key 自动绑定（绑定用的仍是 `slurm_name_window_unique`，不引入新 token）；多行 held 时
      一趟大约只绑一行，见下面的注意事项。
 2. 只读核对（不写任何东西）：

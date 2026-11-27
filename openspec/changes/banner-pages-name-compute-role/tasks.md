@@ -33,6 +33,10 @@ Must preserve:
   - **Banner** (the paragraph "计算角色主机说明"): removed. The two body references to "banner"
     (§1, §5.1) point to `current-production-ops.md` and `docs/governance/ROLE_BOUNDARY.md` for the
     facts of today.
+  - **Banner rules the body keeps**: §7.4 says where its two journal reads run (on the compute
+    control host, with the §1 link of `w2-w3-compute-topology.md`; not on the retired node-22 host,
+    whose journal copy stopped at 2026-11-23T02:34Z); §8.1 states the rule of the shared `.venv`
+    (no `uv sync`, no bare `uv run`, the three conditions of an environment sync).
   - **Dated**: the 2026-06-22 block, unchanged.
   - **Design sections, each under a lead that says "M22 设计"**: §1; the flow of §2; §3.1; the
     design sentences of §3.2; §3.4; §4; the env paragraph of §5.1; §6.1; §7.1; §7.2; §9. One body
@@ -41,6 +45,9 @@ Must preserve:
   - **Current sections, written as current**: the #2420 note; the route authority and the publish
     paths of §2; §3.3; the retirement sentence and the published-root line of §5.1; §5.2; §5.3;
     §6.2; §6.3; §7.3; §7.4; §8.
+  - **The display surface is the subject** where a current sentence is true of the display API and
+    the frontend only (§3.3, the closing paragraph of §3.4, §5.2, §7.3, §8.3): node-27 also runs
+    the active primary PG and ingest.
   - **Corrected or dated**: the live-probe paragraph of §3.2 (the mount fact was true of the
     retired cluster; today both compute hosts mount `/ghdc/data`, source: the export table of
     `w2-w3-compute-topology.md`); "只读 DB 副本" in §3.4 (the page's own §4 and the instructions say a
