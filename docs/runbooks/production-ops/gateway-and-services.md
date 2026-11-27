@@ -166,7 +166,7 @@ squeue -u "$USER" -o "%.18i %.20j %.2t %.10M %.10l %.6D %R"
 > `scripts/node22_model_succession.py`（普通 `stop` + 每个写入步骤前复查无人启动），见
 > [`recalibration-and-archive.md`](recalibration-and-archive.md) 的 5.7.1。
 > exact-cycle wrapper `scripts/ops/node22-run-cycle-once.sh` 也会自己停 / 启 timer（见
-> [`known-issues-pipeline.md`](known-issues-pipeline.md#85-node-22-scheduler-stuck-after-missing-forcing-artifact)）；
+> [`known-issues-pipeline.md`](known-issues-pipeline.md#85-scheduler-stuck-after-missing-forcing-artifact)）；
 > 本节的 rollout / rollback 在停 timer 之前都先确认它没在跑（`pgrep -u "$(id -u)" -f '^(/[^ ]*/)?bash( -[^ ]+)* [^ ]*node22-run-cycle-once\.sh( |$)'` 为空），
 > 且 state-index 自动剪枝没在跑（`systemctl --user is-active nhms-scheduler-state-index-prune.service` 必须是 `inactive` 或 `failed`；它结束时同样会恢复它停掉的 timer）。
 

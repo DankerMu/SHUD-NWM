@@ -72,7 +72,7 @@ Each task rewrites the bodies with the glossary, removes the page's literal `ssh
   link in `current-production-ops.md`.
 - [x] 3.3 `service-bringup.md`, `known-issues-state-index.md` (structure readers named in
   `appendix-inventory.md` §2b stay green).
-- [ ] 3.4 `stuck-detection.md`, `known-issues-pipeline.md`: the heading §8.5 with its five inbound
+- [x] 3.4 `stuck-detection.md`, `known-issues-pipeline.md`: the heading §8.5 with its five inbound
   links (in `current-production-ops.md`, `node22-control-plane-manual-recovery.md`,
   `file-provider-refresh.md`, `gateway-and-services.md`, `stuck-detection.md`).
 - [ ] 3.5 `gateway-and-services.md`, `file-provider-refresh.md`, `overview.md`: the pin of

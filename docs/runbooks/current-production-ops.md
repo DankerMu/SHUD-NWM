@@ -243,9 +243,9 @@
 
 完整内容见 [`production-ops/known-issues-pipeline.md`](production-ops/known-issues-pipeline.md#84-ghdc-与计算节点边界)。
 
-### 8.5 Node-22 scheduler stuck after missing forcing artifact
+### 8.5 Scheduler stuck after missing forcing artifact
 
-完整内容见 [`production-ops/known-issues-pipeline.md`](production-ops/known-issues-pipeline.md#85-node-22-scheduler-stuck-after-missing-forcing-artifact)。
+完整内容见 [`production-ops/known-issues-pipeline.md`](production-ops/known-issues-pipeline.md#85-scheduler-stuck-after-missing-forcing-artifact)。
 
 #### 8.5.1 Withheld copyback source (`COPYBACK_SOURCE_WITHHELD`)
 
