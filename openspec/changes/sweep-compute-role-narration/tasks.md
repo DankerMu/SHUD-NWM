@@ -70,7 +70,7 @@ Each task rewrites the bodies with the glossary, removes the page's literal `ssh
   `ssh` line, no pointer, no pinned sentence, no heading that carries the codename).
 - [x] 3.2 `artifacts-and-storage.md`, `recalibration-and-archive.md`: the heading §5.8 with its inbound
   link in `current-production-ops.md`.
-- [ ] 3.3 `service-bringup.md`, `known-issues-state-index.md` (structure readers named in
+- [x] 3.3 `service-bringup.md`, `known-issues-state-index.md` (structure readers named in
   `appendix-inventory.md` §2b stay green).
 - [ ] 3.4 `stuck-detection.md`, `known-issues-pipeline.md`: the heading §8.5 with its five inbound
   links (in `current-production-ops.md`, `node22-control-plane-manual-recovery.md`,

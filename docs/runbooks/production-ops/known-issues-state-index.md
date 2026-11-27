@@ -1,15 +1,12 @@
 **分册：已知卡点：state-index / journal / scope gate**
 
-> **计算角色主机说明**：本页的 "node-22" 指计算角色，现由 w3 / w2 承载；字面的
-> `ssh … 210.77.77.22` 命令一律登录 w3 后执行，**不得**在原主机上执行。详见
-> [`current-production-ops.md`](../current-production-ops.md) 顶部横幅。
-
 本页是当前生产值守手册的 §8.8-§8.11 分册（#1103 拆分，正文逐字保留）。
 索引与全部分册入口见 [`../current-production-ops.md`](../current-production-ops.md)。
+本页里在计算控制主机上执行的步骤都以生产用户执行；是哪台主机、怎么进入见 [`w2-w3-compute-topology.md`](../w2-w3-compute-topology.md#1-主机与角色) §1。
 
 ### 8.8 state-index copyback fail-closed 与 replay 补账
 
-判读入口（node-22）：`state_save_qc` 终态后的 copyback merge 是把新 checkpoint entry 写进
+判读入口（计算控制主机）：`state_save_qc` 终态后的 copyback merge 是把新 checkpoint entry 写进
 调度器读取的 shared canonical state index 的**唯一写者**。它失败时 journal 事件里带两个
 `error_code` 之一——`OBJECT_STORE_COPYBACK_STATE_INDEX_FAILED`（纯 pre-commit fail-closed：
 index 未被改动，按"未提交"幂等重跑）或
@@ -18,7 +15,7 @@ index 未被改动，按"未提交"幂等重跑）或
 state-manager 的都可能），`details.details.error` 是异常文本：
 
 ```bash
-ssh -p 32099 frd_muziyao@210.77.77.22
+# 计算控制主机，生产用户
 cd /scratch/frd_muziyao/NWM
 JOURNAL=/scratch/frd_muziyao/nhms-prod/workspace/scheduler/journal/journal
 grep -rlE 'OBJECT_STORE_COPYBACK_STATE_INDEX_(FAILED|COMMIT_UNCERTAIN)' "$JOURNAL" | tail -20
@@ -57,9 +54,10 @@ grep -rlE 'OBJECT_STORE_COPYBACK_STATE_INDEX_(FAILED|COMMIT_UNCERTAIN)' "$JOURNA
 失败后的补账（stage 终态已落账，copyback 不会自然重试；无 replay 则那批 entry 永不进 index）：
 
 ```bash
-ssh -p 32099 frd_muziyao@210.77.77.22   # 必须是 provider 属主 frd_muziyao：
-                                        # provider lock 要求锁父目录 st_uid == geteuid()，
-                                        # CAS 替换要求 preimage uid 匹配；换身份会不透明 fail-closed
+# 计算控制主机，生产用户 frd_muziyao（必须是 provider 属主）：
+# provider lock 要求锁父目录 st_uid == geteuid()，
+# CAS 替换要求 preimage uid 匹配；换身份会不透明 fail-closed
+# 分两步粘贴（第 2 步前要核对 dry-run 输出）；cd 与 envfile 留在当前 shell 里
 cd /scratch/frd_muziyao/NWM
 set -a
 . infra/env/compute.scheduler-provider-refresh.env   # 提供 OBJECT_STORE_ROOT / OBJECT_STORE_PREFIX
@@ -177,7 +175,7 @@ destination 侧收窄为"只校验并搬运本次胜出、且 shared index 尚�
 
 两根角色（不是整文件镜像，禁止互相覆盖）：
 
-- private/reference（默认 `OBJECT_STORE_ROOT`）：node-22 scratch 生命周期 index，
+- private/reference（默认 `OBJECT_STORE_ROOT`）：计算主机 scratch 上的生命周期 index，
   `scheduler/state-index/index-last.json`。copyback 的 source。
 - shared/destination（默认 `NHMS_OBJECT_STORE_COPYBACK_ROOT`）：调度器实际读的
   canonical index，同相对路径。可保留 shared 已归档对象的历史 entry。
@@ -187,11 +185,12 @@ destination 侧收窄为"只校验并搬运本次胜出、且 shared index 尚�
 
 enforce 前必须冻结所有会写这两份 index 的 writer：scheduler、state-save 作业、
 copyback / replay、recalibration clone、provider-refresh。以 provider 属主
-`frd_muziyao` 在 node-22 跑。archive / receipt 根必须事先存在、属主私有
+`frd_muziyao` 在计算控制主机上跑。archive / receipt 根必须事先存在、属主私有
 （0700 目录）。
 
 ```bash
-ssh -p 32099 frd_muziyao@210.77.77.22
+# 计算控制主机，生产用户 frd_muziyao（provider 属主）
+# 分两步粘贴（enforce 前要核对 dry-run 预览）；cd 与 envfile 留在当前 shell 里
 cd /scratch/frd_muziyao/NWM
 set -a
 . infra/env/compute.scheduler-provider-refresh.env
@@ -264,7 +263,7 @@ source-first 部分恢复：reference 已去掉目标、destination 仍失败时
 - 诊断文本里**没有 symlink 这个词**：darwin 上是 `Path component is not a
   directory`（ENOTDIR），Linux 上是 ELOOP 文案。
 
-**一行自检**（在 node-22 上执行，结果必须与配置值逐字相同）：
+**一行自检**（在计算控制主机上执行，结果必须与配置值逐字相同）：
 
 ```bash
 readlink -f "$NHMS_SCHEDULER_JOURNAL_ROOT"
@@ -294,7 +293,7 @@ preflight，所以上面"只覆盖能通过 preflight 的 root"这句只说调�
 `demote-reserved-job` 与 `census-job-id-scope`——`recover-released-identity-blocked-reservation`、
 `prepare-file-journal-rollback`、`launch-file-journal-rollback-writer`、
 `complete-file-journal-rollforward`、`import_historical_scheduler_state`
-（`migrate-scheduler-state` 经它继承），以及两个 node-22 脚本
+（`migrate-scheduler-state` 经它继承），以及计算角色的两个脚本
 `scripts/node22_manual_retry_failed_runs.py` 与
 `scripts/ops/node22_repair_placeholder_hydro_uris.py`。验证发生在构造
 repository **之前**，因此不合规的 root 一个字节都不会落盘：五条 CLI（上面四条
@@ -326,20 +325,22 @@ field `job_id`）；census 只调用这一个谓词，不做第二套比较。
 `infra/env/compute.scheduler-dbfree.env.example:47`）。
 
 ```bash
-ssh -p 32099 frd_muziyao@210.77.77.22 '
-pid=$(systemctl --user show -p MainPID --value nhms-compute-scheduler.service)
-if [ "${pid:-0}" != "0" ]; then
-  tr "\0" "\n" < /proc/$pid/environ | grep "^NHMS_SCHEDULER_JOURNAL_ROOT="
-else
-  grep "^NHMS_SCHEDULER_JOURNAL_ROOT=" /scratch/frd_muziyao/NWM/infra/env/compute.scheduler-dbfree.env
-fi'
+# 计算控制主机，生产用户；在子 shell 里跑，pid 不留在当前 shell 里
+(
+  pid=$(systemctl --user show -p MainPID --value nhms-compute-scheduler.service)
+  if [ "${pid:-0}" != "0" ]; then
+    tr "\0" "\n" < /proc/$pid/environ | grep "^NHMS_SCHEDULER_JOURNAL_ROOT="
+  else
+    grep "^NHMS_SCHEDULER_JOURNAL_ROOT=" /scratch/frd_muziyao/NWM/infra/env/compute.scheduler-dbfree.env
+  fi
+)
 ```
 
-把取到的值 `export NHMS_SCHEDULER_JOURNAL_ROOT=...` 之后再跑普查。自 #1944 起，
+在同一台主机的 shell 里把取到的值 `export NHMS_SCHEDULER_JOURNAL_ROOT=...` 之后再跑普查。自 #1944 起，
 空值或相对路径**不再**退化成"普查当前工作目录然后 exit 0"——journal-root seam
 在任何读取之前就以 `FILE_JOURNAL_INVALID_ROOT`（exit 1）拒绝，见 8.10。
 
-**普查命令**（node-22，只读，写作详见 8.10 的 root 前提）：
+**普查命令**（计算控制主机，只读，写作详见 8.10 的 root 前提）：
 
 ```bash
 /scratch/frd_muziyao/NWM/.venv/bin/python -m services.orchestrator.cli census-job-id-scope --journal-root "$NHMS_SCHEDULER_JOURNAL_ROOT" --max-records 5000000
@@ -418,7 +419,7 @@ node-22 活树的 `include_direct=False` 原始计费是 **148,381**（`latest/*
   的模式**：census 不持有任何 repository 锁，撕裂读会以 `file_journal_unreadable`
   fail loud，重跑即可。只有下面的人工恢复步骤才必须先停 timer。
 
-**什么时候跑**：任何 post-#1939 的 checkout 在 node-22 上生效之前跑一次（gate
+**什么时候跑**：任何 post-#1939 的 checkout 对计算角色生效之前跑一次（gate
 生效后分叉行才会真正咬人）；以及任何一次手工编辑 journal root 之后。命令对
 journal 树零写入——`--output` 拒绝任何位于 root 内的路径，`reconcile-inventory/`
 里的 `.tmp` 残留只统计不删除。
@@ -447,7 +448,7 @@ auto-retry 拒绝分支上的 `FileJournalRetryService.mark_permanently_failed`
 （`retry.py` / `chain_forecast_orchestrator_cycle.py`）以及
 `chain_array_accounting.py` 的 `partially_failed` 汇总。
 
-**人工恢复**（唯一支持的路径；顺序不可省）：
+**人工恢复**（唯一支持的路径；顺序不可省；都在计算控制主机上以生产用户执行）：
 
 1. 先确认没有 `node22-run-cycle-once.sh` 在跑（`pgrep -u "$(id -u)" -f '^(/[^ ]*/)?bash( -[^ ]+)* [^ ]*node22-run-cycle-once\.sh( |$)'` 为空）——它结束时会自动恢复 timer，会打穿本窗口；
    再确认 state-index 自动剪枝没在跑（`systemctl --user is-active nhms-scheduler-state-index-prune.service` 必须是 `inactive` 或 `failed`）——它结束时同样会恢复它停掉的 timer。
@@ -469,6 +470,8 @@ segment 文件。anchor 与 direct 文件删除之后，这一行不再喂给 re
 
 ### 8.12 state-index 容量与 `prune-retention`（#2548）
 
+本节的 capacity watch 与自动剪枝两组 timer / service 装在计算控制主机上（生产用户的 user manager）；本节的命令都在计算控制主机上以生产用户执行。
+
 **为什么要剪**：`scheduler/state-index/index-last.json` 从不自动裁剪。发布与读取都
 有硬上限——`MAX_STATE_SNAPSHOT_INDEX_JSON_NODES=300_000`、
 `MAX_STATE_SNAPSHOT_INDEX_BYTES=16 MiB`、`MAX_STATE_SNAPSHOT_INDEX_ENTRIES=100_000`——
@@ -479,7 +482,7 @@ fail-closed。2026-09-25 的 node-22 private index 是 9,950 条 / 203,581 个 J
 **信号**：`state_index_evidence()`、`validated_entries_for_renewal` 的 evidence
 （provider-refresh 的 state 证据）、`publish_state_snapshot_index` 的返回、以及本操作
 每 lane 的 `retention.capacity_before/after` 都带 `capacity`；各 reader 回答里嵌套的
-`state_snapshot_index` 块**不带**（它们整块进 scheduler pass evidence，node-22 最大
+`state_snapshot_index` 块**不带**（它们整块进 scheduler pass evidence，#2548 于 2026-09-26 记录的 node-22 最大
 pass evidence 已是 4,526,683 / 5,000,000 B、含 384 个这种块）。字段：
 `entry_count/max_entries`、`json_nodes/max_json_nodes`、`index_bytes/max_bytes`、
 `utilization_ratio`（三者最大值）、`warning_threshold`（0.70）、`warning`。
@@ -494,7 +497,7 @@ state snapshot index [local-path] index_fp=<8 hex> is at <x>% of a hard limit (e
 index uri 字符串**的 `sha256(str(uri))[:8]`——纯字符串哈希，不 `resolve()`、不碰文件
 系统，行内不含任何路径。同一个文件换一种写法（尾斜杠、`..`、软链别名）就是另一个
 `index_fp`；evidence 与 publish 结果里的 `index` / `destination` 仍是 `[local-path]`，
-`capacity` 结构不变。把某个 uri 映射成日志里的标签（node-22，精确解释器，禁止 `uv run`）：
+`capacity` 结构不变。把某个 uri 映射成日志里的标签（计算控制主机，精确解释器，禁止 `uv run`）：
 
 ```bash
 cd /scratch/frd_muziyao/NWM && /scratch/frd_muziyao/NWM/.venv/bin/python -c 'import sys; from packages.common.state_manager import state_index_log_label as f; print(f(sys.argv[1]))' "<uri>"
@@ -538,7 +541,7 @@ provider-refresh 续期、copyback、repair、prune 都经它发布；读时仍�
 "自动剪枝"（#3121，每日 06:30 UTC）在 scheduler pass 边界 enforce；"定时 capacity watch"
 仍每日做只读 dry-run，告警即 unit 失败；本节的人工"流程"保留作兜底。
 
-**定时 capacity watch（#2653）**：node-22 user 级
+**定时 capacity watch（#2653）**：计算控制主机上生产用户的 user 级
 `nhms-scheduler-state-index-capacity.timer`（每日 05:30 UTC，`RandomizedDelaySec=15m`，
 `Persistent=true`）触发 oneshot `nhms-scheduler-state-index-capacity.service`；其 ExecStart 是精确解释器
 的 `-m scripts.node22_state_index_capacity_watch` 模块形式（`scripts/` 不是包，脚本路径
@@ -573,7 +576,7 @@ lag 未设、空串、非整数或负数时用 21 天、`default`，lag 仍由 r
 在 #3118 之前，watch 写死 21 天，lag ≥ 120 即每天 exit 2 `repair_retention_window_too_short`、
 容量告警失明（2026-11-09 起 lag 294）。
 
-退出码（非 0 即 unit failed，这是 node-22 唯一的告警面）：
+退出码（非 0 即 unit failed，这是计算角色唯一的告警面）：
 
 | 码 | 含义 |
 |---|---|
@@ -586,20 +589,22 @@ lag 未设、空串、非整数或负数时用 21 天、`default`，lag 仍由 r
 `provider_preimage_changed`（dry-run 两次 preimage 读取之间撞上 writer 的原子替换）
 最多共试 3 次、间隔 5 s，次数记在 receipt 的 `attempts`；其他拒绝不重试。
 
-安装 / 启用（node-22，`frd_muziyao`，需先 `git pull --ff-only` 到含本 unit 的
+安装 / 启用（在计算控制主机上以生产用户 `frd_muziyao` 执行，需先 `git pull --ff-only` 到含本 unit 的
 commit——那会连带部署 master 上所有未部署的改动，先与运维确认）：
 
 ```bash
-ssh -p 32099 frd_muziyao@210.77.77.22
-cd /scratch/frd_muziyao/NWM
-grep -E '^(OBJECT_STORE_ROOT|OBJECT_STORE_PREFIX|NHMS_OBJECT_STORE_COPYBACK_ROOT|NHMS_SCHEDULER_CYCLE_LAG_HOURS)=' \
-  infra/env/compute.scheduler-dbfree.env    # 四个键都要在
-install -d -m 0700 /scratch/frd_muziyao/nhms-prod/workspace/state-index-repair/capacity-watch
-install -m 0644 infra/systemd/nhms-scheduler-state-index-capacity.service \
-  infra/systemd/nhms-scheduler-state-index-capacity.timer ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable --now nhms-scheduler-state-index-capacity.timer
-systemctl --user start nhms-scheduler-state-index-capacity.service   # 首跑一次取 receipt
+# 计算控制主机，生产用户 frd_muziyao；子 shell：cd 失败则整段不跑（不会从别的目录装 unit），cd 也不留在当前 shell 里
+(
+  cd /scratch/frd_muziyao/NWM || exit
+  grep -E '^(OBJECT_STORE_ROOT|OBJECT_STORE_PREFIX|NHMS_OBJECT_STORE_COPYBACK_ROOT|NHMS_SCHEDULER_CYCLE_LAG_HOURS)=' \
+    infra/env/compute.scheduler-dbfree.env    # 四个键都要在
+  install -d -m 0700 /scratch/frd_muziyao/nhms-prod/workspace/state-index-repair/capacity-watch
+  install -m 0644 infra/systemd/nhms-scheduler-state-index-capacity.service \
+    infra/systemd/nhms-scheduler-state-index-capacity.timer ~/.config/systemd/user/
+  systemctl --user daemon-reload
+  systemctl --user enable --now nhms-scheduler-state-index-capacity.timer
+  systemctl --user start nhms-scheduler-state-index-capacity.service   # 首跑一次取 receipt
+)
 ```
 
 watch 从不创建 receipt 根：根不存在、不是真目录、不属当前 uid 或带 group/other 位，
@@ -637,7 +642,7 @@ cat /scratch/frd_muziyao/nhms-prod/workspace/state-index-repair/capacity-watch/l
 窗口内稳态到 0.70 时触发的 `enforced_unprunable` 仍是 #2541 的容量设计问题，自动 enforce
 解决不了。
 
-**自动剪枝（#3121）**：node-22 user 级 `nhms-scheduler-state-index-prune.timer`（每日
+**自动剪枝（#3121）**：计算控制主机上生产用户的 user 级 `nhms-scheduler-state-index-prune.timer`（每日
 06:30 UTC，`RandomizedDelaySec=15m`，`Persistent=true`）触发 oneshot
 `nhms-scheduler-state-index-prune.service`，ExecStart 是精确解释器的
 `-m scripts.node22_state_index_auto_prune`。环境来自 `compute.scheduler-dbfree.env`（与 watch
@@ -703,22 +708,24 @@ removed 数、`removed_state_ids_sha256`）、`enforce`（每 lane status、remo
 
 receipt 写盘失败只把 exit 0 改成 2（stdout 上的 receipt 仍完整），非 0 的退出码不变。
 
-安装 / 启用（node-22，`frd_muziyao`；前提同 watch，先 `git status --porcelain` 再
+安装 / 启用（在计算控制主机上以生产用户 `frd_muziyao` 执行；前提同 watch，先 `git status --porcelain` 再
 `git pull --ff-only`，禁止 `uv sync` 与裸 `uv run`；改单元前后各跑一次
 drift 探针，见 [`node22-control-plane-manual-recovery.md`](../node22-control-plane-manual-recovery.md)
 "改单元前后"一节）：
 
 ```bash
-ssh -p 32099 frd_muziyao@210.77.77.22
-cd /scratch/frd_muziyao/NWM
-install -d -m 0700 /scratch/frd_muziyao/nhms-prod/workspace/state-index-repair/auto-prune
-install -m 0644 infra/systemd/nhms-scheduler-state-index-prune.service \
-  infra/systemd/nhms-scheduler-state-index-prune.timer ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable --now nhms-scheduler-state-index-prune.timer
-systemctl --user start nhms-scheduler-state-index-prune.service    # 首跑一次取 receipt
-systemctl --user is-active nhms-compute-scheduler.timer nhms-scheduler-file-provider-refresh.timer   # 跑完都应 active
-cat /scratch/frd_muziyao/nhms-prod/workspace/state-index-repair/auto-prune/latest.json
+# 计算控制主机，生产用户 frd_muziyao；子 shell：cd 失败则整段不跑（不会从别的目录装 unit），cd 也不留在当前 shell 里
+(
+  cd /scratch/frd_muziyao/NWM || exit
+  install -d -m 0700 /scratch/frd_muziyao/nhms-prod/workspace/state-index-repair/auto-prune
+  install -m 0644 infra/systemd/nhms-scheduler-state-index-prune.service \
+    infra/systemd/nhms-scheduler-state-index-prune.timer ~/.config/systemd/user/
+  systemctl --user daemon-reload
+  systemctl --user enable --now nhms-scheduler-state-index-prune.timer
+  systemctl --user start nhms-scheduler-state-index-prune.service    # 首跑一次取 receipt
+  systemctl --user is-active nhms-compute-scheduler.timer nhms-scheduler-file-provider-refresh.timer   # 跑完都应 active
+  cat /scratch/frd_muziyao/nhms-prod/workspace/state-index-repair/auto-prune/latest.json
+)
 ```
 
 读失败的 unit：
@@ -797,17 +804,18 @@ generation 为 `str(model_package_checksum or "")`（无 checksum 即 `""` 这�
 re-export）+ `cycle_lag_hours` + 48，否则 `repair_retention_window_too_short`
 （evidence 带 `floor_hours`）。lag 取 `--cycle-lag-hours`，缺省读
 `NHMS_SCHEDULER_CYCLE_LAG_HOURS`；两者都没有（或非整数）→ `repair_cycle_lag_unset`。
-node-22 lag 10（#3225；此前 16、下限 400 h）：下限 394 h，默认 21 天（504 h）通过，17 天是最小可用值。
+计算角色的 lag 10（#3225；此前 16、下限 400 h）：下限 394 h，默认 21 天（504 h）通过，17 天是最小可用值。
 人工 enforce 的最小天数（与 watch 同一算法）：`floor_hours // 24 + 1`，即
 `(336 + lag + 48) // 24 + 1`；lag 294 → 678 // 24 + 1 = 29。lag ≥ 120 时默认 21 天会被拒，
 dry-run 与 enforce 都要显式带 `--retention-days <N>`（`N` 取该值或 watch receipt 里的
 `retention_days`，两步用同一个 `N`）。
 `--state-id/--run-id/...`、`--lane`、`--allow-missing-*` 对本操作一律拒绝。
 
-**流程**（node-22，provider 属主 `frd_muziyao`；根、archive、receipt 口径同 8.9）：
+**流程**（在计算控制主机上以 provider 属主 `frd_muziyao` 执行；根、archive、receipt 口径同 8.9）：
 
 ```bash
-ssh -p 32099 frd_muziyao@210.77.77.22
+# 计算控制主机，生产用户 frd_muziyao（provider 属主）
+# 分步粘贴（enforce 前要审核 dry-run）；cd、envfile 与 N 留在当前 shell 里，下面"exit 3 之后"的比对命令也要用它们
 cd /scratch/frd_muziyao/NWM
 set -a
 . infra/env/compute.scheduler-provider-refresh.env
