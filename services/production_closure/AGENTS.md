@@ -51,7 +51,7 @@ Do not add new lanes here; a new validator needs its own issue and owner.
   must not create retry/cancel/Slurm/control-plane receipts.
 - The compute role remains the compute/Slurm oracle only for sbatch, Slurm gateway,
   SHUD runtime, or scheduling behavior. Do not route node-27 acceptance through
-  evidence that exists only on the compute hosts unless the runbook names that
+  evidence that only the compute role produces unless the runbook names that
   cross-plane source explicitly.
 - A PASS final status must reflect the governed status ordering and source
   scope. Missing, stale, unsafe, incomplete, or non-authoritative proof is a
