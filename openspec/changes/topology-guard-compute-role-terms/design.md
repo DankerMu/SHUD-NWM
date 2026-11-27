@@ -40,7 +40,7 @@ Must add/change:
   in the instructions (one cell says that node-27 reads the artifacts of `<r>`, the next cell names
   node-27's own database) becomes a finding of that leg, three times (the source and the two
   generated roots). The row is about node-27. Rule, for the leg #3358 added: a line whose first
-  non-blank character is `|` is a table row; when its first cell (emphasis marks and code font
+  non-blank character is `|` is a table row; when its first cell (asterisks and code font
   aside) is exactly `node-27`, the leg evaluates each cell on its own; a cell ends at a `|` that
   is not escaped. Any other line is read as before, also a row whose first cell is a longer name
   that contains `node-27` (a file name) or names the role as well. The rule holds for host

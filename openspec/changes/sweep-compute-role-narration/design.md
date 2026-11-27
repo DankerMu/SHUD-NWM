@@ -144,8 +144,9 @@ scenarios that forbid the command, this change's own among them, match it.
   term plus "-local" but to words ("local to the compute hosts").
 - **A denial stays with the name it denies.** For a role term or a host name the gate's
   local-database leg reads one clause: a denial on the next line or in the next sentence does not
-  cover it, where with the codename a following line could. A rewritten sentence that denies
-  keeps the denial in the clause of the name.
+  cover it, where with the codename a following line could. The gate ends a clause at a comma,
+  a semicolon, a full stop (English or Chinese), a spaced hyphen and at "while", "whereas",
+  "but". A rewritten sentence that denies keeps the denial in the clause of the name.
 - **Sentences.** The new sentence is written from a read of the whole page or function, not by
   substitution: the subject is chosen from §1 by what the sentence is about (who does it, which
   machine, the set of machines). The PR's reviewer checks each rewritten sentence against §1.

@@ -187,7 +187,7 @@ host names joined only by the separators that join host names are one name.
 
 #### Scenario: A table row about node-27 is not a claim about the compute role
 
-- **WHEN** a line starts with `|` and its first cell, emphasis marks and code
+- **WHEN** a line starts with `|` and its first cell, asterisks and code
   font aside, is exactly `node-27`
 - **THEN** the compute-host leg reads each cell of the row on its own, so a name
   of the role in one cell and node-27's own PostgreSQL in a different cell are
