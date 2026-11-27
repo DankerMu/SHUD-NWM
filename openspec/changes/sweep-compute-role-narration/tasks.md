@@ -75,7 +75,7 @@ Each task rewrites the bodies with the glossary, removes the page's literal `ssh
 - [x] 3.4 `stuck-detection.md`, `known-issues-pipeline.md`: the heading §8.5 with its five inbound
   links (in `current-production-ops.md`, `node22-control-plane-manual-recovery.md`,
   `file-provider-refresh.md`, `gateway-and-services.md`, `stuck-detection.md`).
-- [ ] 3.5 `gateway-and-services.md`, `file-provider-refresh.md`, `overview.md`: the pin of
+- [x] 3.5 `gateway-and-services.md`, `file-provider-refresh.md`, `overview.md`: the pin of
   `tests/test_node22_entrypoint_invariant_python_scan.py` on the key-entry row of `overview.md`
   follows its row; its pin on the dated 2026-06-22 line of `gateway-and-services.md` stays.
 - [ ] 3.6 `current-production-ops.md`: the body, with the host statement (`w3` and `w2`, the retired
