@@ -9,7 +9,7 @@
 `activating` 从未 failed，业务化静默停摆 ~11h 零告警。补的不是"某个 unit 的超时"，
 而是"没有任何机制发现业务化不再产出"。`nhms-node27-frontier-alert.timer`
 （每 30 分钟，`scripts/node27_frontier_stall_alert.py`）就是这个机制：它不看
-Slurm、不看 unit 状态，只看**最终落库产物**——node-22 任何故障类都坍缩成同一个
+Slurm、不看 unit 状态，只看**最终落库产物**——计算角色的任何故障类都坍缩成同一个
 可观测量：前沿不再推进。
 
 ### 10.1 判据（progress-based，不看墙上时钟）
@@ -39,7 +39,7 @@ Slurm、不看 unit 状态，只看**最终落库产物**——node-22 任何故
 
 | 邮件 | 触发 | 第一步做什么 |
 |---|---|---|
-| `frontier-stalled` | 连续 ≥ `NHMS_FRONTIER_STALL_HOURS`（默认 4h）无进度。首触发一封，持续未恢复每 `NHMS_FRONTIER_RESEND_HOURS`（默认 6h）重发一封 | 按 §6"如何判断是否卡住"走：先看 node-22 `squeue` + scheduler unit 是否恒 `activating`（本次事故几何），再看 node-27 autopipe 日志。邮件正文自带 per-source 快照与 `last_change_at`，可直接判断是"全线停"还是"某 source 早就没数据" |
+| `frontier-stalled` | 连续 ≥ `NHMS_FRONTIER_STALL_HOURS`（默认 4h）无进度。首触发一封，持续未恢复每 `NHMS_FRONTIER_RESEND_HOURS`（默认 6h）重发一封 | 按 §6"如何判断是否卡住"走：先在计算控制主机（见 [`w2-w3-compute-topology.md`](../w2-w3-compute-topology.md#1-主机与角色) §1）上看 `squeue` + scheduler unit 是否恒 `activating`（本次事故几何），再看 node-27 autopipe 日志。邮件正文自带 per-source 快照与 `last_change_at`，可直接判断是"全线停"还是"某 source 早就没数据" |
 | `frontier-recovered` | 告警期内出现方向性进度，闭环一封 | 只是闭环通知，不需要处置。正文列出触发恢复的 marker 变化，可用于确认真的是新产出而不是人为改库 |
 | `monitoring-degraded` | 告警器**自身**降级，两个细类：`state-corrupt`（状态文件损坏/schema 不符/非 UTF-8 字节/深嵌套 JSON，已按当前观测重建基线）、`observability-unavailable`（观测查询连续失败 ≥ `NHMS_FRONTIER_QUERY_FAIL_TICKS`，默认 2 tick = 1h） | 这类邮件说明"你现在看不见前沿了"，与业务是否正常无关。`observability-unavailable` 先查 DB 可达性与只读角色口令；`state-corrupt` 检查 `NHMS_FRONTIER_STATE_PATH` 所在目录是否被别的东西写坏/磁盘满 |
 

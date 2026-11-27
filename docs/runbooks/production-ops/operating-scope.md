@@ -85,11 +85,11 @@ lifecycle 通道 deactivate。
   跑之前 `env -u NHMS_AUTH_MODE -u AUTH_BACKEND`，只 source
   `infra/env/node27-ingest.env`（`display.env` 里的 `NHMS_AUTH_MODE=production`
   会把 CLI 证据路径判成 `release_blocked`）。deactivate 不做任何继任者提升。
-  model lifecycle 操作从不改变 node-22 的 dispatch set：它不向调度 file plane 发布任何东西
+  model lifecycle 操作从不改变计算角色的 dispatch set：它不向调度 file plane 发布任何东西
   （registry manifest 与 state index 都不发布，#3204 已退役相应 seam），file plane 只由
-  node-22 工具发布（见 [`recalibration-and-archive.md`](recalibration-and-archive.md) 的
+  计算角色的工具发布（见 [`recalibration-and-archive.md`](recalibration-and-archive.md) 的
   succession / 合并 manifest 发布流程），因此本操作无调度侧副作用。
-- 不要动 `core.basin_version`（其 `active_flag` 由 importer 恒置 false，对计算面无权威、
+- 不要动 `core.basin_version`（其 `active_flag` 由 importer 恒置 false，对计算角色无权威、
   展示面只是「默认选中版本」的选择器，全 false 时是 no-op；
   权威归属见 [`docs/spec/03_database_design.md` §5.2 / §5.5 的 `active_flag` 注记](../../spec/03_database_design.md#52-corebasin_version)），
   也不要动已经 inactive 的 `dg_*` 行。一行一操作。
@@ -131,7 +131,7 @@ basinId 查表回填，而 basinId 来自 `has_display_product=true`；river 那
   `list_basins` 的默认分支），含已退役流域**属预期**，API 不改；前端走的是 `has_display_product=true`
   （[`stores/overviewData.ts`](../../../apps/frontend/src/stores/overviewData.ts) 的 `fetchBasins`）。
 - 验收口径是两条，缺一不可：
-  1. `has_display_product=true` 集合 == node-22 `manifest-last.json` 的 `models[].basin_id` 集合；
+  1. `has_display_product=true` 集合 == 计算角色 `manifest-last.json` 的 `models[].basin_id` 集合；
   2. 默认目录 − manifest 的**每一项都没有 active `core.model_instance`**
      （按 `basin_version_id` 数，不按 `model_id`，理由见 §7.2 坑 1）。
 - 机检用 [`scripts/basin_catalog_manifest_audit.py`](../../../scripts/basin_catalog_manifest_audit.py)：
@@ -298,9 +298,10 @@ basins_hys_* 后继」**，所以 #1701 原计划的「换 id + 状态延续」�
 **手工回退办法（#2738）：直接跑发布工具。** succession 工具用不了时（例如 hard stop 之后按 runbook 手工收尾），
 同一件事可以直接用发布工具做；机制、回执与失败结局见 `recalibration-and-archive.md` 的 5.7.1。这时 timer 要
 自己停、自己恢复：apply 期间调度器 timer 应处于停止状态，两份 manifest 不一致时 worker 会拒绝 submit。
+下面这段在计算控制主机上以生产用户执行；是哪台主机、怎么进入见 [`w2-w3-compute-topology.md`](../w2-w3-compute-topology.md#1-主机与角色) §1。
 
 ```bash
-# node-22，frd_muziyao
+# 计算控制主机，生产用户 frd_muziyao
 cd /scratch/frd_muziyao/NWM
 set -a
 . infra/env/compute.scheduler-provider-refresh.env   # 两份 manifest 路径、两个根、prefix、refresh 锁；不含 DB 变量
@@ -498,17 +499,17 @@ stale 最长 600 s、每 45 s 预热回放，所以隔 ≥ 60 s 读两次、直�
 
 §7.2 五步里的第 2、3、5 步（run 翻 `superseded`、加排除名单、deactivate model 行）现在由
 [`scripts/node27_retire_basin.py`](../../../scripts/node27_retire_basin.py) 一条命令按固定顺序做完，
-每步有回执、可续跑。第 1 步仍是 node-22 的 `--kind remove_basin`
+每步有回执、可续跑。第 1 步仍在计算控制主机上用 `--kind remove_basin` 做
 （[`recalibration-and-archive.md`](recalibration-and-archive.md) 5.7.4），第 4 步（移走 Basins 目录）
 **工具不做**，见下文「仍然手工的」。
 
-**顺序：先 node-22，后 node-27，用同一个 `--succession-id`。** 工具在任何步骤之前检查
+**顺序：先计算控制主机，后 node-27，用同一个 `--succession-id`。** 工具在任何步骤之前检查
 `<回执根>/<succession-id>/step-finish.json` 的 `outcome` 是 `completed`、`plan.json` 的 `kind` 是
 `remove_basin`、plan 的 `removes` 里至少有一个 id 是这个 basin version 名下的 `core.model_instance` 行，
 并且 canonical manifest 里**已经没有这个流域的任何行**（本 basin version 的行，以及同一 `basin_id` 其它
 version 的行——排除名单按流域生效，流域还有 version 在调度时不能退；同一流域换网格不是退役，走 §7.2 坑 2
 末尾的 `AUTOPIPE_EXCLUDE_MODEL_IDS`）。任何一项不满足就拒绝，什么都不写。
-node-22 那一半因 hard stop 而手工收尾的 succession 没有 `step-finish.json`：node-27 这几步也照 §7.2 手工做。
+计算角色那一半因 hard stop 而手工收尾的 succession 没有 `step-finish.json`：node-27 这几步也照 §7.2 手工做。
 
 工具的四步：
 
@@ -529,7 +530,7 @@ set -a; . infra/env/node27-ingest.env; set +a
 export DATABASE_URL="$(grep '^DATABASE_URL=' infra/env/node27-ingest.env | cut -d= -f2-)"
 export OBJECT_STORE_ROOT="$(grep '^OBJECT_STORE_ROOT=' infra/env/node27-ingest.env | cut -d= -f2-)"
 
-SUCCESSION_ID=<succession-id>                        # 与 node-22 的 remove_basin 相同
+SUCCESSION_ID=<succession-id>                        # 与计算控制主机上那次 remove_basin 相同
 BASIN_VERSION_ID="<完整的 basin_version_id>"
 RETIRE_ARGS=(
   --succession-id "$SUCCESSION_ID"
@@ -561,7 +562,7 @@ cd /home/nwm/NWM && { setsid nohup env -u NHMS_AUTH_MODE -u AUTH_BACKEND uv run 
   `row_count` / `status_counts` 是真实语句跑出来又回滚的结果（有前置条件被拒时这一步是 `not run`，不向库发写语句）；
   `steps.deactivate.active_model_rows` 每行 `preflight_blockers` 都是 `[]`；`autopipe_unit_now` 是 unit 的一次读数，
   dry-run 不等。
-- **一个 succession 退几个流域**：node-22 的 `remove_basin` 可以一次移除几个流域的 model；node-27 这边**每个
+- **一个 succession 退几个流域**：计算控制主机上的 `remove_basin` 可以一次移除几个流域的 model；node-27 这边**每个
   basin version 跑一次**，同一个 `--succession-id`、不同的 `--basin-version-id`，一个跑完再跑下一个（锁会拒绝并行）。
   各自的回执与备份互不相干，都在自己的 `retire-<basin_version_id>/` 目录里。
 - **exclude 只改一行**：env 文件必须是普通文件（不是符号链接）、权限恰好 0600、属主是当前用户，并且恰好有一行
@@ -626,7 +627,7 @@ CSV 里的行已是 `superseded` 而候选 run 是别的 `run_id` = 提交之后
 
 **手工复活（工具不做）**。顺序与退役相反，都从本次的备份出发，做之前 owner 先裁定：
 
-1. node-22：把流域的 `dg_*` 行重新发布进两份 manifest（重新 provision 后走 5.7.3 的 `add_basin`，或恢复 `remove_basin`
+1. 计算控制主机：把流域的 `dg_*` 行重新发布进两份 manifest（重新 provision 后走 5.7.3 的 `add_basin`，或恢复 `remove_basin`
    那次的 manifest 备份）；Basins 目录从 `Basins-retired/` 移回。
 2. `core.model_instance`：当时 active 的行 = 该 basin version 目录里**每一份** `retire-failed-*.json` 的 `rows_done`
    **加上** `retire-deactivate.json` 的 `rows_done` 的并集——deactivate 中途失败过时，最后那份回执只列续跑那次处理的行，
@@ -687,7 +688,7 @@ cd /home/nwm/NWM && { setsid nohup uv run --no-sync python -m scripts.node27_pur
   `^[A-Za-z0-9_.-]{1,128}$` 的 model，apply 会在它那里失败停下）。
 - **apply 对每个 purgeable model 做什么**（按 `model_id` 排序，每个 model 一个 READ COMMITTED 事务）：`lock_timeout` 10 秒；
   对该 model 每个 `(source_id, grid_id)` 取权重写入方（forcing producer、forcing domain handoff）用的同一把 advisory 锁；
-  在锁内重新判定一次（此前先重读 manifest——node-22 会改写它；已受保护的记为 `skipped`，继续下一个）；
+  在锁内重新判定一次（此前先重读 manifest——计算角色会改写它；已受保护的记为 `skipped`，继续下一个）；
   **备份与删除是同一条语句** `COPY (DELETE ... RETURNING ...) TO STDOUT`，写进 `weights-<model_id>.csv`（0600）；
   该 model 必须一行不剩、CSV 至少一行，fsync 之后才提交。任何数据库错误（含等锁超时）或校验失败都**停下整次运行**：
   之前的 model 保持已删，之后的没动。

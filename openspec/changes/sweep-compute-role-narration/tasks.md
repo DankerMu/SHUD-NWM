@@ -66,7 +66,7 @@ Minimal mergeable slice: atomic - the glossary entry and the instruction lines t
 Each task rewrites the bodies with the glossary, removes the page's literal `ssh` lines
 (`design.md` §3, commands) and its banner pointer, and keeps dated observations with their pins.
 
-- [ ] 3.1 `operating-scope.md`, `frontier-stall-alert.md`, `parse-failure-residency-alert.md` (no
+- [x] 3.1 `operating-scope.md`, `frontier-stall-alert.md`, `parse-failure-residency-alert.md` (no
   `ssh` line, no pointer, no pinned sentence, no heading that carries the codename).
 - [ ] 3.2 `artifacts-and-storage.md`, `recalibration-and-archive.md`: the heading §5.8 with its inbound
   link in `current-production-ops.md`.
