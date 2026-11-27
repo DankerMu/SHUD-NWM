@@ -15,7 +15,7 @@ evidence exactly as the glossary defines them.
 `docs/runbooks/display-readonly-live-mvt.md` is a runbook freshness anchor for
 live display MVT context. Its 2026-06-08 receipt is historical evidence: the
 current authority for physical topology is node-27 active PostgreSQL on local
-`:55432`, not the historical node-22 `:55433` database referenced in the old
+`:55432`, not the `:55433` database of the retired node-22 host referenced in the old
 receipt text.
 
 ## Entry Points And Route Authority

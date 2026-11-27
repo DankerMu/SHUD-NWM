@@ -49,10 +49,10 @@ Do not add new lanes here; a new validator needs its own issue and owner.
 - Node-27 is the live DB/display/frontend oracle for readonly and display
   receipts. Its display_readonly validation must prove denied-write behavior and
   must not create retry/cancel/Slurm/control-plane receipts.
-- Node-22 remains the compute/Slurm oracle only for sbatch, Slurm gateway, SHUD
-  runtime, or scheduling behavior. Do not route node-27 acceptance through
-  node-22-only evidence unless the runbook names that cross-plane source
-  explicitly.
+- The compute role remains the compute/Slurm oracle only for sbatch, Slurm gateway,
+  SHUD runtime, or scheduling behavior. Do not route node-27 acceptance through
+  evidence that only the compute role produces unless the runbook names that
+  cross-plane source explicitly.
 - A PASS final status must reflect the governed status ordering and source
   scope. Missing, stale, unsafe, incomplete, or non-authoritative proof is a
   blocker; evidence that proves an unsafe condition is a finding.

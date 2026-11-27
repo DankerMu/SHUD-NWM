@@ -44,8 +44,9 @@ assignment without checking root `AGENTS.md` and `docs/governance/ROLE_BOUNDARY.
   in facades or callers to make a single test pass.
 - Mutating DB rows, Slurm jobs, published artifacts, runtime roots, evidence
   files, or NFS paths must stay behind the existing role, path, and transaction
-  guards. Node-22 is the compute/Slurm oracle and must not connect to the
-  historical local PostgreSQL `:55433`; node-27 is the live DB/display oracle.
+  guards. The compute role is the compute/Slurm oracle and connects to no live
+  database; the PostgreSQL `:55433` of the retired node-22 host is archived and
+  must not be connected to; node-27 is the live DB/display oracle.
 - Preserve bounded evidence writes, approved-root checks, no-clobber behavior,
   and current-run binding when touching scheduler evidence or chain publication
   paths. A failure path should produce a stable domain blocker or exception, not

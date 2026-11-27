@@ -46,7 +46,7 @@ issue/runbook explicitly says that live evidence was produced.
   gain Slurm submission/cancel/retry capability, compute roots, writer database
   posture, or control mutations by configuration.
 - `compute_control` may expose control-plane capability through the full API
-  only under the configured role contract. Node-22 is currently the compute/Slurm
+  only under the configured role contract. The compute role is the compute/Slurm
   oracle and must not be treated as the active database writer.
 - Protected mutation routes must flow through the existing auth policy helpers
   and middleware in `apps/api/main.py` / `apps/api/auth.py`; do not add a route

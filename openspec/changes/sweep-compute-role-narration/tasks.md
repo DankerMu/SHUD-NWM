@@ -49,13 +49,13 @@ Minimal mergeable slice: atomic - a term without its synthetic cases and the rea
 
 ## 2. Terms
 
-- [ ] 2.1 `openspec/glossary.md`: the seven entries of `design.md` §1, the retired spellings, and the
+- [x] 2.1 `openspec/glossary.md`: the seven entries of `design.md` §1, the retired spellings, and the
   difference from the runtime role `compute_control`; its existing line that uses the codename as a
   place.
-- [ ] 2.2 `instructions/agents/shared.md` uses the terms consistently; `CLAUDE.md` / `AGENTS.md`
+- [x] 2.2 `instructions/agents/shared.md` uses the terms consistently; `CLAUDE.md` / `AGENTS.md`
   regenerated (byte-exact test); the retired-host line keeps the terms its test requires; the host
   statement (`w3` and `w2`, the retired host, the link to the topology runbook) stays.
-- [ ] 2.3 The scoped `AGENTS.md` files that narrate where compute runs (`appendix-inventory.md` §8,
+- [x] 2.3 The scoped `AGENTS.md` files that narrate where compute runs (`appendix-inventory.md` §8,
   slice 2).
 
 Suggested fixture level: none - documentation and generated instruction files; no runtime behaviour.
