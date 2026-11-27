@@ -462,8 +462,8 @@ auto-retry 拒绝分支上的 `FileJournalRetryService.mark_permanently_failed`
 4. 重跑上面的 census，确认该 `job_id` 的 `reconcile_abort_trigger` 已消失。
 5. `systemctl --user start nhms-compute-scheduler.timer`。
 
-**segment 里的那一份留着**：journal segment 是 append-only 历史。anchor 与
-direct 文件删除之后，这一行不再喂给 reconcile scan、也无法被 transition，但它会
+**segment 里的那一份留着**：journal segment 是 append-only 历史，运维不要手工创建、改名或删除
+segment 文件。anchor 与 direct 文件删除之后，这一行不再喂给 reconcile scan、也无法被 transition，但它会
 继续出现在 census 的 `journal_replay` surface 上，`reconcile_abort_trigger` 为
 `false`。这是可接受的终态；为退休它而重写 segment 不在范围内。
 

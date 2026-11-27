@@ -26,8 +26,6 @@
 段为准；[`two-node-deployment-overview.md`](two-node-deployment-overview.md)
 保留为两节点 role contract 和设计意图背景，不作为当前 host 分配的操作手册。
 
-历史 bring-up 记录见 [`qhh-22-business-bringup.md`](qhh-22-business-bringup.md)。
-
 ## 分册索引
 
 本页自 #1103 起是索引 landing page：每一节的正文完整保留在
@@ -359,8 +357,6 @@
   display bring-up and live checks.
 - [`display-readonly-live-mvt.md`](display-readonly-live-mvt.md)：display API
   restart and live MVT evidence.
-- [`qhh-22-business-bringup.md`](qhh-22-business-bringup.md)：historical bring-up
-  and early incident notes; not current topology.
 
 ## 13. 解析失败驻留告警（parse-failure residency alert）
 

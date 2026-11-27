@@ -452,8 +452,7 @@ rollback fence（或 fence 读不出），本趟在挑候选前拒绝提交。
 
 fence 是 `prepare-file-journal-rollback` **有意**写下的暂停，但 runbook 规定 fence 存在
 期间调度器 timer/service 必须**停着**、前滚成功消费 fence 之后才恢复 timer
-（[`../qhh-22-business-bringup.md`](../qhh-22-business-bringup.md) 与
-[`service-bringup.md`](service-bringup.md) 的 rollback / roll-forward 段落）。timer 停着时
+（[`service-bringup.md`](service-bringup.md) §3.1.3 的 rollback / roll-forward 段落）。timer 停着时
 探针先报第 3 档 `timer_stopped`，所以**本档只在 timer 已恢复而 fence 仍在时出现**：要么
 前滚还没做就恢复了 timer，要么前滚失败、fence 没被消费。不是可以静默的预期状态。
 

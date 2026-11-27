@@ -1,35 +1,41 @@
-"""QHH current invocation authority (live entrypoint headers).
+"""QHH current invocation authority (live entrypoints).
 
-The two live QHH entrypoint headers must point current invocation guidance only
-at the diagnostic README Run Boundary, never at the historical bring-up baseline
-(``docs/runbooks/qhh-22-business-bringup.md`` §3). The historical runbook is
-retained evidence; routing an operator there as "the documented bring-up
-invocation" lets the active-root
-``uv run python scripts/run_qhh_continuous.py`` recipe escape the detached
-exact-interpreter boundary (node-22 stays on Python 3.12.7 long-term by the
-#1831 decision, so that boundary is permanent).
+The QHH diagnostic chain runs only from a detached diagnostic worktree with that
+worktree's exact interpreter; the authority for how to invoke it is the Run
+Boundary in ``scripts/diagnostic/qhh/README.md``. The two live QHH entrypoint
+headers must carry their exact pointer to that README, the entrypoints must not
+use the stale "documented bring-up invocation" phrase, and they must name no
+runbook that does not exist: every repository-relative ``*.md`` path an
+entrypoint cites (header, comments, operator-facing BLOCKED messages) has to
+resolve under the repository root, so a pointer to a deleted runbook turns red.
 
-This dedicated file keeps ``tests/test_qhh_scripts_static.py`` under the
-repository 1000-line threshold while preserving the authority seam (one green
-contract test, four in-memory red mutations, and non-degenerate mutant checks).
+This dedicated file holds the authority seam apart from
+``tests/test_qhh_scripts_static.py``: one green contract test (with a vacuity
+guard on the path extractor), six in-memory red mutations each pinned to the
+assertion it targets, and a non-degenerate mutant check.
 """
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
+_CYCLE = "scripts/run_qhh_cycle.sh"
+_CONTINUOUS = "scripts/run_qhh_continuous.py"
+_README = "scripts/diagnostic/qhh/README.md"
+# A made-up runbook path the mutants cite; it must never exist.
+_MISSING_RUNBOOK = "docs/runbooks/qhh-retired-bringup-example.md"
+
 
 def _qhh_live_entrypoint_texts() -> dict[str, str]:
-    """Current-invocation text of the two live QHH entrypoints."""
+    """Full text of the two live QHH entrypoints."""
     return {
-        "scripts/run_qhh_cycle.sh": (REPO_ROOT / "scripts/run_qhh_cycle.sh").read_text(encoding="utf-8"),
-        "scripts/run_qhh_continuous.py": (
-            REPO_ROOT / "scripts/run_qhh_continuous.py"
-        ).read_text(encoding="utf-8"),
+        _CYCLE: (REPO_ROOT / _CYCLE).read_text(encoding="utf-8"),
+        _CONTINUOUS: (REPO_ROOT / _CONTINUOUS).read_text(encoding="utf-8"),
     }
 
 
@@ -38,99 +44,124 @@ def _qhh_live_entrypoint_texts() -> dict[str, str]:
 # README mention elsewhere cannot satisfy the seam, and deleting the authority
 # sentence is a genuine red.
 def _qhh_required_authority(relative: str) -> str:
-    if relative == "scripts/run_qhh_cycle.sh":
-        return "# invocation authority is scripts/diagnostic/qhh/README.md (Run Boundary); the"
-    if relative == "scripts/run_qhh_continuous.py":
-        return "Current invocation authority is\n``scripts/diagnostic/qhh/README.md`` (Run Boundary);"
+    if relative == _CYCLE:
+        return "Current\n# invocation authority is scripts/diagnostic/qhh/README.md (Run Boundary)."
+    if relative == _CONTINUOUS:
+        return "Current invocation authority is\n``scripts/diagnostic/qhh/README.md`` (Run Boundary)."
     raise AssertionError(f"unknown live QHH entrypoint: {relative}")
 
 
-# Historical-baseline and stale invocation language that must not be used as the
-# current invocation pointer in the live headers.
-_HISTORICAL_BASELINE = "qhh-22-business-bringup.md"
-_HISTORICAL_SECTION = "§3"
+# Stale invocation language that must never appear in a live entrypoint.
 _STALE_INVOCATION_PHRASE = "documented bring-up invocation"
-# Disclaimer that lets a live header name the historical baseline as retained
-# evidence without turning it into current invocation guidance.
-_RETAINED_EVIDENCE_DISCLAIMER = "retained evidence only"
+
+# A repository-relative ``*.md`` path: plain in ``# `` shell comments and string
+# literals, or inside double backticks in the Python docstring (backticks and
+# quotes are not path characters).
+_MD_PATH_RE = re.compile(r"(?<![\w./-])((?:[\w.-]+/)*[\w-][\w.-]*\.md)(?![\w/-])")
 
 
-def _assert_qhh_current_authority(text: str, *, required_authority: str) -> None:
-    """The live header must carry its exact current-authority pointer to the
-    diagnostic README Run Boundary and must not use historical language as the
-    current invocation. The stale "documented bring-up invocation" phrase is
-    rejected unconditionally. ``§3`` and the baseline filename may appear only
-    inside a "retained evidence only" disclaimer (an operator pointed at ``§3``
-    without that disclaimer lands on the active-root ``uv run`` recipe).
-    """
+def _qhh_cited_md_paths(text: str) -> list[str]:
+    """Every repository-relative ``*.md`` path the whole entrypoint text cites, in order."""
+    return _MD_PATH_RE.findall(text)
+
+
+def _assert_qhh_current_authority(
+    text: str,
+    *,
+    required_authority: str,
+    repo_root: Path = REPO_ROOT,
+) -> None:
+    """A live QHH entrypoint cites no runbook that does not exist (anywhere in its
+    text), its header carries the exact current-authority pointer to the README
+    Run Boundary, and it never uses the stale "documented bring-up invocation"
+    phrase."""
+    missing = [path for path in _qhh_cited_md_paths(text) if not (repo_root / path).is_file()]
+    assert not missing, f"live QHH entrypoint cites a runbook that does not exist: {missing}"
     assert required_authority in text, (
         "live QHH entrypoint must point current invocation authority at the "
         "diagnostic README Run Boundary"
     )
     assert _STALE_INVOCATION_PHRASE not in text, (
-        "live QHH entrypoint must not cite the stale 'documented bring-up "
-        "invocation' phrase; the historical bring-up baseline is retained "
-        "evidence only"
+        "live QHH entrypoint must not cite the stale 'documented bring-up invocation' phrase"
     )
-    if _HISTORICAL_SECTION in text or _HISTORICAL_BASELINE in text:
-        assert _RETAINED_EVIDENCE_DISCLAIMER in text, (
-            "live QHH entrypoint may name the historical baseline (§3) only while "
-            "disclaiming it as retained evidence, never as current invocation "
-            "guidance"
-        )
 
 
 def test_qhh_live_entrypoints_cite_diagnostic_readme_as_current_authority() -> None:
     for relative, text in _qhh_live_entrypoint_texts().items():
+        # Vacuity guard: an extractor that finds nothing would pass the
+        # existence check trivially.
+        assert _README in _qhh_cited_md_paths(text), (
+            f"{relative}: path extractor must find the {_README} citation"
+        )
         _assert_qhh_current_authority(text, required_authority=_qhh_required_authority(relative))
         assert "Run Boundary" in text, f"{relative}: must name the README Run Boundary"
 
 
+_EXISTENCE_RED = (
+    r"live QHH entrypoint cites a runbook that does not exist: "
+    r"\['docs/runbooks/qhh-retired-bringup-example\.md'\]"
+)
+_AUTHORITY_RED = r"must point current invocation authority at the diagnostic README Run Boundary"
+_STALE_RED = r"must not cite the stale 'documented bring-up invocation' phrase"
+
+
 def _qhh_authority_mutants() -> dict[str, str]:
     """In-memory regressions against the current-authority seam (parent untouched);
-    each must turn the validator red."""
-    cycle = (REPO_ROOT / "scripts/run_qhh_cycle.sh").read_text(encoding="utf-8")
-    continuous = (REPO_ROOT / "scripts/run_qhh_continuous.py").read_text(encoding="utf-8")
-    cycle_authority = _qhh_required_authority("scripts/run_qhh_cycle.sh")
-    continuous_authority = _qhh_required_authority("scripts/run_qhh_continuous.py")
+    each must turn the validator red on the assertion it targets."""
+    texts = _qhh_live_entrypoint_texts()
+    cycle, continuous = texts[_CYCLE], texts[_CONTINUOUS]
+    cycle_authority = _qhh_required_authority(_CYCLE)
+    continuous_authority = _qhh_required_authority(_CONTINUOUS)
     return {
-        "cycle_restores_historical_pointer": cycle.replace(
+        "cycle_restores_pointer_to_deleted_runbook": cycle.replace(
             cycle_authority,
-            "# See docs/runbooks/qhh-22-business-bringup.md §3 for the documented bring-up invocation.",
+            f"Current\n# invocation authority is {_MISSING_RUNBOOK} (Run Boundary).",
         ),
-        "continuous_restores_historical_pointer": continuous.replace(
+        "continuous_restores_pointer_to_deleted_runbook": continuous.replace(
             continuous_authority,
-            "See\n``docs/runbooks/qhh-22-business-bringup.md`` §3 for the documented bring-up invocation.",
+            f"Current invocation authority is\n``{_MISSING_RUNBOOK}`` (Run Boundary).",
         ),
         "cycle_deletes_current_pointer": cycle.replace(cycle_authority, ""),
         "continuous_deletes_current_pointer": continuous.replace(continuous_authority, ""),
+        "cycle_cites_stale_phrase": cycle.replace(
+            cycle_authority,
+            f"{cycle_authority}\n# See the README for the {_STALE_INVOCATION_PHRASE}.",
+        ),
+        "continuous_cites_stale_phrase": continuous.replace(
+            continuous_authority,
+            f"{continuous_authority}\nSee the README for the {_STALE_INVOCATION_PHRASE}.",
+        ),
     }
 
 
 @pytest.mark.parametrize(
-    "mutation",
+    ("mutation", "expected_red"),
     [
-        "cycle_restores_historical_pointer",
-        "continuous_restores_historical_pointer",
-        "cycle_deletes_current_pointer",
-        "continuous_deletes_current_pointer",
+        pytest.param(mutation, expected_red, id=mutation)
+        for mutation, expected_red in (
+            ("cycle_restores_pointer_to_deleted_runbook", _EXISTENCE_RED),
+            ("continuous_restores_pointer_to_deleted_runbook", _EXISTENCE_RED),
+            ("cycle_deletes_current_pointer", _AUTHORITY_RED),
+            ("continuous_deletes_current_pointer", _AUTHORITY_RED),
+            ("cycle_cites_stale_phrase", _STALE_RED),
+            ("continuous_cites_stale_phrase", _STALE_RED),
+        )
     ],
 )
-def test_qhh_live_entrypoint_authority_mutations_are_red(mutation: str) -> None:
-    """Restoring the historical §3 pointer or deleting the current README pointer
-    must turn the current-authority seam red."""
+def test_qhh_live_entrypoint_authority_mutations_are_red(mutation: str, expected_red: str) -> None:
+    """Pointing an entrypoint at a deleted runbook, deleting the current README
+    pointer, or restoring the stale phrase turns the seam red on its own check."""
     source = _qhh_authority_mutants()[mutation]
-    relative = "scripts/run_qhh_cycle.sh" if mutation.startswith("cycle_") else "scripts/run_qhh_continuous.py"
-    with pytest.raises(AssertionError):
+    relative = _CYCLE if mutation.startswith("cycle_") else _CONTINUOUS
+    with pytest.raises(AssertionError, match=expected_red):
         _assert_qhh_current_authority(source, required_authority=_qhh_required_authority(relative))
 
 
 def test_qhh_authority_mutants_cover_each_mutation() -> None:
-    """The authority battery is non-degenerate: every mutant differs from its source."""
-    cycle = (REPO_ROOT / "scripts/run_qhh_cycle.sh").read_text(encoding="utf-8")
-    continuous = (REPO_ROOT / "scripts/run_qhh_continuous.py").read_text(encoding="utf-8")
-    mutants = _qhh_authority_mutants()
-    assert mutants["cycle_restores_historical_pointer"] != cycle
-    assert mutants["cycle_deletes_current_pointer"] != cycle
-    assert mutants["continuous_restores_historical_pointer"] != continuous
-    assert mutants["continuous_deletes_current_pointer"] != continuous
+    """The authority battery is non-degenerate: every mutant differs from its
+    source, and the made-up runbook the mutants cite does not exist."""
+    texts = _qhh_live_entrypoint_texts()
+    for mutation, mutant in _qhh_authority_mutants().items():
+        relative = _CYCLE if mutation.startswith("cycle_") else _CONTINUOUS
+        assert mutant != texts[relative], f"{mutation}: mutant must differ from {relative}"
+    assert not (REPO_ROOT / _MISSING_RUNBOOK).exists()

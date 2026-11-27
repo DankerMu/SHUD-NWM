@@ -27,9 +27,7 @@ interpreter does not exist. Bare ``uv run`` never launches this chain.
 Minimal PASS condition: process exits 0 and the printed pass summary contains no failed
 candidate (``run_pass`` -> ``_has_failed`` is false), i.e. each discovered cycle reaches
 the terminal ``parsed``/``published`` status. Current invocation authority is
-``scripts/diagnostic/qhh/README.md`` (Run Boundary); the historical bring-up baseline
-(``docs/runbooks/qhh-22-business-bringup.md`` §3) is retained evidence only and is not
-current invocation guidance.
+``scripts/diagnostic/qhh/README.md`` (Run Boundary).
 """
 
 from __future__ import annotations
