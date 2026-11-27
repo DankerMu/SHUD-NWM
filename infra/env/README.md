@@ -54,6 +54,11 @@ boundary validation on node-27 uses it.
   them the validator discovers the latest display-ready run of the source itself
   (#2484).
 - Without a real readonly database URL the lane reports `BLOCKED`, never `PASS`.
+- On node-27 load the display environment first (`set -a; . infra/env/display.env; set +a`),
+  as step C2 of `docs/runbooks/node-27-bringup-checklist.md` says: without
+  `NHMS_PUBLISHED_ARTIFACT_ROOT` the job-log check reports `BLOCKED`.
+- The merge accepts a per-source run id of the form `<merged run id>-db-<source>`, used
+  below, or `<merged run id>-<source>`, in either letter case.
 
 ```bash
 : "${EVIDENCE_ROOT:?export EVIDENCE_ROOT first}"
