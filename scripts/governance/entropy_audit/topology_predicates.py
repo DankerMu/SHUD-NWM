@@ -25,7 +25,8 @@ _TOPOLOGY_COMPUTE_HOST = (
     r"(?:(?<![A-Za-z0-9_.-])|(?<=(?<![A-Za-z0-9_.-])nwm-))w[23](?![A-Za-z0-9_])(?![.-][A-Za-z0-9])"
 )
 # An English role term: any letter case, one space or one hyphen at each joint, with
-# the host-name boundaries, so an identifier, a dotted name or a path is not a term.
+# the host-name boundaries, so an identifier, a dotted name or a hyphenated longer
+# name is not a term; a path segment that is exactly a term is one.
 # A Chinese role term is matched as written: Chinese has no token boundary.
 _TOPOLOGY_COMPUTE_ROLE_TERM = (
     r"(?<![A-Za-z0-9_.-])(?i:compute[ -](?:role|control[ -]hosts?|hosts?|nodes?))(?![A-Za-z0-9_])(?![.-][A-Za-z0-9])"
@@ -105,27 +106,26 @@ def _topology_line_has_compute_host_local_postgres_drift(line: str) -> bool:
 def _topology_compute_host_leg_parts(marked: str) -> tuple[str, ...]:
     """The parts of a marked line that the compute-host leg reads on their own.
 
-    A table row whose first cell names node-27 and no name of the compute role is a
-    row about node-27: a name of the role in one cell and node-27's own PostgreSQL
-    in another are not one claim, so each cell is read alone. Any other line is
-    read whole.
+    A table row whose first cell, emphasis marks and code font aside, is exactly
+    node-27 is a row about node-27: a name of the role in one cell and node-27's own
+    PostgreSQL in another are not one claim, so each cell is read alone. A cell ends
+    at a pipe that is not escaped. Any other line is read whole, also a row whose
+    first cell is a longer text that contains node-27.
     """
     if not marked.lstrip().startswith("|"):
         return (marked,)
-    cells = marked.strip().split("|")[1:]
-    first_cell = cells[0].lower() if cells else ""
-    if (
-        "node-27" in first_cell
-        and _TOPOLOGY_COMPUTE_HOST_MARKER not in first_cell
-        and not _topology_mentions_node22(first_cell)
-    ):
+    cells = re.split(r"(?<!\\)\|", marked.strip())[1:]
+    if cells and cells[0].strip(" \t*`").lower() == "node-27":
         return tuple(cells)
     return (marked,)
 
 
 def _topology_line_is_flagged_scenario_title(line: str) -> bool:
-    """A scenario title that says what the gate flags is a statement about the gate, not a claim."""
-    return bool(re.match(r"\s*#### Scenario:(?i:.*\bflagged\b)", line))
+    """A scenario title saying that something is or are flagged is a statement about the gate.
+
+    A title that says something is not flagged is an ordinary line.
+    """
+    return bool(re.match(r"\s*#### Scenario:(?i:.*\b(?:is|are)\s+flagged\b)", line))
 
 
 def _topology_normalized(text: str) -> str:

@@ -1158,10 +1158,13 @@ D4_TABLE_ROWS_THAT_ARE_FINDINGS = (
     "| node-27 | reads artifacts; the {h} local PostgreSQL | x |",
     "| notes | the {h} | local PostgreSQL |",
     "| node-27 / {h} | x | local PostgreSQL |",
+    "| node-27-bringup-checklist.md | {h} | local PostgreSQL |",
+    "| not node-27 | {h} | local PostgreSQL |",
+    r"| node-27 | {h} \| local PostgreSQL |",
 )
 D5_FLAGGED_TITLES_IN_OTHER_LETTER_CASE = (
     "#### Scenario: A database-writer claim about a compute role is Flagged",
-    "#### Scenario: A database-writer claim about a compute role is FLAGGED",
+    "#### Scenario: A database-writer claim about a compute role IS FLAGGED",
 )
 D5_FLAGGED_TITLES = (
     *(
@@ -1218,6 +1221,9 @@ def test_topology_rewrite_compute_hosts_rewrites_a_sentence_that_names_a_role_te
         "compute_node_count",
         "compute  role",
         "computing role",
+        "compute hostname",
+        "xcompute role",
+        "compute-host_x",
     ],
 )
 def test_topology_rewrite_compute_hosts_leaves_role_term_lookalikes_unchanged(line: str) -> None:
@@ -1339,6 +1345,14 @@ def test_entropy_audit_topology_guardrails_flag_role_term_local_postgres(
             "| node-27 | reads the {h} artifacts | local PostgreSQL :55432 |",
             TERMS_AND_HOSTS,
         ),
+        *_with_host(
+            "| **node-27** | reads the {h} artifacts | local PostgreSQL :55432 |",
+            TERMS_AND_HOSTS,
+        ),
+        *_with_host(
+            "| `node-27` | reads the {h} artifacts | local PostgreSQL :55432 |",
+            TERMS_AND_HOSTS,
+        ),
         "compute_control hosts its local PostgreSQL.",
         "compute-role-x hosts its local PostgreSQL.",
         "scripts/compute_node/db.py uses a local PostgreSQL.",
@@ -1382,6 +1396,17 @@ def test_entropy_audit_topology_guardrails_flagged_scenario_title_is_not_a_claim
         *(
             (row, DB_WRITER_CHECK)
             for row in _with_host("#### Scenario: The {h} is the active database writer", COMPUTE_ROLE_TERMS)
+        ),
+        *(
+            (row, DB_WRITER_CHECK)
+            for row in _with_host(
+                "#### Scenario: {h} writing the active primary database is not flagged",
+                ("node-22", *TERMS_AND_HOSTS),
+            )
+        ),
+        *(
+            (row, LOCAL_POSTGRES_CHECK)
+            for row in _with_host("#### Scenario: {h} local PostgreSQL is not flagged when archived", TERMS_AND_HOSTS)
         ),
     ],
 )

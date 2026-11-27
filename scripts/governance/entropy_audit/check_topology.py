@@ -11,8 +11,8 @@ wrappers over it).
 compute role by codename, by host name and by role term. The database-writer
 family reads the lines with host names and role terms rewritten to the codename;
 the local-PostgreSQL check adds a compute-host leg. The retired-host legs and the
-display-env check read the original lines. A scenario title that says what is
-flagged opens neither a database-writer claim nor a compute-host-leg finding."""
+display-env check read the original lines. A scenario title saying that something
+is or are flagged opens neither a database-writer claim nor a compute-host-leg finding."""
 
 from __future__ import annotations
 
@@ -67,8 +67,9 @@ def _check_production_topology_drift(root: Path) -> list[FindingSpec]:
         emitted_display_contexts: set[str] = set()
         for index, line in enumerate(lines, start=1):
             writer_line = writer_lines[index - 1]
-            # A scenario title that says what is flagged describes the gate; it opens no
-            # claim under any name of the role, and it excuses no neighbouring line.
+            # A scenario title saying that something is or are flagged describes the gate; it opens no
+            # claim under any name of the role. The rule excuses no other line; the context
+            # rules read a claim's window as before.
             is_flagged_title = _topology_line_is_flagged_scenario_title(line)
             if not is_flagged_title and _topology_line_may_start_node22_db_writer_claim(writer_line):
                 writer_context = _topology_node22_writer_claim_context(writer_lines, index)
