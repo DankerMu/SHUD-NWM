@@ -1,11 +1,8 @@
 **分册：业务流程与产物位置**
 
-> **计算角色主机说明**：本页的 "node-22" 指计算角色，现由 w3 / w2 承载；字面的
-> `ssh … 210.77.77.22` 命令一律登录 w3 后执行，**不得**在原主机上执行。详见
-> [`current-production-ops.md`](../current-production-ops.md) 顶部横幅。
-
 本页是当前生产值守手册的 §4、§5 开篇、§5.1-§5.6 分册（#1103 拆分，正文逐字保留）。
 索引与全部分册入口见 [`../current-production-ops.md`](../current-production-ops.md)。
+本页里在计算控制主机上执行的步骤都以生产用户执行；是哪台主机、怎么进入见 [`w2-w3-compute-topology.md`](../w2-w3-compute-topology.md#1-主机与角色) §1。
 
 ## 4. 业务流程
 
@@ -14,7 +11,7 @@
 ```text
 node-27 download timer
   -> downloads GFS/IFS raw cycles to shared NFS object-store
-node-22 DB-free scheduler timer / Slurm
+compute role DB-free scheduler timer / Slurm
   -> consumes node-27 raw manifests from shared NFS
   -> submits per-basin GFS/IFS convert/forcing/forecast/state-save-QC work
      concurrently through Slurm Gateway/sbatch
@@ -198,7 +195,7 @@ database restore needs no action on it (rows that are missing or differ are re-i
 `--sources`) reads and writes the same file: hold the timer's lock (`flock /tmp/autopipe.cron.lock …`) for such
 a run. A narrowed hand run does not touch it.
 
-node-22 compute workspace/log roots remain compute-side operational paths:
+Workspace/log roots on the compute hosts remain compute-side operational paths:
 
 ```text
 /scratch/frd_muziyao/NWM
@@ -207,7 +204,7 @@ node-22 compute workspace/log roots remain compute-side operational paths:
 /scratch/frd_muziyao/nhms-prod/runtime/
 ```
 
-Use node-22 paths for Slurm/job runtime troubleshooting. Use node-27 paths for
+Use compute host paths for Slurm/job runtime troubleshooting. Use node-27 paths for
 DB/display/ingest troubleshooting.
 
 ### 5.3 Object-store mirror
@@ -215,7 +212,7 @@ DB/display/ingest troubleshooting.
 Complete forcing packages and run outputs live under shared object-store:
 
 ```text
-node-22 view: /ghdc/data/nwm/object-store
+compute host view: /ghdc/data/nwm/object-store
 node-27 view: /home/ghdc/nwm/object-store
 
 forcing/<source>/<YYYYMMDDHH>/<basin_version_id>/<model_id>/
@@ -225,11 +222,10 @@ runs/<run_id>/
 Check current visibility from both hosts:
 
 ```bash
-# node-22
-ssh -p 32099 frd_muziyao@210.77.77.22 \
-  'stat -c "%n %A %U:%G" /ghdc/data/nwm/object-store &&
-   find /ghdc/data/nwm/object-store/runs -maxdepth 1 -type d \
-     -printf "%TY-%Tm-%Td %TH:%TM %p\n" | sort | tail -20'
+# 计算控制主机，生产用户
+stat -c "%n %A %U:%G" /ghdc/data/nwm/object-store &&
+find /ghdc/data/nwm/object-store/runs -maxdepth 1 -type d \
+  -printf "%TY-%Tm-%Td %TH:%TM %p\n" | sort | tail -20
 
 # node-27
 ssh -p 32099 nwm@210.77.77.27 \
@@ -240,13 +236,13 @@ ssh -p 32099 nwm@210.77.77.27 \
 
 #### Copyback batch mutex 与目录可穿越性（#2035）
 
-写侧（node-22）与读侧（node-27）是不同 uid、同一份 NFS，因此这个 mirror 有两条硬规则：
+写侧（计算角色）与读侧（node-27）是不同 uid、同一份 NFS，因此这个 mirror 有两条硬规则：
 
 1. **互斥**。所有会在 `NHMS_OBJECT_STORE_COPYBACK_ROOT` 下 promote 目录树的写者
    （publisher 的 q_down / run-products / canonical-precip 三条 lane、orchestrator 的
    run-tree copyback、以及两个 backfill CLI）都先取
    `$NHMS_OBJECT_STORE_COPYBACK_ROOT/.nhms-copyback-batch.lock` 上的排他 `flock`，
-   一直持有到本 batch 的 commit 或 rollback 返回。删侧同样持这把锁：node-22 retention
+   一直持有到本 batch 的 commit 或 rollback 返回。删侧同样持这把锁：计算角色的 retention
    在 copyback root 上逐棵删树（#2238），node-27 raw retention 逐棵删
    `canonical/<S>/<cycle>`（#2252，用 POSIX 记录锁，见下文「node-27 canonical 删除持锁」）。路径固定、**没有环境变量覆盖**：
    放 `/tmp` 会被 systemd `PrivateTmp=true` / Slurm `job_container/tmpfs` 的私有
@@ -258,7 +254,9 @@ ssh -p 32099 nwm@210.77.77.27 \
      现网所有写者恰好是同一个 uid，外来 uid 又在文件创建之前就被拒，两者才重合。
    - 持有者被 kill 时**本机**内核会释放 flock，所以「锁文件存在」≠「锁被持有」。
      但生产 copyback root 不在本机盘上：node-22 的 `/ghdc/data/nwm/object-store`
-     是 `ghdc:/home/ghdc` 的 **NFSv4.2** 挂载（2026-09-10 实测）。**进程**死照样
+     是 `ghdc:/home/ghdc` 的 **NFSv4.2** 挂载（2026-09-10 实测）。计算主机上同样是 node-27
+     `/home/ghdc` 的 NFSv4.2 挂载（2026-11-23 在 `w3` 实测，见
+     [receipt](../receipts/2026-11-23-lock-interop-node27-w3.md)）。**进程**死照样
      立刻释放；**整台主机**死不会——锁由服务端一直持有到该 client 的租约过期。
    - 等待上限由 `NHMS_OBJECT_STORE_COPYBACK_LOCK_TIMEOUT_SECONDS` 控制，
      **默认 900 秒**（一次 acquisition ≈ 2.2 GB / 62 MB/s ≈ 36 s；取锁次数与
@@ -268,13 +266,14 @@ ssh -p 32099 nwm@210.77.77.27 \
      超时抛各 lane 自己的错误类型，canonical mirror 记一条 `failed` 的
      `canonical_precip_mirror` receipt 后 cycle 继续，**绝不降级成无锁 promote**。
      空值取默认，非数字/非正数是硬性配置拒绝。
-   - 所有写者必须同 uid（node-22 上是 `frd_muziyao`）；别的账号会 fail closed。
+   - 所有写者必须同 uid（计算主机上是 `frd_muziyao`）；别的账号会 fail closed。
      属主断言同时比对**当前 euid** 与 **copyback root 的属主**，并且外来 uid 在
      `O_CREAT` 之前就被拒——两个方向都堵死，锁文件不会被别的账号「毒化」。
      跨主机的互斥靠**锁原语**成立（2026-09-14 实测，ADR 0008）：node-22 NFS client 的
      `flock` 与 node-27（NFS server 本地文件系统）的 POSIX 记录锁双向互斥；node-27 本地
-     `flock` 与 node-22 `flock` **不**互斥。因此 node-27 上任何取这把锁的进程都必须用
-     `primitive="posix"`，node-22 写者保持默认 `flock`。
+     `flock` 与 node-22 `flock` **不**互斥。2026-11-23 在 `w3` 上重测，结论相同（同一 receipt）。
+     因此 node-27 上任何取这把锁的进程都必须用
+     `primitive="posix"`，计算角色的写者保持默认 `flock`。
    - **`NHMS_OBJECT_STORE_COPYBACK_ROOT` 必须由那个唯一的写者 uid 属主持有。**
      条件是 **uid 相等**，不是「写者能写这个 root」：一个属主是别的账号、靠组位开放写
      的 root（例如容器 uid 在补充组里）会被**拒绝，而不是共享**——锁文件的属主锚定在
@@ -307,9 +306,9 @@ ssh -p 32099 nwm@210.77.77.27 \
        属主的凭据。若哪天 `ls -ld` 在这条链上看到 `t`，就退回 `sudo chown`。
 
        ```bash
-       ssh -p 32099 frd_muziyao@210.77.77.22 \
-         'L=/ghdc/data/nwm/object-store/.nhms-copyback-batch.lock;
-          ls -ln "$L"; stat -c "%u %n" /ghdc/data/nwm/object-store; fuser -v "$L" || echo "no holder"'
+       # 计算控制主机，生产用户
+       L=/ghdc/data/nwm/object-store/.nhms-copyback-batch.lock;
+       ls -ln "$L"; stat -c "%u %n" /ghdc/data/nwm/object-store; fuser -v "$L" || echo "no holder"
        ```
 
    - **`canonical_precip_mirror` 记了 `failed` receipt 怎么补**：多数情况下会自动补，
@@ -336,13 +335,15 @@ ssh -p 32099 nwm@210.77.77.27 \
      pass（链已完成、retry 用尽）时，才需要手工跑 backfill：
 
      ```bash
-     ssh -p 32099 frd_muziyao@210.77.77.22 \
-       'cd /scratch/frd_muziyao/NWM &&
-        . infra/env/compute.scheduler-dbfree.env &&   # 同时带 OBJECT_STORE_ROOT 与 NHMS_OBJECT_STORE_COPYBACK_ROOT（见下方实测 receipt）
-        /scratch/frd_muziyao/NWM/.venv/bin/python \
-          -m scripts.canonical_precip_copyback_backfill \
-          --source-root "$OBJECT_STORE_ROOT" \
-          --copyback-root "$NHMS_OBJECT_STORE_COPYBACK_ROOT" --dry-run'
+     # 计算控制主机，生产用户；子 shell 让 cd 与 envfile 不留在当前 shell 里
+     (
+       cd /scratch/frd_muziyao/NWM &&
+       . infra/env/compute.scheduler-dbfree.env &&   # 同时带 OBJECT_STORE_ROOT 与 NHMS_OBJECT_STORE_COPYBACK_ROOT（见下方实测 receipt）
+       /scratch/frd_muziyao/NWM/.venv/bin/python \
+         -m scripts.canonical_precip_copyback_backfill \
+         --source-root "$OBJECT_STORE_ROOT" \
+         --copyback-root "$NHMS_OBJECT_STORE_COPYBACK_ROOT" --dry-run
+     )
      ```
 
      `cd` 到仓库根是必须的（否则 `-m` 会 `ModuleNotFoundError` 退 1）。先看 dry-run 计划
@@ -368,15 +369,15 @@ ssh -p 32099 nwm@210.77.77.27 \
      target rename 成同目录下隐藏的 `.<name>.copyback-<hex>.backup`，promote 失败且没能
      rename 回去时（`_raise_if_backup_retained`）保留它并抛这个 code。
      - **识别**：两种载体、字段层级不同。`object_store_copyback` 的 `failed` pipeline event
-       （node-22 journal）里是 `details.error_code` 为上述 code、字段在 `details.details.*`；
+       （计算角色的 journal）里是 `details.error_code` 为上述 code、字段在 `details.details.*`；
        stage 抛出的 `OrchestratorError` 里是 `.code`、字段在 `.details.*`（浅一层）。字段为
        `target`、`backup_path`、`error`（promote 失败）、`restore_error`（回滚失败；未尝试回滚
        时为 `null`）。target 可能是 `runs/<run_id>`、run 引用的对象树，或一个 extra object 文件。
      - **含义**：`backup_path` 里是 target 的**旧内容**，而且很可能是唯一一份。target 要么
        不存在（回滚 rename 失败），要么已被别的东西占住（没有尝试回滚）。
-     - **没有任何东西会单独回收它**，分开看：`runs/` 下的 backup 是点开头的名字，node-22
+     - **没有任何东西会单独回收它**，分开看：`runs/` 下的 backup 是点开头的名字，计算角色的
        retention 记成 `unparseable_run_cycle` 跳过；extra object 旁的 backup 不在任何 retention
-       目标里——node-22 对 copyback root 只按 `runs_only_roots` 扫 `runs/`
+       目标里——计算角色对 copyback root 只按 `runs_only_roots` 扫 `runs/`
        （`raw|canonical|forcing/<source>/<cycle>` 只在 primary root 上扫，`services/orchestrator/retention.py`），
        node-27 `scripts/node27_raw_retention.py` 不碰 `runs`。`forcing/**` 引用树的 target 是
        `forcing/<seg>/<cycle>/<basin>/<model>`，所以 backup `.<model>.copyback-<hex>.backup` 落在
@@ -385,8 +386,8 @@ ssh -p 32099 nwm@210.77.77.27 \
        backup 原样留着。所以 forcing backup 的处置期限约为「display watermark −
        `NODE27_RAW_RETENTION_FORCING_DAYS`」（即该 cycle 落到 summary `forcing_cutoff` 之前），过期
        就随 cycle 被删、旧内容不可恢复。下一次 copyback 直接 promote、不看它。
-     - **处置**（node-22、账号 `frd_muziyao`，即 copyback root 属主；node-22 是 NFS client，
-       `flock` 与所有写者互斥。**从 node-22 做**，node-27 本地 `flock` 与之不互斥）：全程持
+     - **处置**（在计算控制主机上以生产用户 `frd_muziyao` 执行，即 copyback root 属主；计算主机是 NFS client，
+       `flock` 与所有写者互斥。**从计算控制主机做**，node-27 本地 `flock` 与之不互斥）：全程持
        batch mutex，期间不在这个 copyback root 下做别的。锁文件可能已被上文「属主不对的孤儿」
        处置删掉；锁文件不存在时 `flock(1)` 会以 `0666 & umask` 新建它，之后每个 copyback 写者都
        fail closed（`copyback batch lock must have mode 0600`）。所以两条命令都先核对锁文件存在、
@@ -396,7 +397,7 @@ ssh -p 32099 nwm@210.77.77.27 \
        node-22 实测 `stat -c '%F %a %u' "$L"` -> `regular empty file 600 1103`）：
 
        ```bash
-       ssh -p 32099 frd_muziyao@210.77.77.22
+       # 计算控制主机，生产用户 frd_muziyao（copyback root 属主）
        L=/ghdc/data/nwm/object-store/.nhms-copyback-batch.lock
        T='<target>'; B='<backup_path>'   # 取自事件 details.details.* 或 OrchestratorError .details.*
        # target 不存在：把 backup 放回原名（mv -T 防止 target 期间出现时被搬进去）
@@ -435,14 +436,14 @@ ssh -p 32099 nwm@210.77.77.27 \
 
 #### canonical 降水镜像的跨账号删除权限（#2100）
 
-写侧是 node-22 的 `frd_muziyao`，删侧是 node-27 retention unit 里的 `nwm`——同一份 NFS、
+写侧是计算主机上的 `frd_muziyao`，删侧是 node-27 retention unit 里的 `nwm`——同一份 NFS、
 两个 uid。两端都存在、且两个账号都在里面的组只有 `nwmuser`（gid **1107**），所以镜像目录的
 口径是 **`2775` + gid 1107**：
 
 - 组写位给的是**删除权**。`rmtree` 先 unlink 文件（要 `prcp_rate_or_amount/` 的 `w+x`），
   再 `rmdir` 它（要 `<cycle>/` 的 `w+x`），最后 `rmdir <cycle>/`（要 `canonical/<S>/` 的
   `w+x`）。unlink 看的是**目录**的位，不是文件的位，所以文件一律留 `0644`。
-- setgid 位让新建的下一级继承父目录的组（Linux 语义；macOS 无条件继承），这样 node-22 新
+- setgid 位让新建的下一级继承父目录的组（Linux 语义；macOS 无条件继承），这样计算角色新
   镜像出来的 cycle 自动落在 1107，而不是写者的 egid 1078。
 - 每一级的 `2775` 都是**显式写上去的**：`os.chmod` 会清 setgid，所以代码里没有任何地方依赖
   "这个位能活过一次 chmod"。产出侧两个常量同值——`services/tile_publisher/publisher.py`
@@ -458,26 +459,26 @@ ssh -p 32099 nwm@210.77.77.27 \
     创建的每一级（`<S>/`、`grid/`、`<cycle>/`、`prcp_rate_or_amount/`、`grid/<grid_id>/`）
     落 `2775`。
 - **`canonical/` 自己不扫**，保持 `755` gid 1078（该 gid 在 node-27 上叫 `nfsdata`、空组，
-  在 node-22 上叫 `huser`）——它是唯一一级 producer 与扫描**都不放权**的目录（backfill 新建
+  2026-09-13 在 node-22 上叫 `huser`）——它是唯一一级 producer 与扫描**都不放权**的目录（backfill 新建
   它时也是 `0755`）。于是将来新增的 storage source 是 **fail closed**：第一个
   unlink 就被拒、零字节、`failed[]` 里一条 `PermissionError`，而不是删一半的形状。
 
-**存量树扫描（node-22，账号 `frd_muziyao`；每个 source 一次，幂等）：**
+**存量树扫描（在计算控制主机上以生产用户 `frd_muziyao` 执行；每个 source 一次，幂等）：**
 
 ```bash
-ssh -p 32099 frd_muziyao@210.77.77.22 \
-  'cd /ghdc/data/nwm/object-store &&
-   for S in gfs IFS; do
-     chgrp -R 1107 "canonical/$S" &&
-     find "canonical/$S" -type d -exec chmod 2775 {} + ;
-   done'
+# 计算控制主机，生产用户 frd_muziyao
+cd /ghdc/data/nwm/object-store &&
+for S in gfs IFS; do
+  chgrp -R 1107 "canonical/$S" &&
+  find "canonical/$S" -type d -exec chmod 2775 {} + ;
+done
 ```
 
 `find` 是先根后叶（pre-order），父目录一定先于子目录被放权，所以任何一个瞬间都不会出现
 "`prcp_rate_or_amount/` 可写而 `<cycle>/` 不可写"的半删形状；扫到一半中断也只是让剩下的
 cycle 继续干净地被拒，重跑即可。**用数字 gid**：1078/1107 在两台机上映射到不同的组名。
 
-核查（同样在 node-22，`cd` 到 object-store 根）：
+核查（同样在计算控制主机上，`cd` 到 object-store 根）：
 
 ```bash
 find canonical/gfs canonical/IFS -type d ! -perm -2775 | wc -l   # 期望 0
@@ -491,17 +492,17 @@ stat -c '%a %U %g' canonical                                     # 期望 755 fr
 
 **部署后必须补扫一遍**（不是可选项）：producer 只在"这棵树确实需要复制"时才纠正
 `<cycle>/` 的模式；目标字节完全相同的 cycle 在 plan 阶段就被整体 `skipped`，**不会被治愈**。
-扫描完成到 node-22 拉起新 producer 之间镜像出来的 cycle 正是这一类（`<cycle>/` `0755` gid
+扫描完成到计算角色拉起新 producer 之间镜像出来的 cycle 正是这一类（`<cycle>/` `0755` gid
 1107、`prcp_rate_or_amount/` `0755` gid 1078，删除时干净被拒）。把上面那段扫描原样再跑一次
 即可，幂等。
 
 **回滚**（两条，和上面对称）：
 
 ```bash
-ssh -p 32099 frd_muziyao@210.77.77.22 \
-  'cd /ghdc/data/nwm/object-store &&
-   chgrp -R 1078 canonical/gfs canonical/IFS &&
-   find canonical/gfs canonical/IFS -type d -exec chmod 00755 {} +'
+# 计算控制主机，生产用户 frd_muziyao
+cd /ghdc/data/nwm/object-store &&
+chgrp -R 1078 canonical/gfs canonical/IFS &&
+find canonical/gfs canonical/IFS -type d -exec chmod 00755 {} +
 ```
 
 `00755` 的**五位数字是必须的**：`chmod(1)` 对目录用数字模式时默认保留 setgid，`chmod 0755`
@@ -515,13 +516,13 @@ GNU coreutils 与 BSD 的实现都只在 `FTS_DP` 上动手），所以收权过
 无论顺序都不再改变可删性。因此回滚中断后原样重跑即可，同样幂等。
 
 **影响面**：gid 1107 `nwmuser` 的所有成员都获得了对这两棵镜像树的写/删权——node-27 上是
-`nwm` 与 `frd_muziyao`，node-22 上是包括 `frd_muziyao` 在内的七个人类账号。授权范围仅限
+`nwm` 与 `frd_muziyao`，2026-09-13 node-22 上是包括 `frd_muziyao` 在内的七个人类账号。授权范围仅限
 `canonical/gfs`、`canonical/IFS` 两棵树的目录位；`canonical/` 本身、`runs/`、`forcing/`
 以及所有文件位都不动。
 
 #### node-27 canonical 删除持锁（#2252 / #2239 / #2262 / #2360）
 
-node-27 上 `/home/ghdc/nwm/object-store` **就是** node-22 写者 promote `canonical/` 的那个
+node-27 上 `/home/ghdc/nwm/object-store` **就是**计算角色的写者 promote `canonical/` 的那个
 共享 copyback root，所以 `scripts/node27_raw_retention.py` 删每个
 `canonical/<S>/<cycle>` 前都取 `.nhms-copyback-batch.lock`：POSIX 记录锁（`fcntl.lockf`），
 逐棵取、只罩住那一次 `rmtree`，整个 pass 共用 300 s 等锁预算；规划遍历不持锁。
@@ -530,18 +531,18 @@ preflight-blocked 的 tick 一次都不取、也不建锁文件。summary schema
 `nhms.node27_raw_retention.production.v5`。
 
 `failed[]` 里锁失败的条目带 `error`、`error_type` 和 `lock_failure`，summary 顶层带
-`copyback_lock_failures`（三个计数，恒有、没有失败时全 0）。node-22 scheduler pass receipt 的
+`copyback_lock_failures`（三个计数，恒有、没有失败时全 0）。计算角色的 scheduler pass receipt 的
 `retention` 块同样带这两样，且 `copyback_lock_failures` 在 receipt 压缩后仍保留：
 
 | `lock_failure` | 含义 | 处置 |
 |---|---|---|
-| `lock_timeout` | 别的进程持锁超过本 pass 剩余预算 | 树保留，下个 tick 重试；持续出现就去查 node-22 哪个写者卡住（上文「锁文件卡住时怎么处置」） |
+| `lock_timeout` | 别的进程持锁超过本 pass 剩余预算 | 树保留，下个 tick 重试；持续出现就去查计算角色哪个写者卡住（上文「锁文件卡住时怎么处置」） |
 | `lock_budget_exhausted` | 本 pass 预算已被前面的等待耗尽，这一条没有尝试取锁 | 同上，跟着 `lock_timeout` 一起看 |
 | `lock_unsafe` | 锁文件不安全、打不开或配置被拒（属主/模式/硬链接/符号链接不对，或本账号无权打开） | 不是 busy；**不要删锁文件**（会把互斥拆成两个 inode），按下面的身份现状处理 |
 
 **身份：canonical 车道拆到系统 unit，以 copyback root 属主运行（#2360，2026-09-18）**。
 锁文件 `0600`、属主是 copyback root 属主 `frd_muziyao`(1103)；锁身份契约**不放宽**（组共享
-`0660` 会被 node-22 的现网代码拒掉，打断所有写者），锁文件的模式/属主本次也不动。
+`0660` 会被计算角色的现网代码拒掉，打断所有写者），锁文件的模式/属主本次也不动。
 所以 retention 按车道拆成两个 unit，靠 `NODE27_RAW_RETENTION_LANES` 选车道：
 
 | unit | 作用域 / 身份 | `NODE27_RAW_RETENTION_LANES` | env | summary 目录 | 失败告警 |
@@ -670,7 +671,7 @@ ssh -p 32099 nwm@210.77.77.27 '
 Display products, tiles, manifests, and logs live under `published/`:
 
 ```text
-node-22 view: /ghdc/data/nwm/published
+compute host view: /ghdc/data/nwm/published
 node-27 view: /home/ghdc/nwm/published
 
 published/logs/<source>/<YYYYMMDDHH>/...
@@ -684,13 +685,12 @@ Those belong under `object-store/runs/<run_id>/`.
 Checks:
 
 ```bash
-# node-22
-ssh -p 32099 frd_muziyao@210.77.77.22 \
-  'test -d /ghdc/data/nwm/published &&
-   stat -c "%n %A %U:%G" /ghdc/data/nwm/published &&
-   find /ghdc/data/nwm/published/logs /ghdc/data/nwm/published/tiles \
-     -maxdepth 4 -type f -printf "%TY-%Tm-%Td %TH:%TM %p\n" 2>/dev/null |
-   sort | tail -40'
+# 计算控制主机，生产用户
+test -d /ghdc/data/nwm/published &&
+stat -c "%n %A %U:%G" /ghdc/data/nwm/published &&
+find /ghdc/data/nwm/published/logs /ghdc/data/nwm/published/tiles \
+  -maxdepth 4 -type f -printf "%TY-%Tm-%Td %TH:%TM %p\n" 2>/dev/null |
+sort | tail -40
 
 # node-27
 ssh -p 32099 nwm@210.77.77.27 \
@@ -769,7 +769,7 @@ ssh -p 32099 nwm@210.77.77.27 \
 | 目标 | 节点 | 入口 |
 | --- | --- | --- |
 | seed/register/ingest/display coverage | node-27 | `scripts/node27_autopipe_cron.sh` -> `scripts/node27_autopipeline.py` |
-| 刷新可计算模型清单 | node-22 | `scripts/publish_scheduler_file_registry.py` |
+| 刷新可计算模型清单 | 计算控制主机 | `scripts/publish_scheduler_file_registry.py` |
 | 重启展示 API | node-27 | `scripts/ops/start-display-api.sh` |
 
 不要把新增流域做成 qhh/heihe/kashigeer 的一次性手工流程。标准流程：
@@ -777,11 +777,11 @@ ssh -p 32099 nwm@210.77.77.27 \
 1. 把流域源数据放到共享 Basins 根：
 
    ```text
-   node-22 view: /ghdc/data/nwm/Basins/<basin>...
+   compute host view: /ghdc/data/nwm/Basins/<basin>...
    node-27 view: /home/ghdc/nwm/Basins/<basin>...
    ```
 
-   目录必须允许 node-27 的 `nwm` 用户读取和进入。跨用户从 node-22 复制
+   目录必须允许 node-27 的 `nwm` 用户读取和进入。跨用户从计算主机复制
    Basins 源时，不要保留源端私有权限；复制后至少确认：
 
    ```bash
@@ -799,13 +799,13 @@ ssh -p 32099 nwm@210.77.77.27 \
    ```
 
    wrapper 会从 `infra/env/node27-ingest.env` 加载 writer DB、NFS object-store
-   和 `BASINS_ROOT`，并阻断 display env、ambient libpq env、node-22 historical
-   DB env。`scripts/node27_autopipeline.py` 是实现入口：发现 `Basins/` inventory
+   和 `BASINS_ROOT`，并阻断 display env、ambient libpq env、原 node-22 主机的
+   historical DB env。`scripts/node27_autopipeline.py` 是实现入口：发现 `Basins/` inventory
    与 `object-store/runs/`，seed 缺失 basin registry，应用 forcing-domain
    handoff，解析 run，并刷新 display coverage。它是幂等的，后续新增流域也走
    同一入口。
 
-3. 在 node-22 生成 baseline staging，然后在 node-27 provision GFS/IFS 两个
+3. 在计算控制主机上生成 baseline staging，然后在 node-27 provision GFS/IFS 两个
    source-scoped direct-grid variant；禁止把 baseline/IDW registry 直接发布为
    canonical。完整命令和原子发布顺序见本手册第 3.3 节。完成后必须证明：
 
@@ -836,12 +836,11 @@ ssh -p 32099 nwm@210.77.77.27 \
    curl -fsS 'http://127.0.0.1:8080/api/v1/basins?limit=500'
    curl -fsS 'http://127.0.0.1:8080/api/v1/basins?has_display_product=true&limit=500'
 
-   # node-22: scheduler registry 包含新增 model
-   ssh -p 32099 frd_muziyao@210.77.77.22
+   # 计算控制主机，生产用户：scheduler registry 包含新增 model
    cd /scratch/frd_muziyao/NWM
    .venv/bin/python -c 'import json; from pathlib import Path; p=json.loads(Path("/scratch/frd_muziyao/nhms-prod/object-store/scheduler/registry/manifest-last.json").read_text()); print("\n".join(sorted(item["model_id"] for item in p.get("models", []) if "model_id" in item)))'
    ```
 
    `has_display_product=true` 只代表已有发布 run 的流域；新流域完成 registry
    但尚未跑出 SHUD run 时，应先出现在普通 `/api/v1/basins` 和 scheduler
-   registry 中，等 22 产出 run、27 autopipe ingest 后再进入展示产品列表。
+   registry 中，等计算角色产出 run、27 autopipe ingest 后再进入展示产品列表。

@@ -175,9 +175,9 @@
 
 完整内容见 [`production-ops/recalibration-and-archive.md`](production-ops/recalibration-and-archive.md#571-整条-rollout-的顺序与-manifest-发布2026-08-22-实战-receipt)。
 
-### 5.8 node-22 file-journal cycle cold archive（已启用，#2119）
+### 5.8 file-journal cycle cold archive（已启用，#2119）
 
-完整内容见 [`production-ops/recalibration-and-archive.md`](production-ops/recalibration-and-archive.md#58-node-22-file-journal-cycle-cold-archive已启用2119)。
+完整内容见 [`production-ops/recalibration-and-archive.md`](production-ops/recalibration-and-archive.md#58-file-journal-cycle-cold-archive已启用2119)。
 
 #### 查看 timer 与 receipt
 
