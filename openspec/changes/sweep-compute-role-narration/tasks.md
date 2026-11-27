@@ -105,7 +105,7 @@ Minimal mergeable slice: 3.1 - three pages with no pinned sentence, no command t
   `canonical-precip-mirror-backfill.md`, `held-forcing-absence-exit.md`, `ci-test-routing.md`,
   `node-27-bringup-checklist.md`, `tier-node27-timeseries-storage.md`,
   `display-readonly-live-mvt.md`.
-- [ ] 4.5 The two remaining banner pages, `node22-control-plane-manual-recovery.md` and
+- [x] 4.5 The two remaining banner pages, `node22-control-plane-manual-recovery.md` and
   `two-node-deployment-overview.md` (the bare "22" shorthand; the heading and sentence pinned by
   `tests/test_node22_runbook_section_markers.py`; the dated 2026-06-22 block and its pin in
   `tests/test_role_boundary_static.py` stay; the overview stays skipped by the gate, and the PR shows

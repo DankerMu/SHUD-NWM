@@ -33,10 +33,11 @@ Must preserve:
   - **Banner** (the paragraph "计算角色主机说明"): removed. The two body references to "banner"
     (§1, §5.1) point to `current-production-ops.md` and `docs/governance/ROLE_BOUNDARY.md` for the
     facts of today.
-  - **Banner rules the body keeps**: §7.4 says where its two journal reads run (on the compute
-    control host, with the §1 link of `w2-w3-compute-topology.md`; not on the retired node-22 host,
-    whose journal copy stopped at 2026-11-23T02:34Z); §8.1 states the rule of the shared `.venv`
-    (no `uv sync`, no bare `uv run`, the three conditions of an environment sync).
+  - **Banner rules the body keeps**: §7.4 says where its two journal reads run
+    (on the compute control host, with the §1 link of `w2-w3-compute-topology.md`; not on
+    the retired node-22 host, whose journal copy stopped at 2026-11-23T02:34Z); §8.1 states the
+    rule of the shared `.venv` (no `uv sync`, no bare `uv run`, the three conditions of an
+    environment sync).
   - **Dated**: the 2026-06-22 block, unchanged.
   - **Design sections, each under a lead that says "M22 设计"**: §1; the flow of §2; §3.1; the
     design sentences of §3.2; §3.4; §4; the env paragraph of §5.1; §6.1; §7.1; §7.2; §9. One body
@@ -60,7 +61,7 @@ Must preserve:
     identifier.
 - [x] 1.3 Spec delta, generated from the main spec text of the day: `production-topology-contract`,
   REMOVED and ADDED under the new title, without the banner scenario.
-- [ ] 1.4 Every sentence of the two removed banners accounted for in the PR: moved to the body,
+- [x] 1.4 Every sentence of the two removed banners accounted for in the PR: moved to the body,
   stated elsewhere on the page, or dropped with its reason.
 
 ## 2. Test (implementer)
@@ -76,20 +77,20 @@ Must preserve:
 
 - [x] 3.1 The gate's skip decision (`_topology_document_is_non_current`) for
   `two-node-deployment-overview.md`, before and after: skipped both times.
-- [ ] 3.2 Hard gate: finding multiset before (master) and after (the tree after the archive, where
+- [x] 3.2 Hard gate: finding multiset before (master) and after (the tree after the archive, where
   the requirement sits at the end of the main spec and this change is no longer scanned), each
   difference listed and judged; the fixture directory itself has no finding while it is open.
-- [ ] 3.3 `narration_count.py` plain and `--tokens` before and after; moved name tokens listed; the
+- [x] 3.3 `narration_count.py` plain and `--tokens` before and after; moved name tokens listed; the
   count of ssh lines to the retired host explained.
-- [ ] 3.4 A repository-wide search for the old slug of every renamed heading returns nothing outside
+- [x] 3.4 A repository-wide search for the old slug of every renamed heading returns nothing outside
   history and the umbrella change.
-- [ ] 3.5 After the archive: the body and the seven carried-over scenarios byte-identical in the main
+- [x] 3.5 After the archive: the body and the seven carried-over scenarios byte-identical in the main
   spec (extracted blocks compared); no other requirement of the contract changed.
 
 ## 4. Last push
 
-- [ ] 4.1 `openspec archive banner-pages-name-compute-role --yes`; the main spec validates.
-- [ ] 4.2 Task 4.5 of `openspec/changes/sweep-compute-role-narration/tasks.md` ticked in the same push.
+- [x] 4.1 `openspec archive banner-pages-name-compute-role --yes`; the main spec validates.
+- [x] 4.2 Task 4.5 of `openspec/changes/sweep-compute-role-narration/tasks.md` ticked in the same push.
 
 ## Evidence Floor
 
