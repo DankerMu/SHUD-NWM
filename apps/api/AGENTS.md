@@ -9,14 +9,14 @@ finding exactly as the glossary defines them.
 
 - `openspec/changes/governance-7-structural-entropy-controls/specs/scoped-agent-context-governance/spec.md`
 - `docs/governance/ROLE_BOUNDARY.md`
-- `docs/runbooks/qhh-backend-smoke.md`
+- `scripts/diagnostic/qhh/README.md`
 - `openspec/glossary.md`
 
-`docs/runbooks/qhh-backend-smoke.md` is a runbook freshness anchor for the QHH
-backend smoke chain, but much of it is historical evidence for a recorded local
-diagnostic run. Do not use it as proof of current production readiness, current
-node-27 live display receipt, or current role-boundary closure unless the active
-issue/runbook explicitly says that live evidence was produced.
+`scripts/diagnostic/qhh/README.md` is the authority for the QHH diagnostic
+chain, including the backend smoke on a local database. A run of that chain is
+diagnostic evidence. Do not use it as proof of current production readiness,
+current node-27 live display receipt, or current role-boundary closure unless
+the active issue/runbook explicitly says that live evidence was produced.
 
 ## Bootstrap And Routing Boundaries
 
