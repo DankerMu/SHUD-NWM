@@ -36,7 +36,8 @@ its tasks here in its final push.
 - [ ] 1.4 Spec deltas in the slice's own change, both in `production-topology-contract`: "Static
   guardrails block topology drift" (the gate's subjects); "Current production topology is a governed
   contract" (the sentence that lists the identifiers keeping the codename no longer lists requirement
-  names).
+  names). Found by this slice: a scenario cannot be retitled or dropped by a MODIFIED block
+  (`design.md` §3, "Scenario titles").
 
 Suggested fixture level: expanded - changes what a hard gate that runs on every PR matches.
 Minimal mergeable slice: atomic - a term without its synthetic cases and the real-repository comparison cannot be judged; they are one verification path.
