@@ -20,9 +20,7 @@ set -euo pipefail
 # Minimal PASS condition: exits 0 and the cycle reaches the `published` status —
 # i.e. this script writes its terminal state file with status="published" after
 # create_qhh_shud_manifest -> SHUD runtime -> parse -> publish complete. Current
-# invocation authority is scripts/diagnostic/qhh/README.md (Run Boundary); the
-# historical bring-up baseline (docs/runbooks/qhh-22-business-bringup.md §3) is
-# retained evidence only and is not current invocation guidance.
+# invocation authority is scripts/diagnostic/qhh/README.md (Run Boundary).
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 cd "$ROOT_DIR"

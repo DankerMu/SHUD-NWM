@@ -438,20 +438,7 @@ def test_conftest_skip_guidance_points_to_runbook() -> None:
     assert "node-22" not in text
 
 
-# --- 5. QHH whole-document historical marker --------------------------------
-
-
-def test_qhh_bringup_has_historical_marker() -> None:
-    text = _read("docs/runbooks/qhh-22-business-bringup.md")
-    assert text.startswith("---\n"), "qhh bring-up must carry YAML front matter"
-    front = text.split("---", 2)[1]
-    assert "status: historical baseline" in front
-    assert "current_authority" in front
-    assert "current-production-ops.md" in front
-    assert "scripts/diagnostic/qhh/README.md" in front
-    assert "status_since" in front
-    assert "archive_scope: whole-document" in front
-    assert "retained_for" in front
+# --- 5. QHH README Production Replacement exact interpreter -----------------
 
 
 def test_qhh_readme_production_replacement_uses_exact_interpreter() -> None:
