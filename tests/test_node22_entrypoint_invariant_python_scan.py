@@ -244,9 +244,9 @@ def test_node22_current_key_entry_and_history_separate() -> None:
     key_entry = [
         line
         for line in text.splitlines()
-        if "node-22 compute" in line and "services.slurm_gateway" in line
+        if line.startswith("| compute role |") and "services.slurm_gateway" in line
     ]
-    assert key_entry, "node-22 compute key-entry row missing"
+    assert key_entry, "compute role key-entry row missing"
     assert "/scratch/frd_muziyao/NWM/.venv/bin/python -m services.slurm_gateway" in key_entry[0], (
         f"key-entry must use exact active interpreter, got: {key_entry[0].strip()}"
     )

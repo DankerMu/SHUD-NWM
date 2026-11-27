@@ -1,17 +1,16 @@
 **分册：DB-free file-provider 稳态刷新**
 
-> **计算角色主机说明**：本页的 "node-22" 指计算角色，现由 w3 / w2 承载；字面的
-> `ssh … 210.77.77.22` 命令一律登录 w3 后执行，**不得**在原主机上执行。详见
-> [`current-production-ops.md`](../current-production-ops.md) 顶部横幅。
-
 本页是当前生产值守手册的 §3.1.2 分册（#1103 拆分，正文逐字保留）。
 索引与全部分册入口见 [`../current-production-ops.md`](../current-production-ops.md)。
+本页里在计算控制主机上执行的步骤都以生产用户执行；是哪台主机、怎么进入见 [`w2-w3-compute-topology.md`](../w2-w3-compute-topology.md#1-主机与角色) §1。
+refresh、scheduler 与探针的 user unit 都装在计算控制主机上，本页的 `systemctl --user` 命令和
+`/scratch/frd_muziyao` 下的命令都在这台主机上执行（生产用户的 user manager 只在这台主机上运行）。
 
 #### 3.1.2 DB-free file-provider 稳态刷新
 
 Registry、canonical readiness 和 state index 的 consumer freshness 上限均为
-168 小时；不得延长上限或只修改 `generated_at`。node-22 用独立 user-systemd
-timer 每日从权威内容完整重验并重发三个 provider，scheduler consumer 仍然只读、
+168 小时；不得延长上限或只修改 `generated_at`。计算角色用独立 user-systemd
+timer（装在计算控制主机上）每日从权威内容完整重验并重发三个 provider，scheduler consumer 仍然只读、
 fail closed。direct-grid 生产模式下 timer 重发当前已验证 registry；
 `publish_scheduler_file_registry.py` 只负责 baseline staging，不能直写 canonical。
 它与 timer、readiness/state writer 共用同一个 destination-derived
@@ -23,7 +22,8 @@ state-index copyback 使用。因此 CLI 对 refresh timer 的并发保护是 **
 `provider_preimage_changed`。运行前必须按下面"手动 publisher CLI"条目确认 timer 与
 oneshot service 均非活跃。其余 writer 之间的 lock + preimage 语义不变。
 refresh user unit 不启用 `PrivateTmp`：node-22 的 user-systemd mount namespace 会在该模式下
-拒绝进程打开 `/`，与 provider 的绝对路径逐级 no-follow 校验冲突；私有边界继续由 mode-0600
+拒绝进程打开 `/`（2026-07-18 所见，那天去掉 `PrivateTmp` 时留下的 unit 备份名带这个日期；`w3` 上没有重测，unit 照旧不启用），
+与 provider 的绝对路径逐级 no-follow 校验冲突；私有边界继续由 mode-0600
 env、mode-0700 workspace/receipt/emergency/lock 目录、`UMask=0077` 和 DB selector 清除保证。
 现场是 split-root：`OBJECT_STORE_ROOT` 必须保持
 `/scratch/frd_muziyao/nhms-prod/object-store`，用于发布 registry package，并校验 scheduler
@@ -52,6 +52,7 @@ replace 前失败。
 首次安装必须先记录 scheduler 与 refresh unit 状态，并保持 scheduler timer 原状态：
 
 ```bash
+# 计算控制主机，生产用户
 cd /scratch/frd_muziyao/NWM
 systemctl --user is-enabled nhms-compute-scheduler.timer || true
 systemctl --user is-active nhms-compute-scheduler.timer || true
@@ -91,6 +92,7 @@ registry/readiness model-set mismatch 都在 canonical replace 前失败，绝�
 readiness、复制巨大 products、生成空 index、DB fallback 或 timestamp-only 文件：
 
 ```bash
+# 计算控制主机，生产用户，在 /scratch/frd_muziyao/NWM 下（脚本路径是相对的）
 scripts/scheduler_file_provider_refresh_once.sh --dry-run
 jq '{outcome,reason,database_free,cutover_gate,providers,orphans}' \
   /scratch/frd_muziyao/nhms-prod/workspace/provider-refresh/receipts/latest.json
@@ -148,6 +150,7 @@ Canonical replace 前失败时旧文件完整 stat/digest tuple 不变；preimag
 receipt，绝不重发 provider（所以保持直接调用，不走 unit；它同样会等在跑的 scheduler pass）：
 
 ```bash
+# 计算控制主机，生产用户，在 /scratch/frd_muziyao/NWM 下（脚本路径是相对的）
 scripts/scheduler_file_provider_refresh_once.sh \
   --recover-emergency /scratch/frd_muziyao/nhms-prod/workspace/provider-refresh/emergency/<receipt>.json
 ```
@@ -308,7 +311,7 @@ declaration -> 提交 declaration 到 mode-0600 路径 ->
 **退役一个 model（retire declaration 恢复顺序，#1433；仅非 direct-grid 拓扑的首选路径，
 direct-grid 生产见上面的拓扑围栏与 §7.2）**：在非 direct-grid 拓扑上这是
 `registry_cutover_removal_refused` 的正规出口，无论 removal 来自「删了目录」还是
-「包变 invalid 被 skip」。全程适用 #1104 并发禁令。
+「包变 invalid 被 skip」。全程适用 #1104 并发禁令，各步都在计算控制主机上以生产用户执行。
 
 1. 停 timer：`systemctl --user stop nhms-scheduler-file-provider-refresh.timer`，
    再按上面的成对 status 判据确认 oneshot service 也已退出。
@@ -359,7 +362,7 @@ key allowlist；`NHMS_REGISTRY_CUTOVER_DECLARATION_PATH` **自 #1095 起在 allo
 
 1. 提交 declaration 到 mode-0600 路径（同上，generation / old/new checksum 从被拒
    receipt 拷贝）。
-2. 在 node-22 编辑 EnvironmentFile
+2. 在计算控制主机上编辑 EnvironmentFile
    `/scratch/frd_muziyao/NWM/infra/env/compute.scheduler-provider-refresh.env`（保持
    mode 0600、非 symlink），**新增一行**
    `NHMS_REGISTRY_CUTOVER_DECLARATION_PATH=<declaration 绝对路径>`。
@@ -412,7 +415,7 @@ cold_new_model / cold_declared_cutover / 5 个 block_* reasons）。scheduler �
 每次 pass 开始时读一次（D8.1: read-once-per-pass, cached per ProductionScheduler
 lifetime），中途修改 declaration 文件不会被生效，直到下一次 scheduler 重启或
 下一次 pass 时才重新加载。**仅在非 direct-grid 拓扑**（`NHMS_SCHEDULER_REQUIRE_DIRECT_GRID`
-不为 true）上：node-22 systemd EnvironmentFile
+不为 true）上：计算角色的 systemd EnvironmentFile
 `compute.scheduler-dbfree.env` 里必须在 declared cutover 期间显式设置这个 env，
 declared-cutover 候选的 §8 gating 才能放行；未设置 = declaration 缺席 -> 每个
 declared-cutover 候选会 block 为 `registry_cutover_declaration_missing`。
@@ -435,6 +438,7 @@ snapshot→commit 窗口内提交，CLI 会静默覆写 refresh 刚发布的 can
 不会拦你；CLI 每次启动都会在 stderr 打印一行 WARNING 提醒本条。运行前必须成对确认：
 
 ```bash
+# 计算控制主机，生产用户
 systemctl --user status nhms-scheduler-file-provider-refresh.timer \
   nhms-scheduler-file-provider-refresh.service --no-pager
 ```
@@ -482,6 +486,7 @@ provider preimage 冲突）才**整个字段缺席**——不写 `null` 占位�
 （或系 pre-#1132 版本写下的 receipt，见下"升级 pre-#1132 receipt"）。
 
 ```bash
+# 计算控制主机，生产用户
 # runner receipt（自动 timer 路径的 audit 通道）
 jq '.cutover_gate' \
   /scratch/frd_muziyao/nhms-prod/workspace/provider-refresh/receipts/latest.json
@@ -497,6 +502,7 @@ Runner 路径没有 `--allow-uncovered-cutover`，所以这里的 `mode` 恒为 
 任何一次 `--allow-uncovered-cutover` 之后，运维必须 `jq '.cutover_gate'` 核对：
 
 ```bash
+# 计算控制主机，生产用户，在 /scratch/frd_muziyao/NWM 下（脚本路径是相对的）
 # 手动 publisher summary（成功走 stdout；失败/refusal 走 stderr 最后一行）
 scripts/publish_scheduler_file_registry.py ... | jq '.cutover_gate'
 # 期望常规运维：{"mode": "enforced", "declaration_env": "NHMS_REGISTRY_CUTOVER_DECLARATION_PATH",
@@ -589,6 +595,7 @@ receipt。
 成功 manual refresh 后才建立稳态：
 
 ```bash
+# 计算控制主机，生产用户，在 /scratch/frd_muziyao/NWM 下（脚本路径是相对的）
 scripts/install_node22_scheduler_file_provider_refresh.sh --enable
 systemctl --user status nhms-scheduler-file-provider-refresh.timer \
   nhms-scheduler-file-provider-refresh.service --no-pager
@@ -601,11 +608,12 @@ start/stop 或替换 `nhms-compute-scheduler.*`。若安装、manual refresh 或
 proof 任一步失败，执行：
 
 ```bash
+# 计算控制主机，生产用户，在 /scratch/frd_muziyao/NWM 下（脚本路径是相对的）
 scripts/install_node22_scheduler_file_provider_refresh.sh --rollback
 # 按 install-state/refresh.before 恢复 refresh 两个 unit 并读回确认；再读回断言 scheduler units 未变。
 ```
 
-**部署「refresh 等 scheduler pass」的等待上限（#2749，14400 秒）——wrapper 与已安装的 unit 必须在同一个会话里一起换，要 owner 放行**：
+**部署「refresh 等 scheduler pass」的等待上限（#2749，14400 秒）——wrapper 与已安装的 unit 必须在同一个会话里一起换，要 owner 放行**（在计算控制主机上以生产用户、在 `/scratch/frd_muziyao/NWM` 里执行）：
 
 1. `git status --porcelain` → `git pull --ff-only`：unit 的 `ExecStart` 直接执行 checkout 里的
    wrapper，所以 pull 完新的等待上限（14400 秒）就生效，不需要 installer。但**只 pull 不能停手**：
@@ -613,7 +621,8 @@ scripts/install_node22_scheduler_file_provider_refresh.sh --rollback
    timer 触发的 refresh 若排在一趟长 pass 后面，会在 7200 秒被 systemd 杀掉，而不是由 wrapper 以
    exit 3 干净拒绝。
 2. 所以紧接着在**同一个会话**里走 installer 的 `--rollback` → `--install` → 经 unit 手动跑一趟
-   refresh → `--enable`（顺序与前置条件见下面的演练顺序），**绝不把「已 pull、未 `--install`」留过夜**。
+   refresh → `--enable`（顺序与前置条件见下面的演练顺序；`w3` 上没有基线，`--rollback` 这一步在这里会失败，先读下面的"`w3` 现状"），
+   **绝不把「已 pull、未 `--install`」留过夜**。
    整个会话必须在 refresh 可能在跑的时段之外，即 02:15Z 至约 08:45Z（timer 02:15Z 加至多 30 分钟抖动，再加 `TimeoutStartSec=21600`）之外。
    `--rollback` 到 `--enable` 之间 timer 是解除的，每小时一次的探针在这段时间报 `probe_failed` 或
    `timer_not_enabled`，属预期。pull 之后已安装的 unit 与仓库里的不再相同，而 `--enable` 会逐个
@@ -660,13 +669,20 @@ scripts/install_node22_scheduler_file_provider_refresh.sh --rollback
   **重置基线**：一次成功的 `--rollback` 之后，删掉 `refresh.before` 和
   `nhms-scheduler-file-provider-refresh.{service,timer}.before`。
 - **`scheduler.before` 已废弃**：compute scheduler 的比较基线改为每次调用开始时在内存里捕获，
-  不读、也不写任何跨调用的文件。node-22 上遗留的 31 字节 `scheduler.before` 被忽略，原样留着即可。
-- **node-22 现状**：`install-state/` 里的基线写于 2026-07-15（`refresh.before` =
+  不读、也不写任何跨调用的文件。node-22 上遗留的 31 字节 `scheduler.before`（2026-09-25 记录，#2294）被忽略，原样留着即可。
+- **node-22 现状**（2026-09-25 记录，#2294）：`install-state/` 里的基线写于 2026-07-15（`refresh.before` =
   `disabled\tinactive\nstatic\tinactive\n`），是一次**重装快照**：当时 unit 已经存在且已解除。
   对它 `--rollback` 恢复的是 7 月的 unit 文件、disabled 状态，而不是"没有这条 lane"。那是解除态，
   所以安全。
-- **演练顺序**（node-22 按 #1831 决定长期保持 3.12.7，演练不再等待任何切换窗口）：timer 现在是
-  armed。issue 原文的演练从 `--install` 开始：在 D4 下它会被拒绝，照原文跑完还会让生产停在
+- **`w3` 现状**（2026-11-27 核对，见 [receipt](../receipts/2026-11-27-w3-refresh-install-state.md)）：`install-state/` 目录不存在，
+  refresh timer 是 enabled/active、service 是 static/inactive。这台主机上的 unit 不是经一次有记录的 `--install` 装上的，
+  没有 `refresh.before`，也没有遗留的 `scheduler.before`；上一条的基线只属于原 node-22 主机。下面的演练顺序是按原主机当时的状态写的，
+  在 `w3` 上还没有跑过，照写也跑不通：第 2 步的 `od -c` 在这里没有文件可读；第 4 步 `--rollback` 因为没有 `refresh.before`
+  会在任何 mutation 之前失败；第 5 步 `--install` 因为 timer 是 armed 的会被拒绝。两步都是 fail-closed，不改任何东西。
+  要在这台主机上建基线，走上面"armed 时拒绝 `--install`"一条末尾写的出口（没有基线、timer 是手工 arm 的主机：先手工
+  `disable --now` refresh timer 再 `--install`）；这条出口在 `w3` 上同样没有演练过，是一次生产变更，要 owner 放行。
+- **演练顺序**（在计算控制主机上以生产用户执行；原 node-22 主机按 #1831 决定长期保持 3.12.7，演练不再等待任何切换窗口）：timer 现在是
+  armed（2026-09-25 记录，#2294）。issue 原文的演练从 `--install` 开始：在 D4 下它会被拒绝，照原文跑完还会让生产停在
   解除态。所以演练顺序是：
   1. `git status --porcelain` → `git pull --ff-only`。
   2. 记录 before-state：`od -c` `install-state/refresh.before` 和 `scheduler.before`（后者仅供参考，
@@ -693,7 +709,7 @@ scripts/install_node22_scheduler_file_provider_refresh.sh --rollback
 
 ##### `enabled` + `inactive` 是失败态（#2041 / #2146）
 
-**`is-enabled` 不是活性证据。** 稳态核对必须把下面四列当作**互相独立**的信号分别读，
+**`is-enabled` 不是活性证据。** 稳态核对（下表与下面的命令都在计算控制主机上以生产用户执行）必须把下面四列当作**互相独立**的信号分别读，
 任何一列不合格都是失败，不能用另一列的绿色替代：
 
 | 列 | 命令 | 合格 | 不合格的样子 |
@@ -707,6 +723,7 @@ scripts/install_node22_scheduler_file_provider_refresh.sh --rollback
 取哪个字段看 receipt 的 `outcome`，与探针同一规则（见下文"manifest 年龄的取数顺序"）：
 
 ```bash
+# 计算控制主机，生产用户
 jq -r '.outcome as $o | .providers[] | select(.name == "registry")
   | if ($o == "published" or $o == "published_receipt_failed" or $o == "dry_run")
     then .after_generated_at else .before_generated_at end' \
@@ -776,11 +793,12 @@ calendar event **不会**在重新 `start` 时补跑，所以既没有失败日�
 | `NHMS_REFRESH_HEALTH_MAX_MANIFEST_AGE_HOURS` | 120 | 144 |
 | `NHMS_REFRESH_HEALTH_STOPPED_DWELL_HOURS` | 8 | 24 |
 
-service unit **故意不带 `EnvironmentFile=`**：默认值就是 node-22 的生产值，多一个
+service unit **故意不带 `EnvironmentFile=`**：默认值就是计算角色的生产值，多一个
 未入库的 env 文件就多一条能悄悄放松告警阈值的路径。真要改阈值，用 drop-in 并把
 drop-in 记回本节：
 
 ```bash
+# 计算控制主机，生产用户
 mkdir -p ~/.config/systemd/user/nhms-node22-refresh-timer-health.service.d
 printf '[Service]\nEnvironment=NHMS_REFRESH_HEALTH_MAX_MANIFEST_AGE_HOURS=96\n' \
   > ~/.config/systemd/user/nhms-node22-refresh-timer-health.service.d/10-thresholds.conf
@@ -816,10 +834,10 @@ Receipt 落在 `/scratch/frd_muziyao/nhms-prod/workspace/refresh-timer-health/re
 也不会把上一份好 receipt 搞没。写不下去时进程非零退出，而 verdict 与证据错误
 在尝试写之前就已经进了 journal——journal 就是告警通道，receipt 写不成不能顺手把判决吃掉。
 
-**本条告警只在 node-22 本机**：不合格判决让
+**本条告警只在计算控制主机本机**：不合格判决让
 `nhms-node22-refresh-timer-health.service` 进入 `failed`
 （`systemctl --user list-units --failed` 可见）并留下上面那份 receipt。没有邮件、
-没有 paging，今天也没有任何东西在轮询 node-22 的 failed unit。这是**已知限制**，
+没有 paging，今天也没有任何东西在轮询计算控制主机上的 failed unit。这是**已知限制**，
 不是遗漏：它把"168 小时悬崖前完全不可见"换成了"任何上机的人几小时内可发现"，
 off-host 路由是另一条有自己认证与投递面的告警链路，另案处理。
 
@@ -860,6 +878,7 @@ off-host 路由是另一条有自己认证与投递面的告警链路，另案�
 
 
 ```bash
+# 计算控制主机，生产用户，在 /scratch/frd_muziyao/NWM 下（脚本路径是相对的）
 scripts/install_node22_refresh_timer_health.sh --install    # 落 unit 文件，保持停用，读回确认
 scripts/install_node22_refresh_timer_health.sh --enable     # 装载 hourly timer
 systemctl --user list-timers nhms-node22-refresh-timer-health.timer --no-pager
@@ -876,10 +895,13 @@ unit 文件复位成恢复基线里记录的样子——**第一次** `--install
 状态）时重新记录。`protected.before` 仍是每次调用各自捕获、不跨调用。探针 timer 或 service
 仍处于 enabled/active 时 `--install` 直接拒绝（stderr `refusing --install: ...; run --rollback first`，
 退出 1），而且拒绝发生在 `protected.before` 捕获之前，state root 与 unit 目录里的文件一个字节都不变。
-node-22 旧状态没有这个标记：探针 timer 是 armed 的，所以 `--install` 会先要求 `--rollback`；那次
+node-22 旧状态（2026-09-25 记录，#2294）没有这个标记：探针 timer 是 armed 的，所以 `--install` 会先要求 `--rollback`；那次
 回滚会删掉探针 unit（旧状态没有 `.before` 文件），这是正确的，下一次 `--install` 就把"没有探针
 unit"记为基线。已安装但未 arm 的旧主机，第一次新 `--install` 之前先跑一次 `--rollback`，否则已
 安装的文件会被记成基线。
+`w3` 上（2026-11-27 核对，见 [receipt](../receipts/2026-11-27-w3-refresh-install-state.md)）探针的 state root 同样不存在，
+探针 timer 是 enabled/active：这里的 `--rollback` 走的是同一条路，会删掉正在值守的探针 unit，
+从那一刻到下一次 `--install` 加 `--enable` 完成之前探针不值守。
 
 `--install` 与 `--rollback` 的成功都**以读回为准，不以 systemctl 调用是否报错为准**：
 `--install` 在 `disable --now` 之后、`--rollback` 在 `daemon-reload` 之后，脚本对探针
@@ -905,14 +927,14 @@ timer 和 service **各自独立**读一次 `is-enabled` / `is-active`，只有�
 把 08-28 那个动作往上做一层（停掉探针 timer 而不重启），整条 lane 会悄悄退回改动前的
 盲区，而所有表面依然全绿。
 
-所以探针 timer 用和上面 refresh timer 完全一样的口径单独核对，两列都不合格即失败：
+所以探针 timer 用和上面 refresh timer 完全一样的口径单独核对（在计算控制主机上以生产用户执行），两列都不合格即失败：
 
 | 列 | 命令 | 合格 | 不合格的样子 |
 | --- | --- | --- | --- |
 | `list-timers` 的 `NEXT` | `systemctl --user list-timers nhms-node22-refresh-timer-health.timer --no-pager` | 具体时刻（hourly + 最多 5 分钟 jitter） | `-`——探针自己停了，从此不再产生任何判决 |
 | 探针 receipt 的 `generated_at` | `jq -r .generated_at /scratch/frd_muziyao/nhms-prod/workspace/refresh-timer-health/receipts/latest.json` | 距今 < 2 小时（hourly cadence 的两倍） | 更旧——不管 `verdict` 字段写的是什么，那都是一份过期的判决 |
 
-这条递归**没有**在代码里关掉：能关掉它的观察者必须不是 node-22 上的 user timer，
+这条递归**没有**在代码里关掉：能关掉它的观察者必须不是计算控制主机上的 user timer，
 那是本次改动明确不做的 off-host 路由。本节欠的是把这件事说清楚，
 外加一条运维能自己跑的检查命令。
 
@@ -921,6 +943,7 @@ scheduler 与 refresh oneshot 的活执行根。把探针单文件 stage 到 che
 用精确解释器跑，并显式指定 receipt 根，避免写进生产 workspace：
 
 ```bash
+# 计算控制主机，生产用户
 /scratch/frd_muziyao/NWM/.venv/bin/python /scratch/frd_muziyao/tmp/<staged>/node22_refresh_timer_health.py \
   --health-receipt-root /scratch/frd_muziyao/tmp/<staged>/receipts --json
 ```
@@ -975,11 +998,11 @@ authority：当时 domain 输出 13 个 basin；river 输出 20,100 条 feature�
 刷新后重新部署前端，公网
 `https://test.nwm.ac.cn` 才会看到新增流域边界和一致的缩放河网底图。
 
-显式补跑某个 00/12 UTC 周期时，使用 node-22 的 DB-free 入口脚本，不要手工
+显式补跑某个 00/12 UTC 周期时，在计算控制主机上以生产用户使用计算角色的 DB-free 入口脚本，不要手工
 拼 `lookback/cycle-lag`，也不要改 scheduler systemd env：
 
 ```bash
-ssh -p 32099 frd_muziyao@210.77.77.22
+# 计算控制主机，生产用户
 cd /scratch/frd_muziyao/NWM
 
 # 先 plan，确认 source_cycles/candidates/blocked_candidates。

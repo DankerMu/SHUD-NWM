@@ -1,11 +1,8 @@
 **分册：流域投递、Slurm Gateway、API / 展示与监控**
 
-> **计算角色主机说明**：本页的 "node-22" 指计算角色，现由 w3 / w2 承载；字面的
-> `ssh … 210.77.77.22` 命令一律登录 w3 后执行，**不得**在原主机上执行。详见
-> [`current-production-ops.md`](../current-production-ops.md) 顶部横幅。
-
 本页是当前生产值守手册的 §3.1.4、§3.2、§3.3、§3.4 分册（#1103 拆分，正文逐字保留）。
 索引与全部分册入口见 [`../current-production-ops.md`](../current-production-ops.md)。
+本页里在计算控制主机上执行的步骤都以生产用户执行；是哪台主机、怎么进入见 [`w2-w3-compute-topology.md`](../w2-w3-compute-topology.md#1-主机与角色) §1。
 
 #### 3.1.4 流域投递规范（发给建模者；平台侧照此验收）
 
@@ -17,6 +14,9 @@
 > |---|---|---|
 > | node-22 `/volume/nwm/Basins` | 本地 175 T xfs (`/dev/sda`) | **投递落点与权威**：`NHMS_BASINS_ROOT`，scheduler / baseline publish / provision 全走它 |
 > | node-22 `/ghdc/data/nwm/Basins` ≡ node-27 `/home/ghdc/nwm/Basins` | NFS `ghdc:/home/ghdc`（同 inode，确为一份） | node-27 ingest 的 `BASINS_ROOT`；#1699 的 staged 树也在这儿 |
+>
+> 2026-11-23 迁到 `w3` / `w2` 后两条路径都不变：`/volume/nwm` 在 `w3` 本地盘上，只读导出给 `w2`；
+> `/ghdc/data` 是 node-27 `/home/ghdc` 导出给两台计算主机的 NFS 挂载（2026-11-24 采集，`w2-w3-compute-topology.md` §1、§2）。
 >
 > 两棵树**内容本就不同**且是有意的：权威根放原始投递名（`CJ-DTH-XJ`），NFS 树放
 > only-root staging 后的名字（`DTH_XJ`）。所以「两端不一致」不等于漂移——比对前先确认
@@ -108,7 +108,7 @@ preflight → begin（停 timer）→ clone → publish → refresh → finish�
 
 ### 3.2 Slurm Gateway
 
-Slurm Gateway 当前仍在 node-22。它负责把调度/诊断请求转成 Slurm 行为；
+Slurm Gateway 属计算角色，跑在计算控制主机上。它负责把调度/诊断请求转成 Slurm 行为；
 node-27 display 不调用 Slurm Gateway。
 
 四个 Slurm 变更操作（submit / array submit / cancel / enabled reset）要求
@@ -118,10 +118,10 @@ scheduler token 到 reset 是 403）。token 只经 POST/DELETE 变更请求转�
 health/read 路由保持匿名且不携带。**没有该 token 时 scheduler preflight
 fail-closed**（不会仅凭匿名 health 就报 submit-ready）。
 
-确认 node-22 Slurm Gateway：
+在计算控制主机上以生产用户确认 Slurm Gateway：
 
 ```bash
-ssh -p 32099 frd_muziyao@210.77.77.22
+# 计算控制主机，生产用户
 pgrep -af '[s]ervices.slurm_gateway'
 ss -ltnp 2>/dev/null | grep -E ':8090\b' || true
 curl -fsS --max-time 2 http://127.0.0.1:8090/api/v1/slurm/health
@@ -130,7 +130,7 @@ squeue -u "$USER" -o "%.18i %.20j %.2t %.10M %.10l %.6D %R"
 
 > 注：`/health`（bare）是已退役的 `nhms-compute-api.service`（#3394）的路由
 > （见本节末尾 2026-06-22 现场验证，当时在 `:8001` 返回
-> `{"status":"ok",...}`）；计算 host 上除 Slurm Gateway 外不再承载任何 API。
+> `{"status":"ok",...}`）；计算主机上除计算控制主机的 Slurm Gateway 外不再承载任何 API。
 > standalone Slurm gateway 的 health 实际是 `/api/v1/slurm/health`。8090 端口上
 > 只有 `/api/v1/slurm/health`，不要混用两个路径。
 
@@ -139,23 +139,26 @@ squeue -u "$USER" -o "%.18i %.20j %.2t %.10M %.10l %.6D %R"
 - Gateway 只监听 loopback。**实测当前 live 端口是 `127.0.0.1:8090`**（2026-08
   现场观察，而非模板默认 8081）：`SLURM_GATEWAY_URL=http://127.0.0.1:8090`，
   `ss -ltnp` 显示仅 `127.0.0.1:8090`（有 IPv6 loopback 时另见 `::1`）。
+  迁到 `w3` 后，2026-11-26 在 `w3` 上的 unit 漂移探针读到已部署的 gateway live drop-in 与仓库副本相同
+  （其中 `SLURM_GATEWAY_URL=http://127.0.0.1:8090`，见
+  [receipt](../receipts/2026-11-26-issue-3394-compute-api-unit-retired.md)）；`ss` 的监听结果没有在 `w3` 上重测。
 - 共享凭据只存在于 untracked、owner-mode-0600 的 env 源
   （gateway unit 的 `EnvironmentFile=` 与 scheduler unit 的 drop-in
   EnvironmentFile 各引同一份）。**变量名入库，值永不入库/日志/OpenAPI/证据**；
   gateway 侧示例路径 `/opt/SHUD-NWM/infra/env/slurm-gateway.secret` 为通用模板，
-  live node-22 实际路径以 drop-in 步骤里的 `/scratch/frd_muziyao/nhms-prod/secrets/slurm-gateway.env`
+  计算角色 live 部署的实际路径以 drop-in 步骤里的 `/scratch/frd_muziyao/nhms-prod/secrets/slurm-gateway.env`
   为准。
 - **进程级 loopback bind guard（可部署的等价网络漂移控制）**：
   `python -m services.slurm_gateway` 在 uvicorn 前 fail-closed，拒绝任何
   非 loopback bind（`0.0.0.0` / `::` / hostname / 非 loopback IP）；
-  node-22 用户无非交互 sudo，这即是本 issue 要求的用户级等价第二控制。
+  原 node-22 主机上的生产用户无非交互 sudo（#1684，2026-08-28 记录；`w3` 上没有重测），这即是本 issue 要求的用户级等价第二控制。
 - **HTTP 实现协议固定 h11（checked-in 模块入口已钉死）**：
   `services/slurm_gateway/__main__.py` 以 `uvicorn.run(..., http="h11")` 启动，
-  规避 uvicorn 默认 `http="auto"` 落到 node-22 长期保持的活动 Python 3.12.7 环境里
-  已实测损坏的可选原生 httptools（`AttributeError: module 'httptools.parser'
+  规避 uvicorn 默认 `http="auto"` 落到原 node-22 主机当时长期保持的活动 Python 3.12.7 环境里
+  已实测损坏（2026-08-29 现场复现，见 §3.2.2）的可选原生 httptools（`AttributeError: module 'httptools.parser'
   has no attribute '__all__'`，gateway 在 bind 前 exit 1）。
   `UVICORN_HTTP=h11` 不影响程序化 `uvicorn.run`，只有显式关键字参数是确定性控制；
-  这是**兼容性钉，不是依赖修复**，不授权 `uv sync`。
+  这是**兼容性钉，不是依赖修复**，不授权 `uv sync`。`w3` 的 Python 3.11 环境里没有重测 httptools，钉照旧保留。
 - root 管理的 host packet-filter/ACL deny 规则属于**可选**的更强防线：仅在
   实际存在并留证时记录（本 run 的 PASS 不依赖它）；remote negative probe +
   bind-guard 拒绝即 live receipt。
@@ -169,6 +172,9 @@ squeue -u "$USER" -o "%.18i %.20j %.2t %.10M %.10l %.6D %R"
 > [`known-issues-pipeline.md`](known-issues-pipeline.md#85-scheduler-stuck-after-missing-forcing-artifact)）；
 > 本节的 rollout / rollback 在停 timer 之前都先确认它没在跑（`pgrep -u "$(id -u)" -f '^(/[^ ]*/)?bash( -[^ ]+)* [^ ]*node22-run-cycle-once\.sh( |$)'` 为空），
 > 且 state-index 自动剪枝没在跑（`systemctl --user is-active nhms-scheduler-state-index-prune.service` 必须是 `inactive` 或 `failed`；它结束时同样会恢复它停掉的 timer）。
+
+本节的 rollout 与 rollback 两块都在计算控制主机上以生产用户执行：调度器与 gateway 的 user unit 都装在这台主机上，
+生产用户的 user manager 也只在这台主机上运行。
 
 先用可逆的 runtime `ConditionPathExists` drop-in 围住调度器（2026-08-28 现场观察到
 `systemctl --user stop nhms-compute-scheduler.timer` 被另一个并发同用户维护会话
@@ -188,10 +194,10 @@ timer。代码回滚由标准 ff-only 部署循环负责
 （`git pull --ff-only` + 远端同步纪律），本块只负责配置/凭据的机械可回滚。
 下面第 3 步 `restart nhms-slurm-gateway.service` 用的是 checked-in 模块入口
 （`python -m services.slurm_gateway`），该入口在程序化 `uvicorn.run` 上钉死
-`http="h11"`——node-22 长期保持的活动 Python 3.12.7 环境的可选原生 httptools
+`http="h11"`——原 node-22 主机当时长期保持的活动 Python 3.12.7 环境的可选原生 httptools
 2026-08-29 现场复现为损坏（`module 'httptools.parser' has no attribute '__all__'`，
 无法 bind），`UVICORN_HTTP=h11` 对程序化调用无效且不改这里任何行为；这是
-兼容性钉，不是依赖修复，**不授权 `uv sync`**。
+兼容性钉，不是依赖修复，**不授权 `uv sync`**（`w3` 的 Python 3.11 环境里没有重测 httptools，钉照旧保留）。
 
 ```bash
 # 0) FENCE the scheduler with REVERSIBLE RUNTIME `ConditionPathExists` drop-ins
@@ -351,7 +357,7 @@ EOF
 chmod 0600 "$HOME/.config/systemd/user/nhms-compute-scheduler.service.d/10-slurm-gateway-token.conf"
 
 #    gateway unit (tracked template is a generic deployable system unit for
-#    /opt/SHUD-NWM + 8081; the LIVE node-22 user-systemd override below RESETS
+#    /opt/SHUD-NWM + 8081; the LIVE user-systemd override on the compute control host below RESETS
 #    the inherited EnvironmentFile list, explicitly re-adds the live base env
 #    /scratch/frd_muziyao/NWM/infra/env/compute.host.env (workspace, object
 #    store, partition, runtime) — preserving the REAL base unit config instead
@@ -434,7 +440,7 @@ expect_status 404 "disabled reset" -X POST http://127.0.0.1:8090/api/v1/slurm/in
 
 # 5) live-safety receipt: loopback bind + remote refusal + bind-guard rejection
 #    - ss -ltnp shows only 127.0.0.1:8090
-#    - from another host: probe node-22:8090 -> connection refused/timed out
+#    - from another host: probe the Slurm Gateway port 8090 of the compute control host -> connection refused/timed out
 #    - a misbound start is rejected by the process itself before uvicorn:
 /scratch/frd_muziyao/NWM/.venv/bin/python -m services.slurm_gateway --url http://0.0.0.0:8090
 #      -> nonzero exit, stderr: non-loopback bind host is not allowed
@@ -520,7 +526,7 @@ systemctl --user is-active nhms-compute-scheduler.timer
 - node-22 `/ghdc/data/nwm/object-store` 与 `/ghdc/data/nwm/published`
   可见，是 node-27 `/home/ghdc/nwm/...` 的同一份 NFS 数据面。
 
-Rollback（先重assert 同一 runtime `ConditionPathExists` 围栏，再从 backup pointer
+Rollback（同样在计算控制主机上以生产用户执行；先重assert 同一 runtime `ConditionPathExists` 围栏，再从 backup pointer
 精确恢复；**本块绝不删除围栏 drop-in、绝不创建释放哨兵、绝不 daemon-reload 释放、也绝不
 恢复 timer**——恢复后的配置/代码必须独立通过完整 rollout 认证门后由操作者手动删除两个
 runtime drop-in 再手动启 timer；全程无匿名兼容旁路）：
@@ -823,10 +829,10 @@ If the host-provisioned `infra/env/node27-ingest.env` is absent, treat ingest
 writer checks as blocked and fix the ingest env. Do not fall back to
 `infra/env/display.env`; that file is display_readonly runtime config only.
 
-node-22 compute 侧优先看 Slurm queue、Gateway、shared NFS 输出：
+计算角色这边在计算控制主机上以生产用户优先看 Slurm queue、Gateway、shared NFS 输出：
 
 ```bash
-ssh -p 32099 frd_muziyao@210.77.77.22
+# 计算控制主机，生产用户
 squeue -u "$USER" -o "%.18i %.20j %.2t %.10M %.10l %.6D %R"
 pgrep -af '[s]ervices.slurm_gateway'
 systemctl --user list-timers 'nhms-compute-scheduler.timer' --no-pager
