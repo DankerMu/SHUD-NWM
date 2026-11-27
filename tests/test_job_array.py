@@ -956,3 +956,18 @@ def test_shipped_profiles_give_forcing_one_core_and_one_thread_and_leave_other_j
         assert (forcing["cpus_per_task"], forcing["shud_threads"]) == (1, 1)
         assert forcing["memory_gb"] == forecast["memory_gb"] == 8
         assert forcing["walltime"] == forecast["walltime"] == "14:00:00"
+
+
+def test_shipped_profiles_bound_every_array_of_every_model_at_64():
+    # #3344: the default profile's max_concurrent is 64 and no model override sets
+    # its own, so every model -- listed under `overrides` or not -- resolves 64 for
+    # every job type through the gateway's loader and resolver.
+    raw = yaml.safe_load(_SHIPPED_PROFILES_PATH.read_text(encoding="utf-8"))["resource_profiles"]
+    profiles = load_resource_profiles(_SHIPPED_PROFILES_PATH)
+
+    overridden = set(raw["overrides"])
+    assert {*_HLJ_DIRECT_GRID_MODELS, "yangtze_shud_v12"} <= overridden
+    for model_id in [*sorted(overridden), "unlisted_model_3344"]:
+        for job_type in DEFAULT_JOB_TYPE_TEMPLATES:
+            resolved = resolve_model_resource_profile(profiles, model_id, job_type=job_type)
+            assert resolved["max_concurrent"] == 64, (model_id, job_type)

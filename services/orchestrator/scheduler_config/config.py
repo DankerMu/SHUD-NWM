@@ -54,6 +54,9 @@ _DB_FREE_PATH_SPECS = (
 
 _DB_FREE_RAW_MANIFEST_ROOT_ENV = "NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT"
 _DB_FREE_CANONICAL_RAW_AUTHORITY_ENV = "NHMS_OBJECT_STORE_COPYBACK_ROOT"
+# The highest aggregate Slurm array concurrency bound a --repair-missing-forcing
+# run accepts: the production bound (#3344). Not the code default of the bound.
+_REPAIR_MAX_SLURM_ARRAY_CONCURRENCY_BOUND = 64
 
 def _repair_missing_forcing_cycle_time(value: datetime | str | None) -> datetime | None:
     if value in (None, ""):
@@ -479,9 +482,10 @@ class ProductionSchedulerConfig:
                     "production scheduler repair_missing_forcing requires an exact-cycle, "
                     "single-cycle, backfill-disabled invocation"
                 )
-            if int(self.slurm_array_concurrency_bound) > 32:
+            if int(self.slurm_array_concurrency_bound) > _REPAIR_MAX_SLURM_ARRAY_CONCURRENCY_BOUND:
                 raise ValueError(
-                    "production scheduler repair_missing_forcing Slurm array concurrency must not exceed 32"
+                    "production scheduler repair_missing_forcing Slurm array concurrency must not exceed "
+                    f"{_REPAIR_MAX_SLURM_ARRAY_CONCURRENCY_BOUND}"
                 )
         elif repair_cycle_time is not None:
             raise ValueError(

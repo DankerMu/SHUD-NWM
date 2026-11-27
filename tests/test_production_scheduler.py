@@ -17139,9 +17139,12 @@ def test_missing_forcing_repair_rejects_missing_partial_or_cold_state(
     assert result.evidence["counts"]["submitted_count"] == 0
 
 
-def test_missing_forcing_repair_rejects_slurm_array_bound_above_32(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="repair_missing_forcing.*32"):
-        _config(
+def test_missing_forcing_repair_accepts_the_production_bound_64_and_rejects_65(tmp_path: Path) -> None:
+    # #3344: production runs the aggregate bound at 64 and the exact-cycle wrapper
+    # loads the scheduler's env file, so a repair at 64 must construct; one above
+    # is refused while the config is built, before any scheduler or submission.
+    def repair_config(bound: int) -> ProductionSchedulerConfig:
+        return _config(
             tmp_path,
             db_free=True,
             lookback_hours=0,
@@ -17149,8 +17152,15 @@ def test_missing_forcing_repair_rejects_slurm_array_bound_above_32(tmp_path: Pat
             backfill_enabled=False,
             repair_missing_forcing=True,
             repair_missing_forcing_cycle_time="2026-05-21T06:00:00Z",
-            slurm_array_concurrency_bound=33,
+            slurm_array_concurrency_bound=bound,
         )
+
+    accepted = repair_config(64)
+    assert accepted.repair_missing_forcing is True
+    assert accepted.slurm_array_concurrency_bound == 64
+
+    with pytest.raises(ValueError, match=r"repair_missing_forcing Slurm array concurrency must not exceed 64$"):
+        repair_config(65)
 
 
 def test_missing_forcing_repair_accepts_validated_state_index_lineage_without_start_mode() -> None:

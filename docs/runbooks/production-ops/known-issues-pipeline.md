@@ -474,7 +474,8 @@ Exact-cycle missing-forcing regeneration (node-22 only):
    exact-cycle use.
 5. Acceptance requires one `produce_forcing_array` cohort per source with 18
    members (for the current registry) and Slurm array throttles whose concurrent
-   total is at most 32. The subsequent forecast stage must retain each basin's
+   total is at most the configured aggregate bound (a repair above 64 is
+   refused before submission). The subsequent forecast stage must retain each basin's
    selected `init_state_*` and lineage. Login-node `ForcingProducer` calls,
    forecast-only submission, cold fallback, a different cycle, or a raw
    identity mismatch are failures, not degraded success.
@@ -483,10 +484,12 @@ Business-readiness receipt after fix:
 
 - `nhms-compute-scheduler.service` and timer run with
   `NHMS_SCHEDULER_DB_FREE_REQUIRED=true`, no `DATABASE_URL`, and
-  `NHMS_SCHEDULER_SLURM_ARRAY_CONCURRENCY_BOUND=32` plus a Slurm resource
-  profile whose `max_concurrent=32`. The receipt must show multi-task
-  `produce_forcing_array` submissions whose simultaneous array throttles sum
-  to at most 32. `NHMS_SCHEDULER_CONCURRENT_SUBMIT_BOUND` only bounds
+  `NHMS_SCHEDULER_SLURM_ARRAY_CONCURRENCY_BOUND=64` plus a Slurm resource
+  profile whose `max_concurrent=64` (both 64 since 2026-11-27, #3344, under
+  measurement against the 2026-11-26 22:00Z pass; 32 is the value to go back
+  to). The receipt must show multi-task `produce_forcing_array` submissions
+  whose simultaneous array throttles sum to at most the configured aggregate
+  bound. `NHMS_SCHEDULER_CONCURRENT_SUBMIT_BOUND` only bounds
   source/cycle cohort control threads; it is not accepted as forcing-concurrency
   proof. GFS and IFS cohorts may overlap and synchronize at pass finalization.
 - The cohort run id carries a stable digest of its candidate membership. A

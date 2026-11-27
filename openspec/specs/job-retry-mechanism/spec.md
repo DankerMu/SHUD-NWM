@@ -2742,7 +2742,7 @@ same runtime repository and backend selectors as initial scheduler submissions.
   without submitting work
 - **AND** submit mode SHALL execute the existing `ForecastOrchestrator` chain
   beginning with `produce_forcing_array`, retaining the source/cycle cohort and
-  global Slurm `%32` array bound
+  configured global Slurm array bound
 - **AND** the scheduler MUST NOT invoke login-node forcing, submit forecast
   directly, fall back to cold start, or replace the selected warm-state lineage.
 - **AND** a terminal forcing job from a prior attempt MUST NOT suppress the new
@@ -2777,9 +2777,9 @@ same runtime repository and backend selectors as initial scheduler submissions.
 
 - **WHEN** GFS and IFS repair cohorts are eligible in the same scheduler pass
 - **THEN** their simultaneously active Slurm array throttles MUST sum to no more
-  than 32
+  than the configured aggregate bound, which itself MUST NOT exceed 64
 - **AND** repair configuration requesting an aggregate Slurm array concurrency
-  above 32 MUST be rejected before submission.
+  above 64 MUST be rejected before submission.
 
 #### Scenario: downstream canonical rejection preserves the original blocker
 
