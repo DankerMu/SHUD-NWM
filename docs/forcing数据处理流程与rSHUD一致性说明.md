@@ -272,7 +272,8 @@ legacy `idw` 通过 `workers/model_registry/qhh_production_bootstrap.py:328-473`
 
 ### 4.5 阈值/钳位：显式对齐 SHUD/rSHUD
 
-`workers/canonical_converter/converter.py` 按 SHUD 的约定处理（提交 `8cced52`、`8a8ba3d`）：**辐射负值钳为 0、降水负增量钳为 0（SHUD 自身把 `prcp<1e-4` 记为 0）、`rh` 钳到 `[0,1]`；亚阈值的微负值记 anomaly 但 `quality_flag` 保持 `ok`，超阈值仍标 `warn`**。对应 AutoSHUD `LDAS_UnitConvert.R:82,85`（`rh>100→100`、`p_mm.day<1e-4→0`）。
+`workers/canonical_converter/converter.py` 按 SHUD 的约定处理（提交 `8cced52`、`8a8ba3d`）：**IFS 下行短波的负值钳为 0（净辐射不在这里钳，SHUD 读入时自身做 `rn<0→0`）、降水负增量钳为 0（SHUD 自身把 `prcp<1e-4` 记为 0）、`rh` 钳到 `[0,1]`；
+亚阈值的微负值记 anomaly 但 `quality_flag` 保持 `ok`；超阈值时 GFS APCP 与 IFS 短波标 `warn`，IFS 降水标 `warning_negative_precip`（连续 3 次为 `error_precip_accumulation`）**。对应 AutoSHUD `LDAS_UnitConvert.R:82,85`（`rh>100→100`、`p_mm.day<1e-4→0`）。
 
 ---
 
