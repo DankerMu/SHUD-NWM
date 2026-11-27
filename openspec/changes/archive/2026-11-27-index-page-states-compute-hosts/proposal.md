@@ -38,11 +38,12 @@ scenario "The compute role names its hosts", requires all three of this page.
   blockquote it is, with one phrase reworded ("计算侧活动操作").
 - **Two more lines of the page**: the scope line names the compute role; the sentence "分册正文与
   拆分前逐字相同" says what is true today (identical at the split, revised since).
-- **Two static tests** in `tests/test_node22_entrypoint_invariant.py`. Over the index page and every
+- **Three static tests** in `tests/test_node22_entrypoint_invariant.py`. Over the index page and every
   `production-ops/` page: no command (a line, or a command continued over lines) is addressed to the
   retired host (`ssh`, `scp`, `rsync`, `sftp` or a `user@210.77.77.22` address). On the index page:
   one paragraph outside any blockquote names the two hosts, the retired host as a rollback archive
-  only, says that no command is run there, and links the topology runbook.
+  only, says that no command is run there, and links the topology runbook. The third test runs the
+  command classifier on literal examples (inputs that must be caught, inputs that must not).
 - **`production-ops-readiness`**: the requirement "Current production ops runbook reflects verified
   27-centric topology" is removed and added back as "Current production ops runbook reflects the
   verified node-27-centric topology and names the compute hosts". Three scenarios are carried over
@@ -68,5 +69,5 @@ scenario "The compute role names its hosts", requires all three of this page.
 ## Impact
 
 - Docs: `docs/runbooks/current-production-ops.md`.
-- Tests: `tests/test_node22_entrypoint_invariant.py` (two new tests).
+- Tests: `tests/test_node22_entrypoint_invariant.py` (three new tests).
 - Specs: `production-ops-readiness`, `production-topology-contract`.

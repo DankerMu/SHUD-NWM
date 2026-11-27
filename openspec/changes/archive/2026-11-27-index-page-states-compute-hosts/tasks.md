@@ -27,6 +27,8 @@ reads from the index.
   `<user>@210.77.77.22` address occurs anywhere. A command continued with `\` over several lines is
   read as one command. The body statement of the index page names the bare address and stays legal.
   The scan proves that it read something (more than one surface; the node-27 `ssh` form is found).
+  A third test, `test_retired_host_command_classifier_reads_the_literal_examples`, runs the
+  classifier on literal inputs.
 - [x] 2.2 The same file, `test_index_page_states_the_compute_hosts_outside_a_blockquote`: the index
   page without its blockquote lines and fenced blocks has one paragraph (read as joined text) that
   names `` `w3` `` and `` `w2` `` (as code-font names, so that the file name of the topology runbook
@@ -46,13 +48,13 @@ reads from the index.
 - [x] 3.2 Hard gate: finding multiset before and after, each difference listed; the page stays in
   the scan set.
 - [x] 3.3 `narration_count.py` plain and `--tokens` before and after; moved name tokens listed.
-- [ ] 3.4 After the archive: the three carried-over scenarios byte-identical in the main spec
+- [x] 3.4 After the archive: the three carried-over scenarios byte-identical in the main spec
   (extracted blocks compared); the diff of `production-topology-contract` is the one `WHEN`.
 
 ## 4. Last push
 
-- [ ] 4.1 `openspec archive index-page-states-compute-hosts --yes`; both main specs validate.
-- [ ] 4.2 Task 3.6 of `openspec/changes/sweep-compute-role-narration/tasks.md` ticked in the same push.
+- [x] 4.1 `openspec archive index-page-states-compute-hosts --yes`; both main specs validate.
+- [x] 4.2 Task 3.6 of `openspec/changes/sweep-compute-role-narration/tasks.md` ticked in the same push.
 
 ## Evidence Floor
 
