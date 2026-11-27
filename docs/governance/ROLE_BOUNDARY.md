@@ -15,24 +15,24 @@ full API and is not a production deployment category.
 
 **Current physical deployment (2026-06-21):**
 
-- The compute role — `node-22` in the bullets below and in every identifier — is
-  hosted since 2026-11-23 on two dedicated LAN hosts behind node-27: `w3` (Slurm
-  controller, compute, scheduler timers, Slurm Gateway, scheduler journal) and
-  `w2` (compute, `workspace/runs`). The host `210.77.77.22` is retired from NHMS
-  compute and kept only as a rollback archive. Every boundary stated for node-22
-  in this document applies to both hosts. The one exception is the local PG
-  `:55433` sentence below: it is historical, archived/stopped, do-not-connect
-  material about the retired host itself. Host layout:
-  [`w2-w3-compute-topology.md`](../runbooks/w2-w3-compute-topology.md).
-- node-22 runs the Slurm/SHUD compute wrapper. It does **NOT** connect to any
-  active database. The local PG `:55433` instance on node-22 is historical,
-  archived, and stopped as of the 2026-06-29 retirement receipt — do not
-  connect to it.
+- The compute role is hosted since 2026-11-23 on two dedicated LAN hosts behind
+  node-27: `w3` (the compute control host: Slurm controller, compute, scheduler
+  timers, Slurm Gateway, scheduler journal) and `w2` (compute, `workspace/runs`).
+  The host `210.77.77.22` is retired from NHMS compute and kept only as a
+  rollback archive. Every boundary stated for the compute role in this document
+  applies to both hosts. `node-22` / `node22` is the codename of the compute role
+  and stays in identifiers (script, unit, env-key and schema names); where this
+  document says "the retired node-22 host" it means `210.77.77.22` itself. Host
+  layout: [`w2-w3-compute-topology.md`](../runbooks/w2-w3-compute-topology.md).
+- The compute role runs the Slurm/SHUD compute wrapper. It does **NOT** connect
+  to any active database. The local PG `:55433` instance on the retired node-22
+  host is historical, archived, and stopped as of the 2026-06-29 retirement
+  receipt — do not connect to it.
 - node-27 hosts the active primary PostgreSQL (`:55432`), the ingest workers, the
-  display API (`:8080`), and the frontend on a single machine. node-27 reads
-  node-22's compute artifacts via NFS (`/home/ghdc/nwm/` ↔ node-22
-  `/ghdc/data/nwm/`) and writes its own database directly.
-- Public service entry: `https://test.nwm.ac.cn` (27 reverse-proxied).
+  display API (`:8080`), and the frontend on a single machine. node-27 writes its
+  own database directly. It reads the compute artifacts of the compute role via
+  NFS: `/home/ghdc/nwm/` on node-27 is `/ghdc/data/nwm/` on the compute hosts.
+- Public service entry: `https://test.nwm.ac.cn` (reverse-proxied by node-27).
 
 **Design-time role contract (preserved below) describes capability boundaries
 that the codebase still enforces; physical host assignment may differ.**
@@ -40,16 +40,17 @@ that the codebase still enforces; physical host assignment may differ.**
 `compute_control` is a logical role for scheduler execution, Slurm submission,
 writable workspace/object-store roots, database mutation, and publication of
 display artifacts. In the current physical deployment, those active database
-writes happen through node-27 ingest, not through node-22. node-22 currently
-hosts compute/Slurm/artifact production only and may run the standalone
-`slurm_gateway`; it must not be treated as the active NHMS database writer.
+writes happen through node-27 ingest, not through the compute role.
+The compute hosts currently host compute/Slurm/artifact production only and may
+run the standalone `slurm_gateway`; they must not be treated as the active NHMS
+database writer.
 The `display_readonly` role serves the display API/frontend and reads the
 readonly database plus published artifacts.
 
-Shared contracts are not "node-22 code" or "node-27 code". Paths such as
-`packages/common`, `openapi/nhms.v1.yaml`, `db/migrations`, `schemas`, and
-generated API types define contracts used by both nodes. node-22 may produce
-compute artifacts that conform to those contracts, and node-27 may consume or
+Shared contracts are neither code of the compute role nor code of node-27.
+Paths such as `packages/common`, `openapi/nhms.v1.yaml`, `db/migrations`,
+`schemas`, and generated API types define contracts used by both.
+The compute role may produce compute artifacts that conform to those contracts, and node-27 may consume or
 apply them during ingest/display flows, but the contracts remain
 `shared_contract`.
 
@@ -58,9 +59,8 @@ Current verification oracle route:
 - Local: lint, unit tests, frontend type/build checks, and OpenSpec validation.
 - node-27: live active DB, ingest, display API, frontend, readonly boundary, and
   cross-plane identity receipts.
-- node-22: Slurm scheduling/SHUD compute behavior only when sbatch, Slurm
-  gateway, SHUD runtime, or scheduler behavior changes. Run it on `w3`, the
-  compute role's control host.
+- The compute control host (`w3`): Slurm scheduling/SHUD compute behavior only
+  when sbatch, Slurm gateway, SHUD runtime, or scheduler behavior changes.
 
 Local checks are required but do not replace node-27 live DB/display receipts.
 
@@ -290,7 +290,8 @@ Forbidden capabilities:
 - Hiding role-specific control-plane actions inside common helpers.
 - Changing `openapi/nhms.v1.yaml` or generated frontend API types as part of
   #360.
-- Classifying shared contracts as exclusively node-22 or node-27 owned paths.
+- Classifying shared contracts as paths owned exclusively by the compute role
+  or by node-27.
 
 Verification oracle:
 
