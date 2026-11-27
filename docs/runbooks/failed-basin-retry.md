@@ -104,7 +104,7 @@ Four DB-free decisions wait on an operator. Until the read-only operator-action 
 CLI lands (#1186, follow-up PR), list them by reading the newest `scheduler_*.json` pass
 evidence file under the evidence root and filtering `blocked_candidates` by the decision
 literal (plus the not-selected `source_cycles` entries for breaker-released cycles); the
-exact commands, the evidence-root source and node-22 execution discipline are in
+exact commands, the evidence-root source and the execution discipline of the compute control host are in
 [`node22-control-plane-manual-recovery.md`](node22-control-plane-manual-recovery.md).
 
 - `permanent_failure` — the failure classifier called the error permanent (for example
@@ -332,7 +332,8 @@ refuses every comment query — owner-scoped, global and legacy — unless
 `AccountingStoreFlags` line is **unknown** and stays query-free, while an explicitly
 comment-less cluster may enter the § automatic unique fallback below. **This cluster does
 not store it** (`AccountingStoreFlags = (null)`, Slurm 23.11.4, measured on node-22
-2026-08-18), so each reserved-unbound cohort master that the fallback cannot uniquely prove
+2026-08-18; read again on `w3` 2026-11-27 with the same line and version, receipt
+[`2026-11-27-w3-pgrep-and-slurm-accounting-flags.md`](receipts/2026-11-27-w3-pgrep-and-slurm-accounting-flags.md)), so each reserved-unbound cohort master that the fallback cannot uniquely prove
 is recorded `accounting_unavailable` / `comment_accounting_unproven` and **stays
 `reserved`** instead of being demoted.
 
@@ -519,7 +520,7 @@ Operating notes for the fallback (#2655):
   backup; **never** demote for this.
 - **An all-foreign-key window is `fallback_no_match`**, not
   `ambiguous_fallback_match`: every master in the window provably belongs to
-  another reservation. The node-22 stall probe suppresses only
+  another reservation. The scheduler stall probe suppresses only
   `ambiguous_fallback_match:comment_accounting_unproven`, so this outcome is
   not suppressed and raises the stall alert; treat it as "no job of this
   reservation is visible" and route it to the confirmed-dead checks of
@@ -576,7 +577,7 @@ first step that is not satisfied:
    Disposition case 3 below in full — `sacct`/`squeue` proof, typed CAS, receipt, and
    next-pass verification — and keep the complete receipt.
 
-**#1565 node-22 receipt rule.** The automatic-fallback validation on node-22 is
+**#1565 receipt rule on the compute control host.** The automatic-fallback validation there is
 **read-only live accounting plus scratch journal only**: prove the live
 capability is explicit `False` (`scontrol show config | grep -i
 AccountingStoreFlags`), query historical `nhms_forecast` accounting rows over a
@@ -631,7 +632,8 @@ stand in instead of manufacturing a held row.
    The command never asks for interactive confirmation; it requires the explicit
    non-interactive `--confirm` flag and exact compare-and-swap inputs (the persisted
    `submission_attempt` and `submission_attempt_started_at`), plus named operator evidence.
-   On node-22:
+   On the compute control host, as the production user (hosts and roles:
+   [`w2-w3-compute-topology.md`](w2-w3-compute-topology.md#1-主机与角色) §1):
 
    ```bash
    # 1. Independently prove the job dead for THIS attempt window (name/user/account/submit):
@@ -662,7 +664,7 @@ stand in instead of manufacturing a held row.
    #    before believing any flat file.
 
    # 3. Demote (both entrypoints behave identically; missing --confirm exits 2 with no write).
-   #    node-22 active checkout: exact interpreter, not bare uv (pre-maintenance rule):
+   #    active checkout of the compute role: exact interpreter, not bare uv (standing rule, root CLAUDE.md):
    /scratch/frd_muziyao/NWM/.venv/bin/python -m services.orchestrator.cli demote-reserved-job \
      --journal-root <journal-root> \
      --job-id job_cycle_<source>_<cycle>_forecast[...] \

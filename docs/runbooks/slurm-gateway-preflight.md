@@ -1,7 +1,7 @@
-# Node-22 Slurm Gateway Submission Preflight Runbook
+# Slurm Gateway Submission Preflight Runbook
 
 Scope: the pre-submit gate the production scheduler runs before handing a SHUD
-run to the node-22 Slurm gateway / host submission path (M23-7, issue #258).
+run to the Slurm gateway of the compute role / host submission path (M23-7, issue #258).
 When any check fails the scheduler records a typed blocker and does **not**
 submit, mark an active job, or mark a hydro success (`never-fake-success`). When
 the gateway is genuinely healthy and reachable, the gateway check adds no blocker
@@ -11,7 +11,7 @@ the gateway is genuinely healthy and reachable, the gateway check adds no blocke
 
 - `slurm_execution_enabled` is true (`SLURM_EXECUTION_ENABLED` /
   `NHMS_PRODUCTION_SLURM_ENABLED`). Otherwise preflight reports `not_required`.
-- `SLURM_GATEWAY_URL` points at the real node-22 gateway (default
+- `SLURM_GATEWAY_URL` points at the real gateway of the compute role (default
   `http://localhost:8000` is the co-located dev/mock convention only).
 - `SLURM_GATEWAY_BACKEND` selects `mock` (dev) or `slurm` (production). Any other
   name is rejected by `create_gateway`, so the gateway check is unhealthy.
@@ -33,7 +33,7 @@ the gateway is genuinely healthy and reachable, the gateway check adds no blocke
    `SLURM_GATEWAY_UNAVAILABLE` with a reason naming the reported backend, and a
    body without a backend name is judged on health and binaries alone. The
    probe is bounded and never raises: a probe that cannot determine state fails
-   **BLOCKED**, never a false PASS. On a node-22 compute container with no Slurm
+   **BLOCKED**, never a false PASS. On a host with no Slurm
    CLI this BLOCKED state is a real, expected terminal outcome — not a bug.
 
 Adjacent pre-submit checks (same gate): allowed sbatch templates

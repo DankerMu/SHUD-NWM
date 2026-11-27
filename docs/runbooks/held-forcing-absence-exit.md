@@ -88,7 +88,8 @@ Everything else rests on the precondition above. You attest it with `--checked-b
 
 2. **Run the precondition queries** above and keep their output.
 3. **Release.** The command is the existing `demote-reserved-job`; the journal picks the forcing branch
-   from the row it re-reads under the lock. On node-22 use the exact interpreter, not bare `uv`:
+   from the row it re-reads under the lock. On the compute control host (hosts and roles:
+   [`w2-w3-compute-topology.md`](w2-w3-compute-topology.md#1-主机与角色) §1) use the exact interpreter, not bare `uv`:
 
    ```bash
    /scratch/frd_muziyao/NWM/.venv/bin/python -m services.orchestrator.cli demote-reserved-job \

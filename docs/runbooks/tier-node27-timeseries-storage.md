@@ -871,7 +871,7 @@ FROM pg_control_system()` as `nhms_display_ro` on the primary). Limitation:
 `initdb` sets the identifier and every physical clone copies it (pg_basebackup,
 a PGDATA copy or snapshot, a streaming standby), so it tells independently
 initialised clusters apart (a disposable test database shows a different value)
-but not a physical copy from its origin; the node-22 :55433 cluster (archived,
+but not a physical copy from its origin; the :55433 cluster of the retired node-22 host (archived,
 stopped rollback archive, not current topology, do not connect) may share
 node-27's lineage. Read the block as cluster lineage, not as host
 identity. It names the SQL-sample cluster only: API samples go through the
@@ -1092,7 +1092,7 @@ Archive status:
   `/home/nwm/NWM/.venv/bin/python`. There is no bare `python`/`python3`, no
   `sudo`-invoked repo Python, and no `uv run` without `--no-sync` anywhere in
   this section — `--no-sync` is what keeps an operator shell from rebuilding the
-  shared environment mid-window (the node-22 interpreter rule in `CLAUDE.md` is
+  shared environment mid-window (the interpreter rule for the compute hosts in `CLAUDE.md` is
   the same hazard). The `.venv` path is also the exact interpreter a systemd
   `ExecStart` uses, so observation and execution bind the same code.
 - **A historical receipt is never evidence for a 4.x observation, and file
@@ -2910,7 +2910,7 @@ deleted in #3221 and is not part of G7.)  C4
 receipt lane.  The direct C3 owner then binds its PASS receipt to C4's exact bytes,
 C4's strict GFS/IFS job-log facts, current loopback API identities, readonly DB
 rows, source-scoped registry completeness, and the G1 valid-times baseline.  This
-proves the current published display chain without claiming node-22 scheduling.
+proves the current published display chain without claiming scheduling by the compute role.
 This rollout waives nothing in C1-C4.  The dedicated
 C4 display receipt lane and independent #1970 river-click P95 lane are executable fences below. The legacy
 monitoring lane was retired by #3202 and was never a C4 substitute. C4 invokes the five-key lane with the
@@ -4373,7 +4373,7 @@ The version-3 supervisor ledger derives exactly two migration applies, one
 recovery decompression, one dry-run, one enforce, one dump, two container
 `pg_restore` probes and before/after benchmark children. Replay-supervisor
 activation is exactly one; recurring compression-service activation,
-retention, drill, role and node-22 mutation counts are zero. Each event carries
+retention, drill, role and compute role mutation counts are zero. Each event carries
 a unique ID, concrete argv, PID, strict UTC/monotonic interval, bounded output
 identity, exit, mutation SHA/database/run-plan/run identity and artifact
 associations. Raw activity, relation-lock, canonical user-unit `systemctl show`
@@ -4571,7 +4571,7 @@ human authorization for the exact decompression/recompression mutation.
 The user granted that separate authorization on 2026-07-15 for exactly one
 decompression and one bound-1 recompression of
 `_timescaledb_internal._hyper_3_7_chunk`; it does not authorize retention,
-node-22 work, timer activation, another chunk, or an additional retry.
+work on the compute role, timer activation, another chunk, or an additional retry.
 
 Before decompression, keep both compression units inactive and quiesce
 autopipe as in step 4. Capture `recovery.preflight` before mutation: verify the
@@ -4686,7 +4686,7 @@ WHERE format('%I.%I', chunk_schema, chunk_name) = :'target_chunk'
   terminal-stated right now), and no recent `forcing_handoff` failure whose
   run overlaps the window.
 
-- [ ] **The window is older than the product-regeneration horizon.** node-22
+- [ ] **The window is older than the product-regeneration horizon.** The compute role
   regenerates products for cycles well after their initial run, so a chunk
   whose `range_end` is still inside that horizon is a live target:
 
@@ -4974,10 +4974,10 @@ outside the lag window.
 预留膨胀空间（历史实测 ~400 G/周,先 `df -h /home`），追平后由
 compression timer 按 lag 自动重新压缩。
 
-node-22 侧的对偶约束（2026-09-22；#3225 调整 lag）：调度器回填深度 `NHMS_SCHEDULER_LOOKBACK_HOURS +
+计算角色的对偶约束（2026-09-22；#3225 调整 lag）：调度器回填深度 `NHMS_SCHEDULER_LOOKBACK_HOURS +
 NHMS_SCHEDULER_CYCLE_LAG_HOURS` 必须 ≤ 本 lag（48 h），生产取 32 + 10 = 42 h，留 6 h 余量（lag 取
 16 h 时二者之和恰等于 48 h），保证常态下回填（含新流域冷启动追赶）不会写进已压缩 chunk。
-超过 48 h 的中断恢复，除本节的先解压外，还须临时调大 node-22 的 lookback 覆盖中断跨度（否则
+超过 48 h 的中断恢复，除本节的先解压外，还须临时调大计算角色调度器的 lookback 覆盖中断跨度（否则
 中断前的 cycle 在窗外、下一个 cycle 永久等待前驱），追平后改回 32。见
 `production-ops/service-bringup.md` §3.1.1。
 
@@ -6523,7 +6523,7 @@ The #2162 clean-tree/branch restore and cumulative master rollout need an
 explicit decision, including the effective API **and autopipe** pin disposition.
 Approval to merge is not window GO. Preserve foreign `60`/`90`/`91` drop-ins and
 CAPACITY HOLD unless their owners explicitly authorize a particular change.
-No node-22 mutation or shared environment rebuild is part of this procedure.
+No mutation on the compute role and no rebuild of a shared environment is part of this procedure.
 
 Re-inventory, do not infer live state from historical receipts:
 
@@ -6906,7 +6906,7 @@ request pins. Disposable R1–R5 is rollback correctness, not capacity/performan
 | Two network pins × three storage states | SHJ-NJ plus one small network; frozen basin/network/run/model/segment/scenario/cycle/window. Measure narrow uncompressed, physically narrow compressed, and legacy, with shipped curve SQL and local single-source forecast-series API. |
 | D11 bounds | At least five warm SQL samples: P95 ≤300 ms; API warm P95 ≤500 ms. Segment key in Index Cond or segmentby pruning, Rows Removed by Filter / returned ≤10, shared hit ≤5000. Archive actual EXPLAIN (ANALYZE, BUFFERS), request/result identity and sample distribution. |
 | Probe losses | Before/after identity-existence **miss** branch and QHH fallback CTE EXPLAIN, including hydro_display and both tile stats probes; enumerate coverage losses from omitted indexes. Single-table predicate proxies are not real-query latency proof. |
-| Registry | Authoritative scheduler pass artifact/SHA/time: active, runnable, selected, excluded and exclusion provenance. Read the node-22 evidence; no node-22 mutation. A node-27 count guess is not the registry. |
+| Registry | Authoritative scheduler pass artifact/SHA/time: active, runnable, selected, excluded and exclusion provenance. Read the evidence of the compute role; no mutation there. A node-27 count guess is not the registry. |
 | Lifecycle | One real compression and retention tick enumerating canonical and `_legacy`, per-table candidates/results and legacy_chunks; actual live env/budget pins. Enumeration with zero eligible new chunks is **not** physically compressing a new narrow chunk or proving compressed-state performance. |
 | Working set | Actual governance receipt with uncompressed_bytes, daily_ingest_bytes, next_compressible_at, watermark/projection_status and projected_peak_bytes. #2273's `/home` comparator remains invalid for destination capacity; separately approved destination proof is mandatory. |
 | Display | `/` SHJ-NJ, one medium and one small network: GFS/IFS curves, no identity cross-talk, three archived screenshots; `/ops` reachable; existing bringup C1–C4 deny-write/runtime/publication evidence. Single-basin screenshot-free C4 alone does not satisfy three-basin evidence. |
@@ -7038,7 +7038,7 @@ status; the next tick re-registers, re-applies and re-parses it.
 |---|---|---|
 | `OUTPUT_PARSE_COMPRESSION_FENCE_BUSY` | parser CLI stderr (both subcommands, click and argparse legs) | The parse rolled back before any statement; `hydro_run.error_code` is NOT written. The autopipe tick records the run as `outcome="skipped"`, `reason` = this code, `stage="parse"`; it does not count toward the tick rc. |
 | `HANDOFF_APPLY_COMPRESSION_FENCE_BUSY` | forcing apply report `unavailable_reasons[].code` | The handoff apply rolled back untouched. Tick: `outcome="skipped"`, no decline row. |
-| `FORCING_PRODUCE_COMPRESSION_FENCE_BUSY` | forcing producer CLI stderr | The timeseries replace rolled back; `met.forecast_cycle` is NOT marked failed. Node-22 is DB-free, so this only appears on a DB-backed producer. |
+| `FORCING_PRODUCE_COMPRESSION_FENCE_BUSY` | forcing producer CLI stderr | The timeseries replace rolled back; `met.forecast_cycle` is NOT marked failed. The compute role is DB-free, so this only appears on a DB-backed producer. |
 
 **Compression knob and budget.** `NODE27_TIMESERIES_COMPRESSION_FENCE_WAIT_MS`
 (compression env, default 900000) bounds the fence wait. It is charged against
