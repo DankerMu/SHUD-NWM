@@ -19,7 +19,7 @@ NEXT_HEADING_PREFIX = "### 5.2 "
 RETIREMENT_SENTENCE = (
     "`infra/env/compute.env` 是已退役的 docker-e2e 产物，node-22 没有任何单元加载它；"
     "单元到环境文件的权威见 "
-    "[`infra/env/README.md`](../../infra/env/README.md#node-22-unit--environmentfile-authority-1694)。"
+    "[`infra/env/README.md`](../../infra/env/README.md#unit--environmentfile-authority-of-the-compute-role-1694)。"
 )
 
 

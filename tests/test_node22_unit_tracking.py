@@ -40,7 +40,7 @@ MANIFEST_SCHEMA_VERSION = "nhms.node22.unit_manifest.v1"
 NODE22_TRACKED_PREFIX = "infra/systemd/node22/"
 SECRET_ENV_FILE = "/scratch/frd_muziyao/nhms-prod/secrets/slurm-gateway.env"
 AUTHORITY_ROOT = "/scratch/frd_muziyao/"
-AUTHORITY_HEADING = "## node-22 unit → EnvironmentFile authority (#1694)"
+AUTHORITY_HEADING = "## Unit → EnvironmentFile authority of the compute role (#1694)"
 AUTHORITY_TOKEN_PREFIX = "NWM/infra/env/"
 SECRET_NAME_SUFFIXES = ("TOKEN", "SECRET", "PASS", "PASSWORD")
 

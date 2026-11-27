@@ -6,8 +6,8 @@
 NHMS_NODE27_DOWNLOAD_ROLE=node27_data_plane_download
 
 # Writer-capable node-27 PostgreSQL URL. Do not use display_readonly, and never
-# point this at node-22 historical do-not-connect archived/stopped rollback-only
-# PostgreSQL :55433.
+# point this at the historical do-not-connect archived/stopped rollback-only
+# PostgreSQL :55433 of the retired node-22 host.
 # #1774: `nhms_download_rw` is a real, non-superuser role, provisioned by
 # scripts/node27_provision_write_roles.sh. Measured scope: the wrapper and
 # scripts/node27_download_cycles.py require DATABASE_URL and check it without

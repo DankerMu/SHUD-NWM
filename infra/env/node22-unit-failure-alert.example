@@ -1,10 +1,10 @@
-# node-22 unit-failure alert channel (#2913, OpenSpec node22-config-hygiene
+# Unit-failure alert channel of the compute role (#2913, OpenSpec node22-config-hygiene
 # design D4).
 #
-# Copy to node22-unit-failure-alert.env on node-22 (chmod 0600). It is loaded
+# Copy to node22-unit-failure-alert.env on the compute control host (chmod 0600). It is loaded
 # by infra/systemd/nhms-node22-unit-failure-alert@.service through
 # `EnvironmentFile=-` and read by scripts/node22_unit_failure_alert_once.sh.
-# The real .env stays on node-22 only and is never committed (infra/env/*
+# The real .env stays on the compute control host only and is never committed (infra/env/*
 # ignore rule).
 #
 # A missing file, an empty recipient or sender, or an unusable transport makes
@@ -26,12 +26,12 @@ NHMS_FRONTIER_SENDMAIL=/usr/sbin/sendmail
 
 # --- SMTP shim channel. Read ONLY by the authenticated-SMTP sendmail shim
 # scripts/node27_frontier_smtp_sendmail.py; the handler never reads them. For
-# the SMTPS path on node-22, point NHMS_FRONTIER_SENDMAIL at the wrapper
+# the SMTPS path on the compute control host, point NHMS_FRONTIER_SENDMAIL at the wrapper
 # /scratch/frd_muziyao/NWM/scripts/node22_smtp_sendmail.sh (#3127), which runs
 # that shim through /scratch/frd_muziyao/NWM/.venv/bin/python, never through an
 # `env python3` shebang. The address part of NHMS_ALERT_EMAIL_FROM must equal
 # NHMS_SMTP_USER (a display name in front is fine); the shim exits 64 at config
-# time otherwise. Credentials are deposited by hand on node-22 only.
+# time otherwise. Credentials are deposited by hand on the compute control host only.
 NHMS_SMTP_HOST=
 NHMS_SMTP_PORT=
 NHMS_SMTP_USER=
