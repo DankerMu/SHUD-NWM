@@ -138,9 +138,7 @@ rg --files apps/frontend/e2e | sort
   explicit `latest-product` string, but broad mocked `page.route('**/api/v1/**')`
   handlers remain in `preview-deeplink.spec.ts`, `monitoring.mocked.spec.ts`,
   `m15-visual-conformance.spec.ts`, and `m11-routes.mocked.spec.ts` (the last
-  through `e2e/support/layerCatalog.mocked.ts`; spec names refreshed by #3164). The
-  historical runbook that recorded mocked `/api/v1/**` hydro-met evidence for the
-  latest-product bootstrap was deleted in #3405 (git keeps it).
+  through `e2e/support/layerCatalog.mocked.ts`; spec names refreshed by #3164).
 - Docs/runbook references: current runbooks and plans include
   `docs/runbooks/two-node-production-e2e-plan.md`,
   `docs/runbooks/node-27-bringup-checklist.md`,

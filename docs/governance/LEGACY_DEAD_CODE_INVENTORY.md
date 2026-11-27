@@ -181,7 +181,7 @@ an explicit manual historical mocked visual evidence workflow.
 - `scripts/run_qhh_continuous.py` dispatches `scripts/run_qhh_cycle.sh` locally
   or through `scripts/run_qhh_cycle.sbatch`; the sbatch wrapper execs
   `scripts/run_qhh_cycle.sh` after sourcing its filtered QHH env file.
-- `docs/runbooks/qhh-backend-smoke.md` and
+- `docs/runbooks/qhh-backend-smoke.md`, `docs/runbooks/qhh-22-business-bringup.md`, and
   `tests/test_qhh_scripts_static.py` record the evidence boundary for these
   scripts as diagnostic/reproduction, not production scheduler readiness.
 - Related helper `scripts/seed_qhh_smoke_met_station.py` is not a direct
