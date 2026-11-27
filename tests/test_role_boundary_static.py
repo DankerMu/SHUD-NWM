@@ -478,7 +478,7 @@ def test_current_topology_docs_state_node27_compute_role_and_live_oracle_boundar
     assert "`w3`" in hosted_bullet and "`w2`" in hosted_bullet, (
         f"the hosted-since bullet must name the compute hosts `w3` and `w2`: {hosted_bullet!r}"
     )
-    assert "210.77.77.22" in hosted_bullet and "rollback archive" in hosted_bullet, (
+    assert re.search(r"`?210\.77\.77\.22`? is retired from NHMS compute[^.]*rollback archive", hosted_bullet), (
         f"the hosted-since bullet must name the retired host 210.77.77.22 as a rollback archive: {hosted_bullet!r}"
     )
     assert re.search(r"\]\([^)\s]*w2-w3-compute-topology\.md(?:#[^)\s]*)?\)", hosted_bullet), (

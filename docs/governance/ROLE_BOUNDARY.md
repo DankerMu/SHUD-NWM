@@ -25,9 +25,9 @@ full API and is not a production deployment category.
   document says "the retired node-22 host" it means `210.77.77.22` itself. Host
   layout: [`w2-w3-compute-topology.md`](../runbooks/w2-w3-compute-topology.md).
 - The compute role runs the Slurm/SHUD compute wrapper. It does **NOT** connect
-  to any active database. The local PG `:55433` instance on the retired node-22
-  host is historical, archived, and stopped as of the 2026-06-29 retirement
-  receipt — do not connect to it.
+  to any active database. The local PG `:55433` instance on
+  the retired node-22 host is historical, archived, and stopped as of the
+  2026-06-29 retirement receipt — do not connect to it.
 - node-27 hosts the active primary PostgreSQL (`:55432`), the ingest workers, the
   display API (`:8080`), and the frontend on a single machine. node-27 writes its
   own database directly. It reads the compute artifacts of the compute role via
@@ -41,9 +41,9 @@ that the codebase still enforces; physical host assignment may differ.**
 writable workspace/object-store roots, database mutation, and publication of
 display artifacts. In the current physical deployment, those active database
 writes happen through node-27 ingest, not through the compute role.
-The compute hosts currently host compute/Slurm/artifact production only and may
-run the standalone `slurm_gateway`; they must not be treated as the active NHMS
-database writer.
+The compute hosts currently host compute/Slurm/artifact production only and must
+not be treated as the active NHMS database writer; the standalone
+`slurm_gateway` runs on the compute control host only.
 The `display_readonly` role serves the display API/frontend and reads the
 readonly database plus published artifacts.
 
