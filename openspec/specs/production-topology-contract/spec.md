@@ -42,8 +42,7 @@ role, not the retired host. A requirement title is prose, not an identifier.
 
 #### Scenario: Runbooks that still say node-22 carry a banner
 
-- **WHEN** `docs/runbooks/current-production-ops.md` (which also covers its
-  `production-ops/` pages), `docs/runbooks/two-node-deployment-overview.md`, or
+- **WHEN** `docs/runbooks/two-node-deployment-overview.md` or
   `docs/runbooks/node22-control-plane-manual-recovery.md` is opened
 - **THEN** a banner at its top says that "node-22" denotes the compute role
   hosted on `w3` and `w2`

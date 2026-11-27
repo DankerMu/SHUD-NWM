@@ -1,21 +1,21 @@
 # Current Production Operations Runbook
 
-最后更新：2026-09-23
+最后更新：2026-11-27
 
-适用范围：node-27 active DB + ingest + display，node-22（计算角色，现由 w3 / w2 承载）Slurm/SHUD compute，
+适用范围：node-27 active DB + ingest + display，计算角色的 Slurm/SHUD compute，
 以及两者共享的 NFS object-store/published 数据面。
 
-> **计算角色主机说明（2026-11-23 起）**：本文及其子页里的 "node-22" 指 NHMS **计算角色**，现由
-> LAN 主机 w3（控制）+ w2 承载；原主机 `210.77.77.22` 已退出 NWM 计算，仅作 rollback archive。
-> 路径、生产用户、unit 名、Slurm 分区与账户都没变，文中的计算侧命令在 w3 上以生产用户执行：
-> 凡是字面写着 `ssh -p 32099 frd_muziyao@210.77.77.22` 的命令，一律改为登录 w3 后执行，
-> **不得**在原主机上执行（那里的 journal 副本已经过期）。活动 checkout 的 `.venv` 经 NFS 被
-> w3 / w2 共用，"不得在活动 checkout 里重建环境"的禁令照旧适用。主机布局、存储、Slurm、部署与
-> 冷启动见 [`w2-w3-compute-topology.md`](w2-w3-compute-topology.md)。
->
+计算角色自 2026-11-23 起由 LAN 主机 `w3`（计算控制主机）和 `w2` 承载。原 node-22 主机 `210.77.77.22` 已退出 NWM 计算，
+仅作 rollback archive：本文和分册里的任何命令都**不得**在那台主机上执行（那里的 journal 副本已经过期）。
+路径、生产用户、unit 名、Slurm 分区与账户都没变；本文和分册里在计算控制主机上执行的步骤都以生产用户执行。
+主机与角色、怎么进入见 [`w2-w3-compute-topology.md`](w2-w3-compute-topology.md#1-主机与角色) §1，
+存储、Slurm、部署与冷启动见同一文档的其余各节。`node22` / `node-22` 是计算角色的代号，留在脚本名、unit 名、
+env key 这类标识符里；分册里带日期的现场记录和写着"原 node-22 主机"的句子说的是那台已退役的主机
+（见 [`glossary.md`](../../openspec/glossary.md) 的 Topology terms）。
+
 > **计算角色执行说明**：活动 checkout `/scratch/frd_muziyao/NWM` 的 `.venv`（Python 3.11.x，与仓库
 > pin 一致）经 NFS 被 w3、w2 上的 Slurm 作业和 scheduler 定时器共用，**禁止**在其中运行裸
-> `uv run` / `uv sync`。本文中所有计算侧活动操作一律使用精确活动解释器
+> `uv run` / `uv sync`。本文和分册里计算角色的活动操作一律使用精确活动解释器
 > `/scratch/frd_muziyao/NWM/.venv/bin/python`（控制台入口用 `-m services.orchestrator.cli`）；
 > 环境只在部署改了 `uv.lock` 时同步，且须 scheduler 定时器已停、没有在跑的 pass、Slurm 队列里
 > 没有 NWM 作业。原 node-22 主机上按 #1831 保留的 Python 3.12.7 环境已不是活动环境，那台主机上
@@ -30,7 +30,7 @@
 
 本页自 #1103 起是索引 landing page：每一节的正文完整保留在
 `docs/runbooks/production-ops/` 下的分册里，本页只保留原标题层级与指向分册的入口，
-历史外链（含 `#` 锚点）因此继续 resolve。分册正文与拆分前逐字相同。
+历史外链（含 `#` 锚点）因此继续 resolve。分册正文在拆分当时与拆分前逐字相同，此后在各分册里继续修订。
 
 | 分册 | 覆盖 | 内容 |
 | --- | --- | --- |

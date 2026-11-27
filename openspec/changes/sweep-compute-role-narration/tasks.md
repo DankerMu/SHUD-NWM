@@ -78,7 +78,7 @@ Each task rewrites the bodies with the glossary, removes the page's literal `ssh
 - [x] 3.5 `gateway-and-services.md`, `file-provider-refresh.md`, `overview.md`: the pin of
   `tests/test_node22_entrypoint_invariant_python_scan.py` on the key-entry row of `overview.md`
   follows its row; its pin on the dated 2026-06-22 line of `gateway-and-services.md` stays.
-- [ ] 3.6 `current-production-ops.md`: the body, with the host statement (`w3` and `w2`, the retired
+- [x] 3.6 `current-production-ops.md`: the body, with the host statement (`w3` and `w2`, the retired
   host, the link to the topology runbook) moved out of the banner; the banner goes. A static test in
   `tests/test_node22_entrypoint_invariant.py`: these pages hold no `ssh` command addressed to the
   retired host (red run: one line restored), and the index page keeps the host statement (red run:
