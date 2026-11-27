@@ -5,39 +5,6 @@ Harden the boundary between mocked regression and live evidence: current runbook
 
 ## Requirements
 
-### Requirement: Current runbooks follow M26 route authority
-
-Current runbooks SHALL describe `/` as the active display entrypoint and SHALL
-describe `/overview`, `/hydro-met`, `/forecast`, `/meteorology`,
-`/basins/:id`, and `/segments/:id` only as legacy redirect
-aliases, compatibility references, or historical evidence.
-
-#### Scenario: two-node E2E plan defines browser proof
-- **WHEN** `docs/runbooks/two-node-production-e2e-plan.md` describes live
-  browser proof
-- **THEN** it requires `/` plus `/ops` for current live display proof and records
-  `/hydro-met -> /` only as a legacy redirect smoke, not as active display proof
-
-#### Scenario: deployment overview describes node-27
-- **WHEN** `docs/runbooks/two-node-deployment-overview.md` describes node-27
-  user-facing display behavior
-- **THEN** it names `/` as the single-map display entrypoint and `/ops` as the
-  operational display path
-
-#### Scenario: node-27 checklist includes browser steps
-- **WHEN** `docs/runbooks/node-27-bringup-checklist.md` lists current browser
-  validation
-- **THEN** current steps use `/` and `/ops`, while old display paths are
-  described as redirect compatibility checks
-
-#### Scenario: route-authority grep runs against current runbooks
-- **WHEN** route-authority validation scans current docs and runbooks
-- **THEN** references to `/overview`, `/hydro-met`, `/forecast`,
-  `/meteorology`, `/basins/:id`, `/segments/:id`, and
-  concrete forms such as `/basins/demo` and `/segments/demo` are each
-  classified as historical evidence, redirect alias checks, compatibility
-  context, or drift
-
 ### Requirement: Mocked Playwright regression is separate from live proof
 
 Playwright specs that register broad API route mocks SHALL be classified as
@@ -109,3 +76,30 @@ read published artifacts without gaining run-product copyback authority.
   `NHMS_OBJECT_STORE_COPYBACK_ROOT` configured
 - **THEN** startup is refused and the key is reported as a
   display-forbidden compute-control path env
+
+### Requirement: Current runbooks follow the single-map route authority
+
+Current runbooks SHALL describe `/` as the active display entrypoint and SHALL
+describe `/overview`, `/hydro-met`, `/forecast`, `/meteorology`,
+`/basins/:id`, and `/segments/:id` only as legacy redirect
+aliases, compatibility references, or historical evidence.
+
+#### Scenario: deployment overview describes node-27
+- **WHEN** `docs/runbooks/two-node-deployment-overview.md` describes node-27
+  user-facing display behavior
+- **THEN** it names `/` as the single-map display entrypoint and `/ops` as the
+  operational display path
+
+#### Scenario: node-27 checklist includes browser steps
+- **WHEN** `docs/runbooks/node-27-bringup-checklist.md` lists current browser
+  validation
+- **THEN** current steps use `/` and `/ops`, while old display paths are
+  described as redirect compatibility checks
+
+#### Scenario: route-authority grep runs against current runbooks
+- **WHEN** route-authority validation scans current docs and runbooks
+- **THEN** references to `/overview`, `/hydro-met`, `/forecast`,
+  `/meteorology`, `/basins/:id`, `/segments/:id`, and
+  concrete forms such as `/basins/demo` and `/segments/demo` are each
+  classified as historical evidence, redirect alias checks, compatibility
+  context, or drift

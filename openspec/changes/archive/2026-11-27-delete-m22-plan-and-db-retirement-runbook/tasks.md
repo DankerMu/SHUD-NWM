@@ -9,26 +9,26 @@ that anchor on its authority heading).
 
 ## 1. Documents (orchestrator)
 
-- [ ] 1.1 `infra/env/README.md`: a section with the snippet, placed directly before the heading
+- [x] 1.1 `infra/env/README.md`: a section with the snippet, placed directly before the heading
   "node-22 unit → EnvironmentFile authority (#1694)" (after the list of published-artifact
   variables, so that list stays where it is). The section says where `EVIDENCE_ROOT` comes from
   (a run directory under one of the approved evidence roots the page already names), that
   `NHMS_READONLY_DB_VALIDATION_RUN_ID` is the business run and not the evidence bundle, and that
   the four per-source exports are optional overrides. The snippet's check of the plan's shared
   `RUN_ID` does not move: nothing in the block uses it.
-- [ ] 1.2 `git rm` the two runbooks.
-- [ ] 1.3 The five pointer sentences and links; the two inventory mentions.
-- [ ] 1.4 Spec delta: `evidence-boundary-hardening`, one requirement removed and added under a new
+- [x] 1.2 `git rm` the two runbooks.
+- [x] 1.3 The five pointer sentences and links; the two inventory mentions.
+- [x] 1.4 Spec delta: `evidence-boundary-hardening`, one requirement removed and added under a new
   title.
 
 ## 2. Tests (implementer)
 
-- [ ] 2.1 `tests/test_readonly_db_validation_routes.py`: both tests read `infra/env/README.md` for
+- [x] 2.1 `tests/test_readonly_db_validation_routes.py`: both tests read `infra/env/README.md` for
   what they read in the plan. No assertion is dropped or weakened; the test that already reads the
   README keeps its three prose assertions.
-- [ ] 2.2 `tests/test_role_boundary_static.py`: the cleanup-snippet test walks the receipt only; the
+- [x] 2.2 `tests/test_role_boundary_static.py`: the cleanup-snippet test walks the receipt only; the
   runbook constant goes.
-- [ ] 2.3 Red runs against the README, each restored, each failing on the assertion named:
+- [x] 2.3 Red runs against the README, each restored, each failing on the assertion named:
   - the `source` line moved above the mode check: the order assertion (mode check < source);
   - only the first validator call given the doubled form
     `--evidence-root "artifacts/two-node-e2e/$EVIDENCE_RUN_ID"`, the other call left as it is:
@@ -40,11 +40,11 @@ that anchor on its authority heading).
 
 ## 3. Evidence
 
-- [ ] 3.1 A search for each of the two file names returns only history, the umbrella change's own
+- [x] 3.1 A search for each of the two file names returns only history, the umbrella change's own
   files and the synthetic test inputs (listed in the PR).
-- [ ] 3.2 No link in a remaining document points at a deleted file.
-- [ ] 3.3 Hard gate: finding multiset before and after, each difference listed.
-- [ ] 3.4 `narration_count.py` plain and `--tokens` before and after; moved name tokens listed.
+- [x] 3.2 No link in a remaining document points at a deleted file.
+- [x] 3.3 Hard gate: finding multiset before and after, each difference listed.
+- [x] 3.4 `narration_count.py` plain and `--tokens` before and after; moved name tokens listed.
 
 ## Evidence Floor
 
