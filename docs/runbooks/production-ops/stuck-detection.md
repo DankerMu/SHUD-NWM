@@ -1,22 +1,19 @@
 **分册：如何判断是否卡住**
 
-> **计算角色主机说明**：本页的 "node-22" 指计算角色，现由 w3 / w2 承载；字面的
-> `ssh … 210.77.77.22` 命令一律登录 w3 后执行，**不得**在原主机上执行。详见
-> [`current-production-ops.md`](../current-production-ops.md) 顶部横幅。
-
 本页是当前生产值守手册的 §6 分册（#1103 拆分，正文逐字保留）。
 索引与全部分册入口见 [`../current-production-ops.md`](../current-production-ops.md)。
+本页里在计算控制主机上执行的步骤都以生产用户执行；是哪台主机、怎么进入见 [`w2-w3-compute-topology.md`](../w2-w3-compute-topology.md#1-主机与角色) §1。
 
 ## 6. 如何判断是否卡住
 
 先分清三种状态：
 
-- 正常运行：node-22 Slurm 有 active job，或 node-27 autopipe 正在本轮 ingest；
+- 正常运行：计算角色的 Slurm 队列里有 active job，或 node-27 autopipe 正在本轮 ingest；
   `/home/nwm/autopipe-logs/autopipe.log` 周期性刷新。
 - 等下一 cron tick：Slurm queue 空，autopipe 最近一轮 `rc=0`，DB 中没有新的
   un-ingested runs。
 - 真实卡住：autopipe 多轮非 0、同一 run 反复 failed，public `/health` 失败，
-  或 node-22 Slurm terminal 后 shared object-store/published 不更新。
+  或计算角色的 Slurm 作业 terminal 后 shared object-store/published 不更新。
 
 推荐检查顺序：
 
@@ -29,10 +26,9 @@ ssh -p 32099 nwm@210.77.77.27 \
    curl -fsS --max-time 5 http://127.0.0.1:8080/health &&
    curl -fksS --max-time 5 https://test.nwm.ac.cn/health'
 
-# node-22 compute
-ssh -p 32099 frd_muziyao@210.77.77.22 \
-  'squeue -u "$USER" -o "%.18i %.20j %.2t %.10M %.10l %.6D %R" &&
-   pgrep -af "[s]ervices.slurm_gateway"'
+# 计算控制主机，生产用户（Slurm 队列与 slurm-gateway）
+squeue -u "$USER" -o "%.18i %.20j %.2t %.10M %.10l %.6D %R" &&
+  pgrep -af "[s]ervices.slurm_gateway"
 ```
 
 If public health fails but local `127.0.0.1:8080/health` succeeds, inspect nginx
@@ -101,9 +97,9 @@ pass evidence 顶层 `no_progress_circuit` 块：
 告警（journalctl 是当前唯一被实际消费的通道，每个开闸的完整 pass 一条聚合行）：
 
 ```bash
-ssh -p 32099 frd_muziyao@210.77.77.22 \
-  'journalctl -u nhms-compute-scheduler.service --since "-24h" \
-     | grep SCHEDULER_NO_PROGRESS_CIRCUIT_OPEN'
+# 计算控制主机，生产用户
+journalctl -u nhms-compute-scheduler.service --since "-24h" \
+  | grep SCHEDULER_NO_PROGRESS_CIRCUIT_OPEN
 ```
 
 **`consecutive_passes` 数的是完整观察 pass，不是 timer tick**：早退、prelock
@@ -131,9 +127,9 @@ ssh -p 32099 frd_muziyao@210.77.77.22 \
 
 ### 6.2 调度器停摆探针 `nhms-node22-scheduler-stall-health`（#2570）
 
-node-22 的 DB-free 调度器卡住时以前**没有任何出口会响**：`no_progress_circuit`
-只打一行 journal，`resource_limit_blocked` 只落产物，`monitoring.py` 在无
-`DATABASE_URL` 的 node-22 上根本起不来。本探针补上这条出口。
+计算角色的 DB-free 调度器卡住时以前**没有任何出口会响**：`no_progress_circuit`
+只打一行 journal，`resource_limit_blocked` 只落产物，
+`monitoring.py` 在没有 `DATABASE_URL` 的计算控制主机上根本起不来。本探针补上这条出口。
 
 形状与 file-provider refresh 探针同构：**本机、DB-free、只读、有界、固定优先级
 判级、非健康即非零退出**。出口 = 非零退出 → failed unit + journal + receipt +
@@ -146,7 +142,7 @@ journal；mail lane 按 `infra/env/node22-unit-failure-alert.example` 配置，e
 - 脚本：`scripts/node22_scheduler_stall_health.py`（stdlib only，可从部署树之外
   staged 运行）
 - 单元：`infra/systemd/nhms-node22-scheduler-stall-health.{service,timer}`，
-  `OnCalendar=*:03/15` + `RandomizedDelaySec=60`
+  `OnCalendar=*:03/15` + `RandomizedDelaySec=60`；装在计算控制主机上（生产用户的 user manager）
 - 证据根：`NHMS_SCHEDULER_STALL_EVIDENCE_ROOT`（默认
   `/scratch/frd_muziyao/nhms-prod/workspace/scheduler/evidence`，与
   `NHMS_SCHEDULER_EVIDENCE_ROOT` 同址，**只读**）
@@ -164,15 +160,16 @@ journal；mail lane 按 `infra/env/node22-unit-failure-alert.example` 配置，e
 手动跑一次（只读，不需要装 unit）：
 
 ```bash
-ssh -p 32099 frd_muziyao@210.77.77.22 \
-  '/scratch/frd_muziyao/NWM/.venv/bin/python \
-     /scratch/frd_muziyao/NWM/scripts/node22_scheduler_stall_health.py --json'
+# 计算控制主机，生产用户
+/scratch/frd_muziyao/NWM/.venv/bin/python \
+  /scratch/frd_muziyao/NWM/scripts/node22_scheduler_stall_health.py --json
 ```
 
 上面这条会**覆盖生产 receipt**（`latest.json` 无条件写，没有跳过开关）。对任意证据目录
 做**不留痕回放**（验证新规则、复盘历史产物）时把 receipt 根指到 scratch：
 
 ```bash
+# 计算控制主机，生产用户（systemd 侧的两条 systemctl --user show 读这台主机上的调度器单元，见下）
 NHMS_SCHEDULER_STALL_EVIDENCE_ROOT=/path/to/evidence-copy \
 NHMS_SCHEDULER_STALL_RECEIPT_ROOT=/tmp/stall-replay-receipts \
   /scratch/frd_muziyao/NWM/.venv/bin/python \
@@ -201,7 +198,7 @@ id（小写字母与连字符，渲染器 slug 后不变），改标题等于改
 查询失败/输出不可解析、产物超 `MAX_EVIDENCE_BYTES`（5 MB）/软链/非普通文件/坏
 JSON/缺 `started_at`、tracker `schema_version` 不匹配或条目残缺、证据根列不出、
 **目录枚举触顶 `NHMS_SCHEDULER_STALL_MAX_ENTRIES_SCANNED`**。
-处置：读 receipt 的 `errors[]` 与 `evidence.unreadable[]` 定位到具体文件名；
+处置（计算控制主机）：读 receipt 的 `errors[]` 与 `evidence.unreadable[]` 定位到具体文件名；
 触顶那条说明证据根条目数超界，先确认 retention 作业
 （`scripts/node22_scheduler_evidence_retention.py` + 它那对 timer/service）还活着，
 再决定抬阈值还是清积压。默认上限自 issue 3120 起为 65536（原 4096）：2026-11 的触顶
@@ -217,7 +214,7 @@ unit 仍退出 0，只是 `UnitFileState` 为空）：按下面第 2 档的恢�
 
 **2. `timer_not_enabled`** —— `nhms-compute-scheduler.timer` 的
 `UnitFileState != enabled`。最狠的一档：重启后仍然死。
-处置：确认是不是有人 `systemctl --user disable` 过；恢复见
+处置（计算控制主机）：确认是不是有人 `systemctl --user disable` 过；恢复见
 [`../current-production-ops.md`](../current-production-ops.md) §3.1 的调度器
 启停段落。
 
@@ -229,7 +226,7 @@ lane 现在不会再触发。合取项是**保守**写法，不是「timer 在�
 间摆），`list-timers` 的 NEXT 显示 `-` 只是 active 期间不计 realtime next elapse。
 exact-cycle wrapper（`scripts/ops/node22-run-cycle-once.sh`）持有 timer 期间报
 `timer_stopped` 属预期：它会暂停 timer、等 pass 结束、跑完再自己恢复 timer（见
-[`known-issues-pipeline.md`](known-issues-pipeline.md#85-node-22-scheduler-stuck-after-missing-forcing-artifact)
+[`known-issues-pipeline.md`](known-issues-pipeline.md#85-scheduler-stuck-after-missing-forcing-artifact)
 的 exact-cycle wrapper 说明）。
 state-index 自动剪枝（`nhms-scheduler-state-index-prune.service`，每日 06:30 UTC，#3121）
 持有 timer 期间报一次 `timer_stopped` 同样属预期：它停调度器与 provider-refresh 的 timer、
@@ -237,6 +234,7 @@ state-index 自动剪枝（`nhms-scheduler-state-index-prune.service`，每日 0
 加闸门与 enforce，撞上长 pass 时可达数小时（见
 [`known-issues-state-index.md`](known-issues-state-index.md#812-state-index-容量与-prune-retention2548)
 的"自动剪枝"）。
+下面的处置在计算控制主机上执行（wrapper、自动剪枝与调度器 timer 都在这台主机上）。
 处置：start 之前先确认没有 wrapper 在跑（`pgrep -u "$(id -u)" -f '^(/[^ ]*/)?bash( -[^ ]+)* [^ ]*node22-run-cycle-once\.sh( |$)'`）——有就等它
 退出，不要手工 start；再确认自动剪枝没在跑（`systemctl --user is-active nhms-scheduler-state-index-prune.service`
 必须是 `inactive` 或 `failed`）——在跑就等它自己恢复，不要手工 start。两者都不在跑时，查 journal 里 timer 最后一次状态
@@ -247,9 +245,9 @@ state-index 自动剪枝（`nhms-scheduler-state-index-prune.service`，每日 0
 
 **4. `scheduler_service_failed`** —— service 的 `Result != success`。
 **没有失败值允许表**：systemd 对 oneshot 的取值域含 `exit-code`/`signal`/
-`timeout`/`core-dump`/`resources`/`protocol` 等，本机只实测到过 `success`，
+`timeout`/`core-dump`/`resources`/`protocol` 等，本机（#2570，2026-09-23 记录）只实测到过 `success`，
 所以判据是「非 `success` 即报」。
-处置：`journalctl --user -u nhms-compute-scheduler.service -n 200` 找上一趟的
+处置（计算控制主机）：`journalctl --user -u nhms-compute-scheduler.service -n 200` 找上一趟的
 失败原因；`resources` 一类多半是 Slurm 侧，转
 [`../failed-basin-retry.md`](../failed-basin-retry.md)。
 
@@ -260,14 +258,14 @@ state-index 自动剪枝（`nhms-scheduler-state-index-prune.service`，每日 0
 不在跑**。timer 从未触发过（`LastTriggerUSec` 为空）时同判此档。
 后半个合取项是必须的：一趟实测 193 分钟的健康长 pass 期间 `LastTriggerUSec`
 自然会老。
-处置：`systemctl --user list-timers nhms-compute-scheduler.timer` 看 NEXT；
+处置（计算控制主机）：`systemctl --user list-timers nhms-compute-scheduler.timer` 看 NEXT；
 若 timer 活着却不触发，查 user-systemd 的 `daemon` 是否被重新执行过。
 
 ##### stall-evidence-unavailable
 
 **6. `evidence_unavailable`** —— 证据根下**没有任何治理终态 pass 产物**。
 与第 7 档刻意分开：这是「从来没写过」，不是「写过但很旧」。
-处置：确认 `NHMS_SCHEDULER_EVIDENCE_ROOT` 与探针的
+处置（计算控制主机）：确认 `NHMS_SCHEDULER_EVIDENCE_ROOT` 与探针的
 `NHMS_SCHEDULER_STALL_EVIDENCE_ROOT` 指向同一目录；再确认 retention 没有把整个
 目录清空（`retention/` 子目录里有它自己的 receipt）。
 
@@ -278,7 +276,7 @@ state-index 自动剪枝（`nhms-scheduler-state-index-prune.service`，每日 0
 这是**独立兜底**：timer 照常触发、service 每次秒退不写产物时，systemd 侧四个信号
 全绿而产物断流。「service 不在跑」是结构性闸门，不靠「360 > 实测最长 193.9」的
 数值侥幸。
-处置：`journalctl --user -u nhms-compute-scheduler.service --since -6h`，找为什么
+处置（计算控制主机）：`journalctl --user -u nhms-compute-scheduler.service --since -6h`，找为什么
 每趟都提前 return（多半是 preflight 或 lock）。
 
 ##### stall-pass-limit-blocked
@@ -289,7 +287,7 @@ state-index 自动剪枝（`nhms-scheduler-state-index-prune.service`，每日 0
 判定：该状态只在那趟是最新期间成立（实测空闲态 4.5–27 分钟），定点判定配上 15
 分钟探针周期几乎观测不到。这档压在后四档之上，因为那趟产物本身已降级（`counts`
 缺键），诊断窗口最窄。
-处置：receipt 的 `signals.resource_limit_pass_names` 列出窗口内这几趟产物的文件名
+处置（计算控制主机）：receipt 的 `signals.resource_limit_pass_names` 列出窗口内这几趟产物的文件名
 （有界，超出部分计入 `resource_limit_pass_names_truncated`；
 `signals.resource_limit_passes_in_window` 是总数），在证据根下逐个打开，
 读 `limit` 块，转
@@ -307,7 +305,7 @@ state-index 自动剪枝（`nhms-scheduler-state-index-prune.service`，每日 0
 连续才是形状：证据根现存三份人工清锁凭据
 （`stale-lock-clear-issue882-20260706T072555Z.json` 等），说明这事发生过至少三次。
 这档其它信号都覆盖不到 —— 产物照常新鲜、没有阻塞候选、tracker 也不长。
-处置：先读 receipt 的 `signals.lock_contended_reason`（#3164）。租约守卫因配置拒绝
+处置（计算控制主机）：先读 receipt 的 `signals.lock_contended_reason`（#3164）。租约守卫因配置拒绝
 时写的也是同一个 `lock_contended` 状态，只有这个字段能把它和普通争用分开；它只取
 **最新一趟**的 `lock.reason`，最新一趟不是 `lock_contended` 时为 null，不影响判定、
 退出码与锚点：
@@ -404,7 +402,7 @@ receipt 顶层块 `root_blocked_run`（#2912 原样保留，每档 verdict 都�
 趟，按 5 分钟最小间隔算至少 415 分钟；实测 6.1 分钟/趟时约 505 分钟）里量，是故障时长的**下限**，不是故障时长本身。
 
 处置：打开最新一趟产物，读 `root_preflight.blockers[]` 看是哪个 root 不可用；然后在
-node-22 上逐个检查 `NHMS_SCHEDULER_ALLOWED_ROOTS` 的每一项，以及
+计算控制主机上逐个检查 `NHMS_SCHEDULER_ALLOWED_ROOTS` 的每一项，以及
 `NHMS_SCHEDULER_REGISTRY_MANIFEST` 指向的 registry manifest 与其中登记的每个根目录：
 **是否存在、是否已挂载**（`findmnt -T <path>`、`ls -ld <path>`；NFS `/ghdc/data/nwm/`
 掉挂是首要嫌疑）。恢复挂载或修正配置后，按
@@ -422,13 +420,13 @@ node-22 上逐个检查 `NHMS_SCHEDULER_ALLOWED_ROOTS` 的每一项，以及
 拿锁之前拒绝了本趟。它查的是 root preflight **不查**的那批路径与配置 ——
 `NHMS_SCHEDULER_REGISTRY_MANIFEST` / `NHMS_SCHEDULER_CANONICAL_READINESS_INDEX` /
 `NHMS_SCHEDULER_JOURNAL_ROOT` / `NHMS_SCHEDULER_STATE_INDEX` /
-`NHMS_OBJECT_STORE_COPYBACK_ROOT` / `NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT`（node-22 上多在
+`NHMS_OBJECT_STORE_COPYBACK_ROOT` / `NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT`（计算主机上多在
 `/ghdc/...`，而 root preflight 查的根在 `/scratch/...`），外加 `DATABASE_URL` 必须为空、
 Slurm 提交属主与 selector 配置。典型路径：`/ghdc` NFS 未挂载时先修好了 `/scratch` 的根，
 lane 从 `scheduler_root_preflight_blocked` 翻到本边界，run 不清零、本档立即接替
 `scheduler_root_blocked`（`preflight_blocked_run.boundary_passes` 里两种边界都在）。
 
-处置：打开最新一趟产物，读 `db_free_runtime.blockers[]`（每条有 `code` / `field` /
+处置（计算控制主机）：打开最新一趟产物，读 `db_free_runtime.blockers[]`（每条有 `code` / `field` /
 `reason`）：
 
 - `db_free_required_path_*`（`not_found`、`parent_missing`、`unsafe` 等）：对 `field` 指向
@@ -456,7 +454,7 @@ fence 是 `prepare-file-journal-rollback` **有意**写下的暂停，但 runboo
 探针先报第 3 档 `timer_stopped`，所以**本档只在 timer 已恢复而 fence 仍在时出现**：要么
 前滚还没做就恢复了 timer，要么前滚失败、fence 没被消费。不是可以静默的预期状态。
 
-处置：打开最新一趟产物，读 `rollback_fence.reason` 与 `rollback_fence.receipt_id`。
+处置（计算控制主机）：打开最新一趟产物，读 `rollback_fence.reason` 与 `rollback_fence.receipt_id`。
 
 - `file_journal_rollback_fence_prepared`：先确认没有 `node22-run-cycle-once.sh` 在跑（`pgrep -u "$(id -u)" -f '^(/[^ ]*/)?bash( -[^ ]+)* [^ ]*node22-run-cycle-once\.sh( |$)'` 为空），
   且 state-index 自动剪枝没在跑（`systemctl --user is-active nhms-scheduler-state-index-prune.service` 必须是 `inactive` 或 `failed`），再停 `nhms-compute-scheduler.timer`，确认旧 writer
@@ -480,7 +478,7 @@ provider 的 registry 证据是 `blocked`，本趟在挑候选前退出。progre
 168 小时 consumer 上限，compute 先 `file_manifest_stale`、随即停在本边界
 （[`file-provider-refresh.md`](file-provider-refresh.md)）。
 
-处置：打开最新一趟产物，读 `model_discovery.registry`（`status: blocked` 及其 reason，
+处置（计算控制主机）：打开最新一趟产物，读 `model_discovery.registry`（`status: blocked` 及其 reason，
 例如 `file_manifest_stale`）。先查 file-provider refresh lane：
 `systemctl --user list-timers nhms-scheduler-file-provider-refresh.timer --all` 与 refresh
 timer 健康探针的 receipt，按 [`file-provider-refresh.md`](file-provider-refresh.md) 恢复
@@ -559,7 +557,7 @@ streak 与时间闸门 run 的遍历范围都是**排序余量担保的前缀** 
 里面只要有一趟中性（实测约 1/16 趟），streak 上限就是 19、这档永远不报。
 receipt 的 `evidence.streak_window` 记这个前缀长度，
 `signals.no_submission_neutral_skipped` 记本次遍历跳过的中性趟数。
-处置：读 receipt 的 `passes` 计数与最新几趟产物的 `blocked_candidates`，转
+处置（计算控制主机）：读 receipt 的 `passes` 计数与最新几趟产物的 `blocked_candidates`，转
 [`../scheduler-dbfree-typed-reasons.md`](../scheduler-dbfree-typed-reasons.md)。
 时间闸门报的（`in_flight_run_span_minutes >= in_flight_minutes` 而计数 streak 不够）
 改读最新几趟产物的 `skipped_candidates[].reason`：全是 `active_duplicate_pipeline` 说明
@@ -584,10 +582,11 @@ forcing / forecast reservation 走
 
 #### 6.2.2 阈值 retune（drop-in，不是 EnvironmentFile）
 
-service unit **刻意不带 `EnvironmentFile`**：shipped 默认值就是 node-22 生产值，
+service unit **刻意不带 `EnvironmentFile`**：shipped 默认值就是计算角色的生产值，
 env 文件会多出一个能静默放宽告警阈值的未跟踪面。改阈值一律走 drop-in：
 
 ```bash
+# 计算控制主机，生产用户
 mkdir -p ~/.config/systemd/user/nhms-node22-scheduler-stall-health.service.d
 cat > ~/.config/systemd/user/nhms-node22-scheduler-stall-health.service.d/10-thresholds.conf <<'EOF'
 [Service]
@@ -648,30 +647,26 @@ install/enable、机器可读 `protected_unchanged`，保护集是
 那对单元的保护**（本流程只对拍调度器那两个）。补 installer 是独立一单。
 
 ```bash
+# 计算控制主机，生产用户；三步都在这台主机上跑：四份快照写在这台主机的 /tmp 下，第 3 步的 diff 也在这里比对
 # 1) 装前快照（必须留档）：对拍集只含 Id,UnitFileState；运行态另存、不参与 diff
-ssh -p 32099 frd_muziyao@210.77.77.22 \
-  'systemctl --user show nhms-compute-scheduler.timer nhms-compute-scheduler.service \
-     -p Id,UnitFileState' | tee /tmp/sched-before.txt
-ssh -p 32099 frd_muziyao@210.77.77.22 \
-  'systemctl --user show nhms-compute-scheduler.timer nhms-compute-scheduler.service \
-     -p Id,ActiveState,SubState' | tee /tmp/sched-before-runtime.txt
+systemctl --user show nhms-compute-scheduler.timer nhms-compute-scheduler.service \
+  -p Id,UnitFileState | tee /tmp/sched-before.txt
+systemctl --user show nhms-compute-scheduler.timer nhms-compute-scheduler.service \
+  -p Id,ActiveState,SubState | tee /tmp/sched-before-runtime.txt
 
 # 2) 安装（只拷贝探针自己的两个文件，绝不碰调度器单元）
-ssh -p 32099 frd_muziyao@210.77.77.22 \
-  'install -m 0644 /scratch/frd_muziyao/NWM/infra/systemd/nhms-node22-scheduler-stall-health.service \
-       ~/.config/systemd/user/ &&
-   install -m 0644 /scratch/frd_muziyao/NWM/infra/systemd/nhms-node22-scheduler-stall-health.timer \
-       ~/.config/systemd/user/ &&
-   systemctl --user daemon-reload &&
-   systemctl --user enable --now nhms-node22-scheduler-stall-health.timer'
+install -m 0644 /scratch/frd_muziyao/NWM/infra/systemd/nhms-node22-scheduler-stall-health.service \
+    ~/.config/systemd/user/ &&
+  install -m 0644 /scratch/frd_muziyao/NWM/infra/systemd/nhms-node22-scheduler-stall-health.timer \
+    ~/.config/systemd/user/ &&
+  systemctl --user daemon-reload &&
+  systemctl --user enable --now nhms-node22-scheduler-stall-health.timer
 
 # 3) 装后快照并对拍：Id,UnitFileState 必须逐行一致（机器可判）
-ssh -p 32099 frd_muziyao@210.77.77.22 \
-  'systemctl --user show nhms-compute-scheduler.timer nhms-compute-scheduler.service \
-     -p Id,UnitFileState' | tee /tmp/sched-after.txt
-ssh -p 32099 frd_muziyao@210.77.77.22 \
-  'systemctl --user show nhms-compute-scheduler.timer nhms-compute-scheduler.service \
-     -p Id,ActiveState,SubState' | tee /tmp/sched-after-runtime.txt
+systemctl --user show nhms-compute-scheduler.timer nhms-compute-scheduler.service \
+  -p Id,UnitFileState | tee /tmp/sched-after.txt
+systemctl --user show nhms-compute-scheduler.timer nhms-compute-scheduler.service \
+  -p Id,ActiveState,SubState | tee /tmp/sched-after-runtime.txt
 diff /tmp/sched-before.txt /tmp/sched-after.txt && echo PROTECTED_UNCHANGED
 ```
 
@@ -692,16 +687,17 @@ ambiguous_fallback_match:comment_accounting_unproven
 `services.orchestrator.reconcile_reserved.reconcile_reserved_unbound_jobs` 写出 —— 当 name-window fallback 匹配到
 两个及以上 owned in-window master 时，控制器无法证明 forcing identity
 （`services.orchestrator.reconcile_sacct_probe._query_forcing_controller_identity`），durable reason 落为 `comment_accounting_unproven`。
-根因是**本 Slurm 集群不存 `job_comment`**（#1116），exact-comment 对账因此
+根因是**本 Slurm 集群不存 `job_comment`**（#1116；2026-11-27 在 `w3` 上核对，`AccountingStoreFlags = (null)`，
+见 [receipt](../receipts/2026-11-27-w3-pgrep-and-slurm-accounting-flags.md)），exact-comment 对账因此
 unproven；出处见 [`../failed-basin-retry.md`](../failed-basin-retry.md) `:343-350`
 （该 durable outcome 类「没有自动出口」，held 行保持 `reserved`、之后每趟都失败直到被处置）
 与 `:459-477`（fallback 失败的 outcome 表中 `ambiguous_fallback_match` /
 `match_count=2` 一行，以及「fallback 失败从不进入 release ladder、从不产生自动
 absence/release 出口」，处置是有保护的 `nhms-pipeline demote-reserved-job` CAS）。
-本 session 在 node-22 实测 reconcile `match_count 2` 无法自行收敛。tracker 里这两条的
+本 session（#2570，2026-09-23 记录）在 node-22 实测 reconcile `match_count 2` 无法自行收敛。tracker 里这两条的
 `consecutive_passes` 实测已到 1300 / 1198，裸阈值会让告警永久钉住 → 告警疲劳 →
 运维被训练成忽略它。**不能自动收敛不等于可以无视**：处置走上述有保护的运维动作。
-追踪见 #2570（node-22 侧）与 #1116（根因侧）。
+追踪见 #2570（计算角色一侧）与 #1116（根因侧）。
 
 纪律：
 
@@ -750,9 +746,9 @@ absence/release 出口」，处置是有保护的 `nhms-pipeline demote-reserved
 巡检项**：
 
 ```bash
-ssh -p 32099 frd_muziyao@210.77.77.22 \
-  'systemctl --user list-timers nhms-node22-scheduler-stall-health.timer --all &&
-   cat /scratch/frd_muziyao/nhms-prod/workspace/scheduler-stall-health/receipts/latest.json'
+# 计算控制主机，生产用户
+systemctl --user list-timers nhms-node22-scheduler-stall-health.timer --all &&
+  cat /scratch/frd_muziyao/nhms-prod/workspace/scheduler-stall-health/receipts/latest.json
 ```
 
 两条判据：

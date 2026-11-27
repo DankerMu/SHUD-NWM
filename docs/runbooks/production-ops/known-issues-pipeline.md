@@ -2,6 +2,7 @@
 
 本页是当前生产值守手册的 §8 开篇、§8.1-§8.7 分册（#1103 拆分，正文逐字保留）。
 索引与全部分册入口见 [`../current-production-ops.md`](../current-production-ops.md)。
+本页里在计算控制主机上执行的步骤都以生产用户执行；是哪台主机、怎么进入见 [`w2-w3-compute-topology.md`](../w2-w3-compute-topology.md#1-主机与角色) §1。
 
 ## 8. 当前已知卡点
 
@@ -67,7 +68,7 @@ mixed native_resolution labels for one valid_time
 
 Impact:
 
-- node-22 has completed run/output trees under the object store.
+- The compute role has completed run/output trees under the object store.
 - node-27 autopipe skips or fails the affected run before DB ingest.
 - `/api/v1/runs` is missing the basin/cycle even though SHUD output exists.
 
@@ -83,7 +84,7 @@ Boundary:
 
 Facts:
 
-- node-22 can access `/ghdc/data/nwm/...`.
+- The compute hosts can access `/ghdc/data/nwm/...`.
 - Slurm compute nodes should not assume `/ghdc` is their runtime workspace.
 - Compute intermediates belong under `/scratch/frd_muziyao/nhms-prod/...`;
   completed shared artifacts appear under `/ghdc/data/nwm/...` and then
@@ -93,14 +94,14 @@ If a Slurm job fails because `/ghdc` is missing, runtime roots are wrong. Fix
 the compute-side workspace/object-store config rather than moving display paths
 into sbatch runtime.
 
-### 8.5 Node-22 scheduler stuck after missing forcing artifact
+### 8.5 Scheduler stuck after missing forcing artifact
 
 Accepted-submit restart reconciliation is configured by
 `NHMS_SCHEDULER_RECONCILE_ABSENCE_SECONDS` (production example: 300 seconds).
 Values outside 30–3600 seconds fail closed at scheduler configuration time.
 `NHMS_SCHEDULER_RECONCILE_SLURM_USER` and
 `NHMS_SCHEDULER_RECONCILE_SLURM_ACCOUNT` must match the `sacct` owner of jobs
-submitted by node-22; an owner, comment, master, task-prefix, stage, or cohort
+submitted by the compute role; an owner, comment, master, task-prefix, stage, or cohort
 identity mismatch remains reconciling and cannot project candidate state.
 `NHMS_SCHEDULER_IDENTITY_BLOCKED_STREAK_LIMIT` (default 3, `<= 0` disables)
 bounds how many consecutive `identity_mismatch_blocked` passes such a
@@ -140,7 +141,8 @@ require an operator repair marker.
 
 Safe online mitigation:
 
-1. Keep node-22 compute-only. Node-22 local PostgreSQL `:55433` is historical,
+1. Keep the compute role compute-only (the compute role holds no live database).
+   The local PostgreSQL `:55433` of the retired node-22 host is historical,
    archived, and stopped — do not connect it as a current runtime dependency.
 2. The default missing-forcing policy is fail-closed. For a package that can be
    regenerated, use the exact-cycle wrapper described below; do not edit the
@@ -154,6 +156,7 @@ Safe online mitigation:
    rows as a normal operating path.
 
 Exact-cycle wrapper runtime (`scripts/ops/node22-run-cycle-once.sh`, #3113).
+It runs on the compute control host, as the production user.
 The wrapper serializes itself with the scheduler timer and loads the same
 environment as `nhms-compute-scheduler.service`; every exact-cycle invocation
 in this runbook and its siblings relies on this:
@@ -209,8 +212,11 @@ in this runbook and its siblings relies on this:
   because both restart the timers they stopped when they exit. For the
   wrapper use the anchored form `pgrep -u "$(id -u)" -f '^(/[^ ]*/)?bash( -[^ ]+)* [^ ]*node22-run-cycle-once\.sh( |$)'`:
   a bare `pgrep -f node22-run-cycle-once` also matches the shell that runs the
-  check (procps-ng on node-22 excludes only pgrep itself), so it always reports
-  a hit when run via `ssh host '...'` or `bash -c`.
+  check (procps-ng on node-22, as recorded for #3113 on 2026-11-10, excludes
+  only pgrep itself; procps-ng 4.0.4 on `w3` does the same, checked on
+  2026-11-27, see the
+  [receipt](../receipts/2026-11-27-w3-pgrep-and-slurm-accounting-flags.md)),
+  so it always reports a hit when run via `ssh host '...'` or `bash -c`.
 - If the wrapper exits while another procedure's systemd fence is installed, its
   `start` is skipped by the fence condition but still returns 0, so the log says
   `timer_restored` while the timer stays inactive until that fence is released.
@@ -232,7 +238,7 @@ in this runbook and its siblings relies on this:
   timer stopped. Restore it by hand:
   `systemctl --user start nhms-compute-scheduler.timer`.
 
-Exact-cycle missing-forcing regeneration (node-22 only):
+Exact-cycle missing-forcing regeneration (on the compute control host only, as the production user):
 
 1. Confirm that the affected candidates are blocked only by
    `missing_forcing_package_uri` / `FORCING_PACKAGE_URI_MISSING` (package
@@ -284,13 +290,13 @@ Exact-cycle missing-forcing regeneration (node-22 only):
    NHMS_SCHEDULER_NFS_RAW_MANIFEST_PREFIX=s3://nhms
    ```
 
-   Both variables are bindings to the fixed node-22 topology authority; neither
+   Both variables are bindings to the fixed topology authority of the compute role; neither
    variable defines that authority. Runtime preflight requires both roots to
    resolve to the canonical directory and to each other, so moving them together
    to an allow-listed staging directory still fails before lock acquisition or
    repair work. Public evidence records only redacted path placeholders and
    boolean identity results.
-   `/ghdc/data/nwm/object-store` is node-22's view of node-27
+   `/ghdc/data/nwm/object-store` is the compute hosts' view of node-27
    `/home/ghdc/nwm/object-store`; it must remain in
    `NHMS_SCHEDULER_ALLOWED_ROOTS`. It is not the compute-visible staging root
    under `/scratch`; an allow-listed staging path cannot replace either
