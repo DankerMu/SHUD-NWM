@@ -245,7 +245,7 @@ state-index 自动剪枝（`nhms-scheduler-state-index-prune.service`，每日 0
 
 **4. `scheduler_service_failed`** —— service 的 `Result != success`。
 **没有失败值允许表**：systemd 对 oneshot 的取值域含 `exit-code`/`signal`/
-`timeout`/`core-dump`/`resources`/`protocol` 等，本机只实测到过 `success`，
+`timeout`/`core-dump`/`resources`/`protocol` 等，本机（#2570，2026-09-23 记录）只实测到过 `success`，
 所以判据是「非 `success` 即报」。
 处置（计算控制主机）：`journalctl --user -u nhms-compute-scheduler.service -n 200` 找上一趟的
 失败原因；`resources` 一类多半是 Slurm 侧，转
@@ -687,7 +687,8 @@ ambiguous_fallback_match:comment_accounting_unproven
 `services.orchestrator.reconcile_reserved.reconcile_reserved_unbound_jobs` 写出 —— 当 name-window fallback 匹配到
 两个及以上 owned in-window master 时，控制器无法证明 forcing identity
 （`services.orchestrator.reconcile_sacct_probe._query_forcing_controller_identity`），durable reason 落为 `comment_accounting_unproven`。
-根因是**本 Slurm 集群不存 `job_comment`**（#1116；2026-11-27 在 `w3` 上核对，`AccountingStoreFlags` 仍为空），exact-comment 对账因此
+根因是**本 Slurm 集群不存 `job_comment`**（#1116；2026-11-27 在 `w3` 上核对，`AccountingStoreFlags = (null)`，
+见 [receipt](../receipts/2026-11-27-w3-pgrep-and-slurm-accounting-flags.md)），exact-comment 对账因此
 unproven；出处见 [`../failed-basin-retry.md`](../failed-basin-retry.md) `:343-350`
 （该 durable outcome 类「没有自动出口」，held 行保持 `reserved`、之后每趟都失败直到被处置）
 与 `:459-477`（fallback 失败的 outcome 表中 `ambiguous_fallback_match` /

@@ -214,8 +214,9 @@ in this runbook and its siblings relies on this:
   a bare `pgrep -f node22-run-cycle-once` also matches the shell that runs the
   check (procps-ng on node-22, as recorded for #3113 on 2026-11-10, excludes
   only pgrep itself; procps-ng 4.0.4 on `w3` does the same, checked on
-  2026-11-27), so it always reports a hit when run via `ssh host '...'`
-  or `bash -c`.
+  2026-11-27, see the
+  [receipt](../receipts/2026-11-27-w3-pgrep-and-slurm-accounting-flags.md)),
+  so it always reports a hit when run via `ssh host '...'` or `bash -c`.
 - If the wrapper exits while another procedure's systemd fence is installed, its
   `start` is skipped by the fence condition but still returns 0, so the log says
   `timer_restored` while the timer stays inactive until that fence is released.
