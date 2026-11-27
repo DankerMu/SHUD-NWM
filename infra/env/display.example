@@ -54,7 +54,7 @@ NHMS_MVT_FILE_CACHE_DIR=/tmp/nhms-mvt-cache
 # NHMS_TIANDITU_KEY=
 
 # #2010: read-only mirror root for the canonical precipitation products the
-# node-22 copyback writes onto the shared NFS tree. Display-side name on purpose:
+# copyback of the compute role writes onto the shared NFS tree. Display-side name on purpose:
 # the display_readonly profile refuses to start when the compute-side
 # NHMS_OBJECT_STORE_COPYBACK_ROOT is merely present (apps/api/runtime_mode.py).
 # Commented out here; the real value is configured with the deployment (#2017).
@@ -69,7 +69,7 @@ DATABASE_URL=postgresql://nhms_display_ro:change-me@db.internal.example:5432/nhm
 # Readonly display object-store root for disk-resident SHUD station forcing CSVs.
 OBJECT_STORE_ROOT=/home/ghdc/nwm/object-store
 
-# 22 sees the same exported directory as /ghdc/data/nwm/published; 27 reads it
+# The compute hosts see the same exported directory as /ghdc/data/nwm/published; node-27 reads it
 # locally from /home/ghdc/nwm/published.
 NHMS_PUBLISHED_ARTIFACT_ROOT=/home/ghdc/nwm/published
 NHMS_PUBLISHED_ARTIFACT_URI_PREFIX=published://

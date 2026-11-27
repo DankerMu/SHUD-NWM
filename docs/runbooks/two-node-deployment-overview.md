@@ -204,7 +204,7 @@ Slurm 计算节点不是第三个业务部署节点，但它是 22 计算控制�
 
 ### 5.1 22 节点部署入口
 
-`infra/env/compute.env` 是已退役的 docker-e2e 产物，node-22 没有任何单元加载它；单元到环境文件的权威见 [`infra/env/README.md`](../../infra/env/README.md#node-22-unit--environmentfile-authority-1694)。
+`infra/env/compute.env` 是已退役的 docker-e2e 产物，node-22 没有任何单元加载它；单元到环境文件的权威见 [`infra/env/README.md`](../../infra/env/README.md#unit--environmentfile-authority-of-the-compute-role-1694)。
 
 下面这段是设计意图（见文首 banner），不是现行配置：现行 scheduler 是 DB-free 的，各单元实际加载的环境文件以上面的权威表为准。
 
@@ -236,7 +236,7 @@ no-flag scheduler 必须在 registry/adapters/orchestrator 前阻塞。
 
 ### 5.3 systemd 的作用
 
-27 的 display API 是 `nhms-display-api.service`，加载 `infra/env/display.env`；22 的单元和它们加载的环境文件见 [`infra/env/README.md`](../../infra/env/README.md#node-22-unit--environmentfile-authority-1694) 的单元到环境文件表。
+27 的 display API 是 `nhms-display-api.service`，加载 `infra/env/display.env`；22 的单元和它们加载的环境文件见 [`infra/env/README.md`](../../infra/env/README.md#unit--environmentfile-authority-of-the-compute-role-1694) 的单元到环境文件表。
 
 systemd 不是新的应用运行模式，也不会改变 22/27 的职责边界。
 

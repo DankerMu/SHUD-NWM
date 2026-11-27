@@ -129,7 +129,7 @@ NODE27_RAW_RETENTION_FORCING_DAYS=30
 # CANONICAL LANE UNDER THE COPYBACK MUTEX (#2252, owner decision 2026-09-14;
 # identity split #2360, 2026-09-18).
 # On node-27 NODE27_RAW_RETENTION_OBJECT_STORE_ROOT is the shared copyback root
-# node-22 writers promote canonical/ trees into, so every canonical/<S>/<cycle>
+# the writers of the compute role promote canonical/ trees into, so every canonical/<S>/<cycle>
 # removal holds `<root>/.nhms-copyback-batch.lock` (POSIX record lock, one
 # acquisition per tree, 300 s pass-level wait budget). raw/ and the precip
 # cache are never locked. That lock file is `0600` and owned by the copyback
@@ -139,7 +139,7 @@ NODE27_RAW_RETENTION_FORCING_DAYS=30
 # (NODE27_RAW_RETENTION_LANES=canonical,forcing), and this nwm (uid 1005) unit
 # does not select it -- it records `canonical` / `lane_not_selected` (and the
 # same for `forcing`) and never opens the lock. The forcing lane (#3087) takes
-# the same lock per forcing/<segment>/<cycle> tree: node-22 copyback promotes
+# the same lock per forcing/<segment>/<cycle> tree: the copyback of the compute role promotes
 # forcing/ packages under it too. Before that split (#2360) this unit selected all three lanes and every
 # aged canonical cycle ended in `failed[]` with `lock_failure: "lock_unsafe"`,
 # rc=1 on every such tick. Seeing `lock_unsafe` again now means the lane is run

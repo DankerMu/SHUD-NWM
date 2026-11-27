@@ -1,7 +1,7 @@
 # Environment templates of the systemd units
 
 The `*.example` files in this directory are the tracked templates of the env
-files that the NHMS systemd user units on node-22 and node-27 load. They are not
+files that the NHMS systemd user units on the compute control host and on node-27 load. They are not
 final production credentials.
 
 Real local `display.env` and readonly validation
@@ -11,7 +11,7 @@ Real local `display.env` and readonly validation
 credential is `SLURM_GATEWAY_SERVICE_TOKEN` and lives ONLY in untracked,
 owner-mode-0600 environment sources consumed by both the gateway unit
 (`EnvironmentFile=`) and the scheduler unit (drop-in `EnvironmentFile=`), in
-production on node-22 at
+production on the compute control host at
 `/scratch/frd_muziyao/nhms-prod/secrets/slurm-gateway.env` (mode 0600, owned by
 the service account). The value is never committed, logged, serialized, passed
 via argv, or published in OpenAPI/evidence; only the variable name is
@@ -115,13 +115,17 @@ uv run python scripts/validate_readonly_db_boundary.py \
   --force
 ```
 
-## node-22 unit → EnvironmentFile authority (#1694)
+## Unit → EnvironmentFile authority of the compute role (#1694)
 
-Which file a node-22 user systemd unit actually loads. Paths are on node-22
-under `/scratch/frd_muziyao/`. The rows of `nhms-compute-scheduler.service`,
+Which file a user systemd unit of the compute role actually loads. The units run on the
+compute control host only (host layout:
+[`w2-w3-compute-topology.md`](../../docs/runbooks/w2-w3-compute-topology.md#1-主机与角色) §1); paths are
+under `/scratch/frd_muziyao/` there. The rows of `nhms-compute-scheduler.service`,
 `nhms-scheduler-evidence-retention.service`,
 `nhms-scheduler-file-provider-refresh.service` and `nhms-slurm-gateway.service`
-were verified read-only on the live host 2026-09-02; the fifth unit of that
+were verified read-only on the retired node-22 host 2026-09-02, the live host of that day, and read
+again on `w3` 2026-11-27 with the same result (receipt
+`docs/runbooks/receipts/2026-11-27-w3-env-dir-and-copyback-root.md`); the fifth unit of the 2026-09-02
 reading, `nhms-compute-api.service`, is retired (#3394) and has no row. The
 `nhms-node22-unit-failure-alert@.service` row was
 deployed 2026-11-12 (issue 3127; the env file sends through the SMTPS wrapper
@@ -163,10 +167,12 @@ Notes:
   Values in it — including basin roots and scheduler model/basin filters — are
   **not** the production scheduler's configuration and must not be quoted as
   such.
-  The `DATABASE_URL` it still carries on node-22 is the same superseded value:
-  no node-22 unit loads this file, so the key reaches no running process and
-  does not breach the DB-free gate. It is kept, not scrubbed, by owner decision
+  On the retired node-22 host the file still carries a `DATABASE_URL`, the same superseded value:
+  no unit loads this file, so the key reaches no running process and
+  does not breach the DB-free gate. It is kept there, not scrubbed, by owner decision
   (#3164); do not copy it into any env file a unit does load.
+  On `w3` the file does not exist (read 2026-11-27, receipt
+  `docs/runbooks/receipts/2026-11-27-w3-env-dir-and-copyback-root.md`).
 - `compute.host.env` is untracked with no committed template. That gap is
   recorded, not fixed, by #1694.
 - The scheduler's lag and lookback keys (`NHMS_SCHEDULER_CYCLE_LAG_HOURS`,
@@ -203,10 +209,14 @@ for the production scheduler are whatever `compute.scheduler-dbfree.env` says
   mounted on the compute nodes** (cn01 check 2026-09-02: MISSING, receipt
   `:94-97`) — do not treat either path as "the" basin root without naming the
   lane.
+- The compute hosts of today (`docs/runbooks/w2-w3-compute-topology.md`, export table, collected
+  2026-11-24): `/volume/nwm` is local to `w3` and exported read-only to `w2`; `/ghdc/data` is node-27's
+  `/home/ghdc`, mounted on both hosts, so the second root is visible to jobs there. The entry counts and
+  the `cn01` check above describe the retired node-22 host and were not repeated.
 
-Compute role, node 22:
+Compute role:
 
-Which file a live node-22 unit loads is stated by the unit → EnvironmentFile
+Which file a live unit of the compute role loads is stated by the unit → EnvironmentFile
 table above.
 
 - `OBJECT_STORE_ROOT` is the compute-visible staging root;
@@ -219,7 +229,7 @@ table above.
   `NHMS_SCHEDULER_DB_FREE_REQUIRED=true` as the job-env contract (every run
   manifest records `scheduler_db_free_required: "true"` and the gateway exports
   the DB-free worker switches into the Slurm job env). On the
-  live node-22 units those variables come from `compute.scheduler-dbfree.env`
+  live units of the compute role those variables come from `compute.scheduler-dbfree.env`
   (tracked template `compute.scheduler-dbfree.env.example`), per the table
   above.
   The live file is untracked, so the template is *not* evidence for its
@@ -229,10 +239,12 @@ table above.
   present, which is what the canonical-precip backfill recovery command in
   `docs/runbooks/current-production-ops.md` §5.3 depends on. Same scan: only
   `compute.host.env`, `compute.replay.env` and `compute.scheduler-dbfree.env`
-  carry `NHMS_OBJECT_STORE_COPYBACK_ROOT`.
-  `DATABASE_URL` belongs to an explicit archived rollback drill. Node-22
-  `:55433` is stopped/archived and is not scheduler runtime env.
-- The node-22 DB-free scheduler live env
+  carry `NHMS_OBJECT_STORE_COPYBACK_ROOT`. Read again on `w3` 2026-11-27: the same two lines and
+  values, the same mode, the same three files (receipt
+  `docs/runbooks/receipts/2026-11-27-w3-env-dir-and-copyback-root.md`).
+  `DATABASE_URL` belongs to an explicit archived rollback drill. The `:55433` instance on
+  the retired node-22 host is stopped/archived and is not scheduler runtime env.
+- The live env of the DB-free scheduler
   (`compute.scheduler-dbfree.env`, referenced by systemd `EnvironmentFile=`)
   has exactly one tracked source: `compute.scheduler-dbfree.env.example`.
   Its required key set is the union of two layers, both carried by that
@@ -261,7 +273,9 @@ table above.
   - A killed holder's lock is released by the **local** kernel at process exit,
     so a stale file is not a stale lock. The production root is not local:
     `/ghdc/data/nwm/object-store` on node-22 is an NFSv4.2 mount of
-    `ghdc:/home/ghdc` (measured 2026-09-10). A process death still releases at
+    `ghdc:/home/ghdc` (measured 2026-09-10); on `w3` it is an NFSv4.2 mount of the same node-27 export
+    (read 2026-11-27, receipt
+    `docs/runbooks/receipts/2026-11-27-w3-env-dir-and-copyback-root.md`). A process death still releases at
     exit; a **host** death does not — the server holds the lock until that
     client's lease expires.
   - `NHMS_OBJECT_STORE_COPYBACK_LOCK_TIMEOUT_SECONDS` (optional, **default 900**)
@@ -275,7 +289,7 @@ table above.
     `DEFAULT_COPYBACK_LOCK_TIMEOUT_SECONDS` in
     `packages/common/copyback_guard.py`. That arithmetic is deliberately
     conservative and is left unretuned.
-  - All copyback writers must run as one uid (`frd_muziyao` on node-22): the
+  - All copyback writers must run as one uid (the production user `frd_muziyao`): the
     `0o600` mode plus the ownership assertions make a writer under another
     account fail closed instead of running unlocked. The lock file's owner is
     compared both to the current euid **and** to the copyback root's owner, and
@@ -321,18 +335,20 @@ table above.
       node-22: `/ghdc` 755 root:root, `/ghdc/data` 777 root:root,
       `/ghdc/data/nwm` and `/ghdc/data/nwm/object-store` both 775
       `frd_muziyao`(1103):`huser`(1078) — no sticky bit anywhere on the chain,
-      so any member of gid 1078 can remove it. If `ls -ld` ever shows a `t` on
+      so any member of gid 1078 can remove it. Read again on `w3` 2026-11-27: the same four modes and
+      owners (receipt
+      `docs/runbooks/receipts/2026-11-27-w3-env-dir-and-copyback-root.md`). If `ls -ld` ever shows a `t` on
       that chain, fall back to `sudo chown`.
   - `services/orchestrator/retention.py` descends only `root/<prefix>` and
     `root/runs`, never root-level files, so the lock file is invisible to it.
 - The DB-free scheduler's trusted raw authority is the canonical shared-NFS
-  node-22 topology path. Runtime preflight requires both
+  path of the production topology. Runtime preflight requires both
   `NHMS_OBJECT_STORE_COPYBACK_ROOT` and
   `NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT` to resolve to that same fixed,
   allow-listed, readable directory and to each other. Equality between the two
   mutable variables does not establish authority; an arbitrary allow-listed
   staging root is not authority.
-- Node-22 compute-control must set
+- The compute role must set
   `NHMS_ORCHESTRATOR_TERMINAL_STAGE=forecast_state_save_qc` and
   `NHMS_REQUIRE_FORECAST_WARM_START=true`. That makes the scheduler run SHUD and
   DB-free `state_save_qc` so forecast warm-start state continues to advance, then
@@ -342,7 +358,7 @@ table above.
   cycle that must be warm-started; earlier cycles may cold-start only to seed
   DB-free state for that boundary.
 
-#### Required keys for the node-22 DB-free scheduler lane (machine-readable)
+#### Required keys for the DB-free scheduler lane of the compute role (machine-readable)
 
 The prose above and in the bullets before it states this lane's required set as
 "the union of two layers" — wording that never says "must set" for most of it,
@@ -389,7 +405,7 @@ NHMS_SLURM_SCHEDULER_REGISTRY_MANIFEST
 # Deliberately NOT required: NHMS_SLURM_SCHEDULER_CANONICAL_READINESS_INDEX
 # stays unset. No producer maintains a private readiness index (provider
 # refresh publishes only the shared one) and no Slurm entry point of the
-# node-22 chain reads it; unset, jobs fall back to the shared
+# compute role reads it; unset, jobs fall back to the shared
 # NHMS_SCHEDULER_CANONICAL_READINESS_INDEX that refresh keeps current (#3171).
 
 # Scheduler no-flag business validation requires these roots and the
@@ -402,7 +418,7 @@ NHMS_SCHEDULER_ALLOWED_ROOTS
 NHMS_SCHEDULER_SOURCES
 
 # Trusted shared-NFS raw-manifest authority: runtime preflight requires both
-# to resolve to the same fixed node-22 topology path.
+# to resolve to the same fixed path of the production topology.
 NHMS_OBJECT_STORE_COPYBACK_ROOT
 NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT
 
@@ -417,7 +433,7 @@ NHMS_BASINS_ROOT
 # one-off baseline staging command sets it false.
 NHMS_SCHEDULER_REQUIRE_DIRECT_GRID=true
 
-# Orchestrator chain terminal stage (#2075). node-22 is DB-free, so the chain
+# Orchestrator chain terminal stage (#2075). The compute role is DB-free, so the chain
 # must stop before parse/publish. `forecast` is NOT an acceptable value.
 NHMS_ORCHESTRATOR_TERMINAL_STAGE=forecast_state_save_qc
 NHMS_REQUIRE_FORECAST_WARM_START=true
@@ -492,7 +508,7 @@ Node-27 ingest role:
 - `NODE27_INGEST_ALLOWED_DATABASE_ENDPOINTS` defaults to
   `127.0.0.1:55432,localhost:55432`; set it only when node-27 ingest must use a
   different local node-27 PostgreSQL endpoint.
-- Current node-27 autopipeline does not call a node-22 DB rollback mirror and
+- Current node-27 autopipeline does not call a DB rollback mirror on the retired node-22 host and
   treats `N22_DSN`, `NHMS_NODE22_DSN_SOURCE`, and
   `NHMS_ALLOW_ARCHIVED_NODE22_DB_ROLLBACK_MIRROR` as forbidden runtime env.
   Every run must provide an object-store

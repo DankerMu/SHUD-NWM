@@ -98,7 +98,7 @@ Minimal mergeable slice: 3.1 - three pages with no pinned sentence, no command t
 - [x] 4.2 `docs/spec/*`, `docs/modules/*`, the two forcing notes under `docs/`, the host line of
   `docs/VALIDATION.md`, the two narration lines of `docs/governance/LEGACY_DEAD_CODE_INVENTORY.md`,
   `scripts/diagnostic/qhh/README.md` (the tokens its test pins stay).
-- [ ] 4.3 `infra/env/README.md`: the body, the authority heading with its two tests and three inbound
+- [x] 4.3 `infra/env/README.md`: the body, the authority heading with its two tests and three inbound
   links; the comments of `infra/env/*.example`.
 - [ ] 4.4 Live runbooks without a banner: `failed-basin-retry.md`,
   `scheduler-dbfree-typed-reasons.md`, `slurm-gateway-preflight.md`,

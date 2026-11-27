@@ -39,7 +39,7 @@ TEMPLATE_TRACKED_PATH = "infra/systemd/nhms-node22-unit-failure-alert@.service"
 
 SECRET_ENV_FILE = "/scratch/frd_muziyao/nhms-prod/secrets/slurm-gateway.env"
 AUTHORITY_ROOT = "/scratch/frd_muziyao/"
-AUTHORITY_HEADING = "## node-22 unit → EnvironmentFile authority (#1694)"
+AUTHORITY_HEADING = "## Unit → EnvironmentFile authority of the compute role (#1694)"
 AUTHORITY_TOKEN_PREFIX = "NWM/infra/env/"
 SECRET_NAME_SUFFIXES = ("TOKEN", "SECRET", "PASS", "PASSWORD")
 
