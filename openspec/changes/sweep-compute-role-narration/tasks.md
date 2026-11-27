@@ -100,7 +100,7 @@ Minimal mergeable slice: 3.1 - three pages with no pinned sentence, no command t
   `scripts/diagnostic/qhh/README.md` (the tokens its test pins stay).
 - [x] 4.3 `infra/env/README.md`: the body, the authority heading with its two tests and three inbound
   links; the comments of `infra/env/*.example`.
-- [ ] 4.4 Live runbooks without a banner: `failed-basin-retry.md`,
+- [x] 4.4 Live runbooks without a banner: `failed-basin-retry.md`,
   `scheduler-dbfree-typed-reasons.md`, `slurm-gateway-preflight.md`,
   `canonical-precip-mirror-backfill.md`, `held-forcing-absence-exit.md`, `ci-test-routing.md`,
   `node-27-bringup-checklist.md`, `tier-node27-timeseries-storage.md`,

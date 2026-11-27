@@ -6,13 +6,15 @@
 - 权威状态：runbook（口径冲突时按 [`docs/governance/DOC_STATUS.md`](governance/DOC_STATUS.md) 裁决）。
 - 相关 receipt：`receipts/2026-09-06-precip-copyback-backfill.md`（#2016 首次回填）、
   `receipts/2026-09-16-display-v2.md`（#2017 综合部署，镜像根首次配置）。
-- 涉及节点：node-22（`/scratch/frd_muziyao/NWM`，产出侧）与 node-27（`/home/nwm/NWM`，展示侧）。
-  两侧看到的是同一份 NFS：22 的 `/ghdc/data/nwm/` == 27 的 `/home/ghdc/nwm/`。
+- 涉及两端：计算角色（生产 checkout `/scratch/frd_muziyao/NWM`，产出侧）与 node-27（`/home/nwm/NWM`，展示侧）。
+  本页在产出侧的步骤都在计算控制主机上以生产用户执行（主机与角色见
+  [`w2-w3-compute-topology.md`](w2-w3-compute-topology.md#1-主机与角色) §1）。
+  两侧看到的是同一份 NFS：计算主机的 `/ghdc/data/nwm/` == node-27 的 `/home/ghdc/nwm/`。
 
 ## 0. 这条链路长什么样
 
 ```
-node-22 convert 终态 ──(canonical_precip_mirror hook)──► NFS object-store/canonical/<S>/<K>/prcp_rate_or_amount/
+计算角色 convert 终态 ─(canonical_precip_mirror hook)──► NFS object-store/canonical/<S>/<K>/prcp_rate_or_amount/
                                                                      │
 node-27 display API ── NHMS_PRECIP_MIRROR_ROOT ──────────────────────┘
                      └─► /api/v1/precip/{source}/{cycle}/index  与  /{valid_time}.png
@@ -70,10 +72,10 @@ curl -s http://127.0.0.1:8080/health
 
 **不要**用 `scripts/ops/start-display-api.sh` 重启——它会连带杀掉同机的 `yd` 实例（#2282）。
 
-## 3. 回填（node-22，需要一个静默窗口）
+## 3. 回填（计算控制主机，需要一个静默窗口）
 
 回填脚本 `scripts/canonical_precip_copyback_backfill.py` 只用 `shutil`/`pathlib`，不引依赖。
-node-22 的共享 `.venv` 按 #1831 决定长期保持 3.12.7，**禁止** `uv sync` 与任何会重建环境的 `uv run` 变体：
+计算主机共用的 `.venv`（Python 3.11.x，经 NFS 被两台主机上的 Slurm 作业和 scheduler 定时器共用）**禁止** `uv sync` 与任何会重建环境的 `uv run` 变体：
 用钉住的解释器 `/scratch/frd_muziyao/NWM/.venv/bin/python -m scripts.canonical_precip_copyback_backfill`。
 
 调度器 timer 的周期（5 min）短于单 pass（约 7.5 min），passes 背靠背，**自然空窗不存在**，必须停 timer：
@@ -135,7 +137,7 @@ curl -s -o /dev/null -D - "http://127.0.0.1:8080/api/v1/precip/$S/$CYCLE/$VT.png
 ## 5. 上游没有新周期时
 
 `cycles` 端点与盘上镜像**同时**停在同一个周期，说明不是镜像断链，而是上游没产出。
-这时不要回填（没有源可填），去查 node-22 的 `nhms-compute-scheduler` pass 日志与 `.err`：
+这时不要回填（没有源可填），去查计算控制主机上 `nhms-compute-scheduler` 的 pass 日志与 `.err`：
 `cycle_lag_hours`（生产值见 `infra/env/compute.scheduler-dbfree.env.example`，#3225 起为 10；代码默认 0）
 决定一个新周期最早什么时候进入候选窗口，未到窗口不产出是正常的；进了窗口但 raw 数据未齐的周期会被推迟到数据齐后的
 第一趟 pass，同样不是故障。

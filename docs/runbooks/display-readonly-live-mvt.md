@@ -3,9 +3,9 @@
 排查/启用 node-27（`display_readonly`）的 live PostGIS 矢量瓦片（MVT）。对应 issue #343（[M26-7]），已由 #351 以 2026-06-08 live receipt 闭合。
 
 > **Current topology warning (2026-06-29)**: 本 runbook 保留 2026-06-08
-> live receipt 的历史排障上下文；不要把其中的 node-22 `210.77.77.22:55433`
+> live receipt 的历史排障上下文；不要把其中原 node-22 主机的 `210.77.77.22:55433`
 > 当作当前 display DB 配置。当前物理部署中 active primary PostgreSQL 在 node-27
-> 本机 `:55432`，node-22 `:55433` 是 historical PG，已 archived/stopped，
+> 本机 `:55432`，原 node-22 主机的 `:55433` 是 historical PG，已 archived/stopped，
 > 仅作显式 rollback archive，当前不应连接。
 > 新配置以 `infra/env/display.example`、`docs/governance/ROLE_BOUNDARY.md` 和
 > `docs/runbooks/node-27-bringup-checklist.md` 为准。
@@ -49,7 +49,7 @@ M26 初验时 node-27 实测：`/api/v1/layers` 返回 `[]`、river-network 瓦�
 ## 当前启用配置
 
 当前 node-27 `display_readonly` runtime env 应使用 node-27 active PG（本机 `:55432`）
-上的只读角色。不要复制历史 receipt 中的 node-22 `210.77.77.22:55433`；
+上的只读角色。不要复制历史 receipt 中原 node-22 主机的 `210.77.77.22:55433`；
 它是 historical do-not-connect archived/stopped rollback-only 状态。
 
 `infra/env/display.env`（站点实际 secret 不入库）：

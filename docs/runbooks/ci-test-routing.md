@@ -117,7 +117,7 @@ unskip ordinary `integration` items or bypass their independent
 Run periodically on **node-27, outside production windows**. node-27's active
 environment is already Python 3.11. The root rule is "Python 一律用 uv", so the
 lane uses `uv run --no-sync` — which never syncs/updates the environment and
-executes the already-correct active venv. The deferred node-22 checkout must
+executes the already-correct active venv. The production checkout of the compute role must
 not be used for e2e/grib validation. The lane is fail-fast: after `ssh`, the
 remote shell runs under `set -euo pipefail`, so a failed `git pull` or a
 non-3.11 environment aborts the lane before pytest instead of continuing:

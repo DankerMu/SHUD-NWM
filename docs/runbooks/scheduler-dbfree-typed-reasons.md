@@ -1,9 +1,10 @@
 # Scheduler DB-Free Typed Reasons Runbook
 
-适用范围：node-22 上的 production scheduler。自 #3255（R2b）起它只有
+适用范围：计算角色的 production scheduler（主机与角色见
+[`w2-w3-compute-topology.md`](w2-w3-compute-topology.md#1-主机与角色) §1）。自 #3255（R2b）起它只有
 DB-free 一种模式，与 `NHMS_SCHEDULER_DB_FREE_REQUIRED` 的取值无关（该变量
 不再是模式开关，只是 run manifest 与 Slurm 作业 env 的 job-env 契约，模板里
-保留为 `true`）；state / registry / journal / state-index 全部走 file backend。node-22 不连任何活 DB，所有判定证据只
+保留为 `true`）；state / registry / journal / state-index 全部走 file backend。计算角色不连任何活 DB，所有判定证据只
 存在于 pass evidence JSON 与 file state-index 里，因此 typed reason 是唯一
 可靠的分诊入口。
 
@@ -617,7 +618,7 @@ identity 可匹配"被误报为 `canonical_identity_mismatch`。
    `operator_reentry_confirmation` 块时**，这条 convert 改写会被 sink 拒绝
    （见下面的 `blocked_operator_reentry_restart_stage_refused`）——那不是零行判定
    出错，是一次性授权只覆盖 `forecast`。
-3. **旧冻结 index**：#2042 之前写入的 forecast_index（如 node-22 上
+3. **旧冻结 index**：#2042 之前写入的 forecast_index（如 2026-09-14 记录时 node-22 上
    `gfs_2026090312` 的 `forecast_index_*.json`）里零行候选仍带旧的假
    `canonical_identity_mismatch`；这些文件不回写，按上表用
    `candidate_row_count == 0` 识别为零行即可。
@@ -795,7 +796,8 @@ restart reconcile（`reconcile_inflight_jobs`，只读 sacct、从不提交）�
 - 每趟 `restart_reconcile.reserved_unbound.outcomes[]` 对它给出 `action=ambiguous_fallback_match`、`match_count=2`、
   `durable_write_count=0`。
 
-成因：node-22 是明确不存 comment 的集群（`AccountingStoreFlags=(null)`），不明确的 forecast 提交只能靠 #1565
+成因：计算角色的 Slurm 集群明确不存 comment（`AccountingStoreFlags=(null)`；`w3` 上 2026-11-27 复核，见
+[receipt](receipts/2026-11-27-w3-pgrep-and-slurm-accounting-flags.md)），不明确的 forecast 提交只能靠 #1565
 名字窗口兜底绑定；同一趟里 gfs 与 IFS 相隔几秒提交，两个 array 落进彼此的窗口，只数个数就永远是"歧义"。自 #2655
 起兜底额外读 `sacct SubmitLine`，按其中 `--comment=nhms_idem:<idempotency_key>` 精确排除别家的 array，
 pass evidence 的 `fallback_match_basis` 标出是按 `submitline_exact` 还是退回 `name_window_count` 判的；forecast
@@ -817,7 +819,7 @@ pass evidence 的 `fallback_match_basis` 标出是按 `submitline_exact` 还是�
 处置入口：[`failed-basin-retry.md`](failed-basin-retry.md)「Automatic unique fallback on an explicitly comment-less
 cluster」与 Disposition 第 2 条（completed but unbound）；自动兜底永远判不出来的行（`ambiguous_fallback_match`、
 窗口饱和的 `query_unavailable`）走 `bind-reserved-job`（#2668），见 failed-basin-retry.md「Disposition — completed or
-running but unbound: the guarded operator bind」；node-22 上的操作顺序见
+running but unbound: the guarded operator bind」；计算控制主机上的操作顺序见
 [`node22-control-plane-manual-recovery.md`](node22-control-plane-manual-recovery.md)「`active_duplicate_pipeline` +
 reserved-held forecast master」。作业已完成或仍在跑时**不要** `demote-reserved-job`（会重投整批 cohort），也不要
 打 manual-retry marker。

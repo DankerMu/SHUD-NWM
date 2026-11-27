@@ -34,7 +34,8 @@ producer/binder 成功不代替它，也不代替独立的生产部署证明。
 - **验证 oracle 路由**：本地跑 lint/unit/OpenSpec/前端构建；真实 DB、ingest、display
   API、前端生产化和只读边界（本清单 C1–C4）在 **node-27** 产 live
   receipt；只有 sbatch、Slurm gateway、SHUD runtime 或调度行为变更才走
-  **node-22** Slurm scheduling oracle。node-22 检查和本地检查都不闭合 C1–C4。
+  **计算控制主机**（`w3`，见 [`w2-w3-compute-topology.md`](w2-w3-compute-topology.md#1-主机与角色) §1）的
+  Slurm scheduling oracle。计算控制主机上的检查和本地检查都不闭合 C1–C4。
 - **27 前端生产化的功能性开发走 m25
   change**：`openspec/changes/m25-multibasin-frontend-production/`（多流域选择器、latest-product 去硬编码/basin_id、洪水重现期独立
   `return_period_status`、/ops·/monitoring display 降级）；并行起点 issue
@@ -95,11 +96,11 @@ producer/binder 成功不代替它，也不代替独立的生产部署证明。
 
 | 节点    | 角色                         | 能力                                                                                                      |
 | ------- | ---------------------------- | --------------------------------------------------------------------------------------------------------- |
-| node-22 | compute/artifact producer    | Slurm gateway、Slurm/SHUD compute、forcing/run artifacts 写入 shared NFS；不连当前活 DB                   |
+| 计算角色（`w3`、`w2`） | compute/artifact producer    | Slurm gateway、Slurm/SHUD compute、forcing/run artifacts 写入 shared NFS；不连当前活 DB                   |
 | node-27 | active DB + ingest + display | 本机 PostgreSQL `:55432`、node-27 ingest writer、display API、前端；display runtime 为 `display_readonly` |
 
-shared NFS 路径：node-22 视图为 `/ghdc/data/nwm/...`，node-27 视图为
-`/home/ghdc/nwm/...`。node-22 本地 PG `:55433` 是 historical
+shared NFS 路径：计算主机视图为 `/ghdc/data/nwm/...`，node-27 视图为
+`/home/ghdc/nwm/...`。原 node-22 主机的本地 PG `:55433` 是 historical
 do-not-connect、archived/stopped rollback-only archive；当前 active
 DB 和 display/frontend oracle 都在 node-27。
 
@@ -330,7 +331,7 @@ C2 证的是**读**边界（`nhms_display_ro`
       validator、private publisher 和 binder。
 - [ ] 由该 C4 lane 实测 display 模式控件隐藏/禁用、无 retry·cancel·Slurm
       POST、queue-depth
-      unavailable、诊断复制、人工 22 恢复指引，并证明 27 只展示 22 的结果而不创建控制面 receipt。
+      unavailable、诊断复制、计算角色的人工恢复指引，并证明 node-27 只展示计算角色的结果而不创建控制面 receipt。
 - [ ] **Bringup-C4 production acceptance**
       由既有 display 上线 owner 承担。代码 owner：`services/production_closure/c4_production_acceptance.py`（IO：
       `c4_production_acceptance_io.py`）。公开入口：
@@ -753,7 +754,7 @@ done < "$PIN_DIR/pins.tsv"
 - **B 全绿** + **C1–C4 全部产出 live receipt** → 27 节点可声明上线。
 - C 的归因区分（`environment-only`/`production-config`/`data-contract`/`code-contract`）记入
   `docs/bugs.md`。
-- 注意：cross-plane（C3）依赖 22 侧有真实双源 cycle 产出（已业务化具备），以及 published
-  artifacts 已 copyback 到 27 可读路径（`progress.md` §「仍需 live proof」中
-  `NHMS_PUBLISHED_ARTIFACT_ROOT` 由 22 私有 staging 切 `/ghdc`
+- 注意：cross-plane（C3）依赖计算角色有真实双源 cycle 产出（已业务化具备），以及 published
+  artifacts 已 copyback 到 node-27 可读路径（`progress.md` §「仍需 live proof」中
+  `NHMS_PUBLISHED_ARTIFACT_ROOT` 由计算角色的私有 staging 切 `/ghdc`
   的那一步是前置）。
