@@ -23,7 +23,7 @@ resource_profiles:
     # (job 24081_1, FAILED at 05:50:38). Registry already declares walltime_minutes=720
     # for these basins; 14h keeps margin above that.
     walltime: "14:00:00"
-    max_concurrent: 32
+    max_concurrent: 64
     shud_threads: 4
   overrides:
     # basins_hlj (27650 river segments): SHUD forecast ~30 min on 4 cores vs <=6 min

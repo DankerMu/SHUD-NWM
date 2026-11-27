@@ -192,6 +192,14 @@ def test_the_template_gateway_timeout_is_the_node22_value_and_loads(
     assert OrchestratorConfig.from_env().slurm_gateway_timeout_seconds == 300.0
 
 
+def test_the_template_slurm_array_concurrency_bound_is_the_production_value(
+    template_values: dict[str, str],
+) -> None:
+    """#3344: production runs the aggregate Slurm array bound at 64 (32 is the
+    rollback value); a host rebuilt from the template must get the same."""
+    assert template_values["NHMS_SCHEDULER_SLURM_ARRAY_CONCURRENCY_BOUND"] == "64"
+
+
 def test_the_template_carries_no_database_selector(template_values: dict[str, str]) -> None:
     """The DB-free gate refuses to start if a libpq selector is inherited, so
     the template that rebuilds this env must not introduce one."""
