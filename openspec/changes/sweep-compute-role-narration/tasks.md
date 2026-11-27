@@ -23,6 +23,8 @@ its tasks here in its final push.
 - A renamed heading takes every inbound link with it, and a deleted file every reference to it. The
   PR shows a repository-wide search for the old slug or file name returning nothing outside history,
   outside this change's directory and apart from tests' own synthetic inputs (each listed in the PR).
+- No rewritten line ends inside a role term (`design.md` §3): a search of the PR's files for lines
+  that end with "compute" or "compute control" finds none that continues the term on the next line.
 - History, persisted values and the gate's existing vocabulary are not edited (`design.md` §3).
 
 ## 1. Gate vocabulary

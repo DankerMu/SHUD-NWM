@@ -27,9 +27,10 @@ for a role term and `<h>` for a host name.
   hyphen between the words, any letter case), and 计算角色, 计算控制主机, 计算主机, 计算节点.
 - An English term is a whole token: not inside a longer identifier, a dotted name or a path
   (`compute_control`, `compute-role-x`, `compute_node_count`).
-- A term followed by host names ("`<r>` (`<h>` / `<h>`)", "`<r>` `<h>`（控制）+ `<h>`") is one name.
-- A table row about another host is not a compute-role local-database claim: the term in one cell
-  and that other host's own PostgreSQL in another cell of a row whose first cell names node-27.
+- A term is matched inside one line. A term and host names joined only by the separators that join
+  host names today are one name.
+- A table row about node-27 is not a claim about the role: in a row whose first cell names node-27,
+  the leg #3358 added reads each cell on its own. This holds for host names as well.
 - The contract's own sentences about the checks are worded so the gate reads them as statements
   about the gate, and a scenario title of a spec that says what is flagged is not a claim.
 - `production-topology-contract`: requirement titles leave the list of identifiers that keep the
@@ -37,8 +38,9 @@ for a role term and `<h>` for a host name.
 
 ## Not in this change
 
-- The mirror legs, the port leg and the `DATABASE_URL` scan leg: they belong to the retired host and
-  keep reading the original lines.
+- The mirror legs and the port leg belong to the retired host and keep reading the original lines.
+  The `DATABASE_URL` scan leg is not changed either: it anchors on the compute runtime's paths and
+  on two narration phrases, and its narration anchors are reported as a follow-up (`design.md`).
 - Rewording any document to make a finding go away, except the gate's own contract text, which this
   change rewrites anyway, and one line of the umbrella design that describes the gate.
 - Finding ids, function names, module names.
@@ -46,8 +48,8 @@ for a role term and `<h>` for a host name.
 
 ## Impact
 
-- Code: `scripts/governance/entropy_audit/topology_predicates.py`; `check_topology.py` and
-  `topology_context_rules.py` only if the table-row rule needs them.
+- Code: `scripts/governance/entropy_audit/topology_predicates.py`; `check_topology.py` for the
+  scenario-title rule.
 - Tests: `tests/test_entropy_audit_topology_db_boundary.py`.
 - Spec: `production-topology-contract`, two requirements.
 - No production runtime code.

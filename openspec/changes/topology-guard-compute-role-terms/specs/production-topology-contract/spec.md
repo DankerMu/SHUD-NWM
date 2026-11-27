@@ -111,10 +111,10 @@ dotted name and is not part of a hyphenated longer name, the ssh alias form
 `nwm-` plus host name aside. An upper-case spelling,
 a domain name, a longer word that contains the letters and a hyphenated
 identifier that contains them are not host names.
-An English role term SHALL be matched as a whole token with the same
-boundaries: inside an identifier, a dotted name or a path it is not a name of
-the role. A role term followed by host names, joined only by spaces, brackets,
-`/`, `+`, `、`, `和`, `and` or `or`, is one name.
+An English role term SHALL be matched inside one line as a whole token with the
+same boundaries: inside an identifier, a dotted name or a path it is not a name
+of the role, and a term broken across a line end is not matched. A role term and
+host names joined only by the separators that join host names are one name.
 
 #### Scenario: Active node-22 DB writer assumptions are flagged
 
@@ -151,22 +151,27 @@ the role. A role term followed by host names, joined only by spaces, brackets,
 - **THEN** the guard reports the same finding it reports for the codename
 - **AND** a negative wording that is allowed for the codename is allowed when it
   uses a role term instead
-- **AND** a role term followed by host names is one name and yields one finding
+- **AND** a line that holds only a role term opens a claim the way a line that
+  holds only the codename does
 
 #### Scenario: The compute-host leg reads role terms
 
 - **WHEN** a clause of an active surface uses a role term, and the same clause
   names a local PostgreSQL
 - **THEN** the guard reports what it reports for a host name in that clause,
-  with the same denials and no others
+  with the same denials; the table-row and scenario-title scenarios are the
+  only other exceptions, for a role term and for a host name
+- **AND** the legs for the retired host's mirror and port do not read role
+  terms
 
 #### Scenario: A scenario title that says what is flagged is not a claim
 
-- **WHEN** a line is a scenario title of a spec and says that something is
-  flagged
-- **THEN** the guard reports no compute-role finding for that line, whichever
-  name of the role it uses
-- **AND** the same words outside a scenario title are still reported
+- **WHEN** the text of a line starts with `#### Scenario:` and contains the word
+  "flagged" after it, in any scanned file
+- **THEN** the guard reports no database-writer finding for that line, whichever
+  name of the role it uses, and no compute-host-leg finding
+- **AND** the same words without the title prefix are still reported
+- **AND** a claim on a neighbouring line is still reported
 
 #### Scenario: A role term inside a longer name is not a name of the role
 
@@ -176,11 +181,14 @@ the role. A role term followed by host names, joined only by spaces, brackets,
 
 #### Scenario: A table row about node-27 is not a claim about the compute role
 
-- **WHEN** a table row whose first cell names node-27 holds a name of the
-  compute role in one cell and node-27's own PostgreSQL in a different cell
-- **THEN** the compute-host leg reports nothing for the row
-- **AND** a row whose first cell is a name of the compute role is still
-  reported, and so is a cell that holds both
+- **WHEN** a line starts with `|` and its first cell names node-27 and no name
+  of the compute role
+- **THEN** the compute-host leg reads each cell of the row on its own, so a name
+  of the role in one cell and node-27's own PostgreSQL in a different cell are
+  not a claim
+- **AND** a cell that holds both is still reported
+- **AND** a row whose first cell is a name of the role, or names neither, is
+  read as a whole line
 
 #### Scenario: Text that only looks like a host name is not flagged
 

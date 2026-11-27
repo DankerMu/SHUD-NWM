@@ -136,6 +136,9 @@ scenarios that forbid the command, this change's own among them, match it.
 
 **Everything else is rewritten**, by these rules:
 
+- **A term stays on one line.** The topology gate reads lines, and it recognises a role term only
+  inside one line (#3403). Rewritten prose does not break a term across a line end ("compute" at the
+  end of a line, "role" at the start of the next).
 - **Sentences.** The new sentence is written from a read of the whole page or function, not by
   substitution: the subject is chosen from §1 by what the sentence is about (who does it, which
   machine, the set of machines). The PR's reviewer checks each rewritten sentence against §1.
