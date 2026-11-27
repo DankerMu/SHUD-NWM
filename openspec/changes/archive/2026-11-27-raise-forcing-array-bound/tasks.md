@@ -16,11 +16,11 @@
 
 ## 2. Values
 
-- [ ] 2.1 `config/resource_profiles.yaml`: `max_concurrent` of the default profile 64.
-- [ ] 2.2 `infra/env/compute.scheduler-dbfree.env.example`: `NHMS_SCHEDULER_SLURM_ARRAY_CONCURRENCY_BOUND=64`.
-- [ ] 2.3 The repair cap in `services/orchestrator/scheduler_config/config.py` is 64, as a named
+- [x] 2.1 `config/resource_profiles.yaml`: `max_concurrent` of the default profile 64.
+- [x] 2.2 `infra/env/compute.scheduler-dbfree.env.example`: `NHMS_SCHEDULER_SLURM_ARRAY_CONCURRENCY_BOUND=64`.
+- [x] 2.3 The repair cap in `services/orchestrator/scheduler_config/config.py` is 64, as a named
   constant, and its message states the number from that constant.
-- [ ] 2.4 Followers: none is expected. Nothing compares the real profile file, the real env template or
+- [x] 2.4 Followers: none is expected. Nothing compares the real profile file, the real env template or
   the evidence field `slurm_array_concurrency_bound` with 32 (checked in the fixture review:
   `tests/test_node22_scheduler_env_drift_table.py` pins seven other keys and requires exactly those
   rows; `tests/test_env_templates.py` and the template read in `tests/test_production_scheduler.py`
@@ -30,28 +30,28 @@
 
 ## 3. Tests
 
-- [ ] 3.1 The repair cap: 64 accepted, 65 refused before submission; red run with the constant back
+- [x] 3.1 The repair cap: 64 accepted, 65 refused before submission; red run with the constant back
   at 32. The existing test that sets the bound to 33 and matches `repair_missing_forcing.*32`
   (`tests/test_production_scheduler.py`, near line 17142) is rewritten for the new number; it is not
   one of the tests of D3.
-- [ ] 3.2 The real profile file resolves `max_concurrent` 64 for a model without override and for the
+- [x] 3.2 The real profile file resolves `max_concurrent` 64 for a model without override and for the
   models with overrides (they inherit it); red run with the value back at 32.
-- [ ] 3.3 The env template states 64.
+- [x] 3.3 The env template states 64.
 
 ## 4. Docs
 
-- [ ] 4.1 `docs/runbooks/production-ops/service-bringup.md` (the two passages that state 32 and "the
+- [x] 4.1 `docs/runbooks/production-ops/service-bringup.md` (the two passages that state 32 and "the
   bound was not changed") and `docs/runbooks/production-ops/known-issues-pipeline.md` (the receipt
   sentence "sum to at most 32"): the production value is 64 since 2026-11-27 (#3344), under
   measurement; the repair cap is 64.
 
 ## 5. Evidence
 
-- [ ] 5.1 Local: the touched test files and every test file that reads the profile file or the env
+- [x] 5.1 Local: the touched test files and every test file that reads the profile file or the env
   template; `ruff check --no-cache .`; whole-tree collection; hard gate 247 / 0.
-- [ ] 5.2 node-27, detached worktree at the PR head, no database: the same files.
-- [ ] 5.3 Review: fixture review; one code review seat (focus: the repair cap and the followers of 2.4).
-- [ ] 5.4 CI green on the PR.
+- [x] 5.2 node-27, detached worktree at the PR head, no database: the same files.
+- [x] 5.3 Review: fixture review; one code review seat (focus: the repair cap and the followers of 2.4).
+- [x] 5.4 CI green on the PR.
 
 ## Evidence Floor
 
