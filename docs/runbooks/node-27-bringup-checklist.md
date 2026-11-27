@@ -300,8 +300,8 @@ C2 证的是**读**边界（`nhms_display_ro`
 
 ### C3. cross-plane identity live（tasks 4.3 + §10.2/10.3）
 
-- [ ] 同一个 `run_id/source/cycle_time/model_id/basin_id` 串起：22 生产 →
-      DB 状态 → published logs → `/api/v1/mvp/qhh/latest-product` → 27 `/`
+- [ ] 同一个 `run_id/source/cycle_time/model_id/basin_id` 串起：计算角色生产 →
+      DB 状态 → published logs → `/api/v1/mvp/qhh/latest-product` → node-27 `/`
       单页地图 + `/ops`，**拒 historical
       latest 冒充**。通用 cross-plane 身份和双源要求保留。原 #1895
       direct-current

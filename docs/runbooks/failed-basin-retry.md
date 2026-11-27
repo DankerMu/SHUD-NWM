@@ -664,7 +664,7 @@ stand in instead of manufacturing a held row.
    #    before believing any flat file.
 
    # 3. Demote (both entrypoints behave identically; missing --confirm exits 2 with no write).
-   #    active checkout of the compute role: exact interpreter, not bare uv (pre-maintenance rule):
+   #    active checkout of the compute role: exact interpreter, not bare uv (standing rule, root CLAUDE.md):
    /scratch/frd_muziyao/NWM/.venv/bin/python -m services.orchestrator.cli demote-reserved-job \
      --journal-root <journal-root> \
      --job-id job_cycle_<source>_<cycle>_forecast[...] \

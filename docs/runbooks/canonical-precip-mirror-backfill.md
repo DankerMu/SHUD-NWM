@@ -24,7 +24,7 @@ node-27 display API ── NHMS_PRECIP_MIRROR_ROOT ─────────�
 - 切片文件 `canonical/<S>/<K>/prcp_rate_or_amount/<S>_<K>_prcp_rate_or_amount_f<lead:03d>.nc`，
   网格 `canonical/<S>/grid/<grid_id>/grid.json`（`gfs_0p25` / `ifs_0p25`）。
 - display API 读 `NHMS_PRECIP_MIRROR_ROOT`，**绝不**读 `NHMS_OBJECT_STORE_COPYBACK_ROOT`——后者在
-  `apps/api/runtime_mode.py` 的 display 禁用清单里，存在即拒绝启动。两个变量在两个节点上指向同一棵树。
+  `apps/api/runtime_mode.py` 的 display 禁用清单里，存在即拒绝启动。两个变量分别在 node-27 和计算主机上指向同一棵树。
 - 一个周期只要 `prcp_rate_or_amount/` 目录存在就算「已镜像」；目录在而 lead 文件缺，按 `PrecipWindowIncomplete`
   fail-closed，**不会**回退到更老的周期。
 
@@ -113,7 +113,7 @@ systemctl --user start nhms-compute-scheduler.timer
 - 重启后首个 pass 对窗口内结束作业做 reconcile 是**预期**事件，不是故障。
 
 容量：每源每周期 `prcp_rate_or_amount/` 约 66 MB（gfs 56 个 `.nc`、IFS 53 个）。回填前后各记一次
-`df -h /ghdc/data`（22）与 `df -h / /home`（27）。
+`df -h /ghdc/data`（计算主机）与 `df -h / /home`（node-27）。
 
 ## 4. 验证（node-27）
 
@@ -127,7 +127,7 @@ curl -s -o /dev/null -D - "http://127.0.0.1:8080/api/v1/precip/$S/$CYCLE/$VT.png
 
 - index 200，`valid_times` 非空（窗口完整的时次才会被列出，IFS 在 cycle+144h 之后天然止步，不是缺片）。
 - PNG 首次 200 且 `X-Tile-Cache: miss`，再请求一次应为 `hit`；带 `If-None-Match` 应得 304。
-- 跨账号可读性（22 写、27 读）：对一个 `.nc`、一个 `grid.json` 及其父目录 `stat -c '%a %U'`，期望 644 / 755，并 `head -c 8` 实读。
+- 跨账号可读性（计算角色写、node-27 读）：对一个 `.nc`、一个 `grid.json` 及其父目录 `stat -c '%a %U'`，期望 644 / 755，并 `head -c 8` 实读。
 - keep 水位不等式逐源成立：`oldest_listed_cycle − 24h ≥ display_watermark − retention_days`，
   其中 `display_watermark = MAX(cycle_time)`（`hydro.hydro_run`，`run_type='forecast'`，
   `status IN ('succeeded','parsed','published')`），`retention_days` 取 `infra/env/node27-raw-retention.env`。
