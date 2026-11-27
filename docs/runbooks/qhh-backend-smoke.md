@@ -29,7 +29,7 @@
 
 ## #214 evidence boundary
 
-Issue #214 evidence freeze 的索引见 [`qhh-mvp-smoke-evidence.md`](qhh-mvp-smoke-evidence.md)。本文记录的是 QHH GFS 后端链路的 live diagnostic/reproduction evidence，不是 formal backend scheduler readiness，也不是 final production readiness。
+本文记录的是 QHH GFS 后端链路的 live diagnostic/reproduction evidence，不是 formal backend scheduler readiness，也不是 final production readiness。
 
 引用本文时必须保留这些边界：
 
