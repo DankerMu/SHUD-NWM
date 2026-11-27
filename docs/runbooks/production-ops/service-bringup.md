@@ -2,11 +2,8 @@
 
 本页是当前生产值守手册的 §3 开篇、§3.1 开篇、§3.1.1 两节、§3.1.3 分册（#1103 拆分，正文逐字保留）。
 索引与全部分册入口见 [`../current-production-ops.md`](../current-production-ops.md)。
+本页里在计算控制主机上执行的步骤都以生产用户执行；是哪台主机、怎么进入见 [`w2-w3-compute-topology.md`](../w2-w3-compute-topology.md#1-主机与角色) §1。
 
-> **计算角色主机说明**：本页的 "node-22" 指计算角色，现由 w3 / w2 承载；字面的
-> `ssh … 210.77.77.22` 命令一律登录 w3 后执行，**不得**在原主机上执行。详见
-> [`current-production-ops.md`](../current-production-ops.md) 顶部横幅。
->
 > 在新主机上重新 bring-up 计算角色时，另见
 > [`w2-w3-compute-topology.md`](../w2-w3-compute-topology.md) 第 8 节：`loginctl enable-linger`、
 > slurmdbd 与 association、`compute.host.env` 没有模板、无出网主机的 apt / chrony 中继。
@@ -18,8 +15,8 @@
 node-27 source download 使用用户级 systemd timer，每个 source 一个实例
 （`nhms-node27-download@GFS`、`nhms-node27-download@IFS`）：各自的 timer、各自的锁
 （`NODE27_DOWNLOAD_LOCK_PATH` 后加 `.gfs` / `.ifs`）、各自的 log 与 summary，一个 source
-下载慢不会挡住另一个。它不使用 display env，不连
-node-22 DB；未显式设置 `NODE27_DOWNLOAD_CYCLE_TIME` 时自动选择 cycle：一个 cycle 的 raw
+下载慢不会挡住另一个。它不使用 display env，
+不连原 node-22 主机的 DB；未显式设置 `NODE27_DOWNLOAD_CYCLE_TIME` 时自动选择 cycle：一个 cycle 的 raw
 文件对所选的每个 source 都齐全才算下载完成（只有 manifest 不算）；最新允许的 00/12 UTC
 业务 cycle 未完成时先下它，否则补最老的未完成 cycle。pass summary 的
 `cycle_time_selection_detail` 列出未完成的 cycle 及各 source 的状态与原因。
@@ -81,7 +78,7 @@ systemctl --user status nhms-node27-autopipe.timer nhms-node27-autopipe.service 
 
 `N22_DSN`、`NHMS_NODE22_DSN_SOURCE` 和
 `NHMS_ALLOW_ARCHIVED_NODE22_DB_ROLLBACK_MIRROR` 不属于当前生产 ingest
-配置。wrapper 和 `scripts/node27_autopipeline.py` 都会把这些旧 node-22 DB
+配置。wrapper 和 `scripts/node27_autopipeline.py` 都会把这些原 node-22 主机的旧 DB
 变量作为 `NODE22_DB_RUNTIME_ENV_FORBIDDEN` 显式阻断；forcing 元数据只通过
 object-store forcing-domain handoff 进入 node-27 DB。
 
@@ -187,29 +184,31 @@ tail -n 160 /home/nwm/autopipe-logs/autopipe.log
   仍应保留——省掉它会让每个 tick 重扫所有已 fresh 的 run。详见
   `scripts/node27_refresh_coverage.py` 模块 docstring 的 "Overwrite guard" 段。
 
-确认 node-27 ingest 按 bounded systemd 模式运行，并且 node-22 的 production
-scheduler 是 DB-free systemd timer：
+确认 node-27 ingest 按 bounded systemd 模式运行，并且计算角色的 production
+scheduler 是 DB-free systemd timer（装在计算控制主机上）：
 
 ```bash
+# node-27
 pgrep -af 'node27_[a]utopipeline|node27_[a]utopipe' || true
 
-ssh -p 32099 frd_muziyao@210.77.77.22 '
-systemctl --user status nhms-compute-scheduler.timer nhms-compute-scheduler.service --no-pager
-pid=$(systemctl --user show -p MainPID --value nhms-compute-scheduler.service)
-if [ "${pid:-0}" != "0" ]; then
-  tr "\0" "\n" < /proc/$pid/environ | grep -E "^(DATABASE_URL|PGHOST|PGPORT|PGDATABASE)=" || true
-fi'
+# 计算控制主机，生产用户；在子 shell 里跑，pid 不留在当前 shell 里
+(
+  systemctl --user status nhms-compute-scheduler.timer nhms-compute-scheduler.service --no-pager
+  pid=$(systemctl --user show -p MainPID --value nhms-compute-scheduler.service)
+  if [ "${pid:-0}" != "0" ]; then
+    tr "\0" "\n" < /proc/$pid/environ | grep -E "^(DATABASE_URL|PGHOST|PGPORT|PGDATABASE)=" || true
+  fi
+)
 ```
 
 The scheduler service is oneshot; it is normal for it to be inactive between
 timer ticks. Any `DATABASE_URL`/libpq env in the scheduler process is a
 misconfiguration. `NHMS_SCHEDULER_JOURNAL_ROOT` 必须写成 realpath——每一段路径
 组件都是真实目录、没有任何一段是 symlink（`readlink -f` 的结果与配置值逐字
-相同）；否则调度器启动即以 `FILE_JOURNAL_INVALID_ROOT` 拒绝，详见 8.10。 Slurm submission is through the node-22 Slurm Gateway and
-`sbatch`; Slurm then runs compute work on allocated compute nodes such as
-`cnXX`.
+相同）；否则调度器启动即以 `FILE_JOURNAL_INVALID_ROOT` 拒绝，详见 8.10。 Slurm submission is through the compute role's Slurm Gateway and
+`sbatch`; Slurm then runs compute work on the allocated compute nodes.
 
-node-22 compute-only chain must stop at
+The compute role's compute-only chain must stop at
 `NHMS_ORCHESTRATOR_TERMINAL_STAGE=forecast_state_save_qc` with
 `NHMS_REQUIRE_FORECAST_WARM_START=true`: this runs SHUD forecast and DB-free
 `state_save_qc`, then skips parse/publish. Do not use `forecast` as the
@@ -226,7 +225,7 @@ public C4 freeze/browser/bind/verify. See the
 Strict success identities use canonical UTC `Z`, matching latest-product.
 This receipt does not approve the separate #2121-A / #2346 joint deployment.
 
-The DB-free node-22 terminal copyback hook publishes diagnostic provenance
+The compute role's DB-free terminal copyback hook publishes diagnostic provenance
 *before* its existing `copyback_run_trees` call.  It reads only the
 source-owned file journal at `NHMS_SCHEDULER_JOURNAL_ROOT`, validates each
 selected run's immutable manifest, and writes
@@ -254,21 +253,21 @@ is an `unavailable` provenance result, not a scientific-ingest failure.
 
 Configuration ownership is strict:
 
-- node-22's `infra/env/compute.scheduler-dbfree.env` supplies
+- the compute role's `infra/env/compute.scheduler-dbfree.env` supplies
   `NHMS_SCHEDULER_JOURNAL_ROOT`, `OBJECT_STORE_ROOT`,
   `OBJECT_STORE_PREFIX`, `NHMS_OBJECT_STORE_COPYBACK_ROOT`, and, when log
   publication is expected, `NHMS_PUBLISHED_ARTIFACT_ROOT` plus the local
   `SLURM_GATEWAY_URL`;
 - node-27's `infra/env/node27-ingest.env` supplies `DATABASE_URL`,
   `OBJECT_STORE_ROOT`, and `OBJECT_STORE_PREFIX`.  It must not receive the
-  node-22 journal root, Slurm gateway, or any compute-control credential.
+  compute role's journal root, Slurm gateway, or any credential of the compute role.
 
 For a selected-run recovery, use the same code path in two separate commands;
 the CLI intentionally refuses a mixed publish/import invocation.
 
 ```bash
-# node-22: publish source-authoritative sidecar and any verified task logs.
-ssh -p 32099 frd_muziyao@210.77.77.22
+# Compute control host, as the production user: publish source-authoritative sidecar and any verified task logs.
+# Paste it step by step (copy the sidecar only after publication succeeds); the cd and the env file stay in this shell.
 cd /scratch/frd_muziyao/NWM
 set -a
 . infra/env/compute.scheduler-dbfree.env
@@ -308,10 +307,10 @@ uv run --no-sync python /home/nwm/NWM/scripts/backfill_pipeline_job_provenance.p
   --object-store-prefix "${OBJECT_STORE_PREFIX:-}"
 ```
 
-Normal activation is the checked-in hook plus the existing node-22 scheduler
-and node-27 autopipe timers; do not add a second provenance daemon.  Before a
+Normal activation is the checked-in hook plus the existing scheduler timer of
+the compute role and autopipe timer of node-27; do not add a second provenance daemon.  Before a
 code rollback, fence new passes by stopping those two timers and let any
-already-started pass finish.  Restore the paired node-22/node-27 release and
+already-started pass finish.  Restore the paired release of the compute role and node-27 and
 their prior role-specific env files, then resume the existing timers.  Never
 delete or rewrite the source journal, scientific run tree, sidecar, or
 published logs as rollback.  `ops.pipeline_job` is a derived node-27 read
@@ -319,28 +318,31 @@ model: if a database rollback is needed, restore only the explicitly captured
 rows with the ingest writer role and leave `hydro.hydro_run` readiness and
 scientific products untouched.
 
-node-22 scheduler 的模型清单来自 DB-free file registry。当前 canonical registry
+计算角色的 scheduler 模型清单来自 DB-free file registry。当前 canonical registry
 是 direct-grid authority；新增或移动 Basins 后，禁止把 Basins publisher 生成的
 legacy/IDW 行直接写到 canonical 路径。先发布 baseline staging，再在 node-27 生成
 GFS/IFS 两个 source-scoped variant，最后把 direct-only candidate 发布到生产。
 2026-06-30 现场 22 节点的 Basins 根为 `/volume/nwm/Basins`（Linux 路径区分大小写；
-`/volume/NWM/Basins` 当前不是有效挂载点）：
+`/volume/NWM/Basins` 当前不是有效挂载点）。2026-11-23 迁到 `w3` / `w2` 后路径不变：`/volume/nwm` 在 `w3`
+本地盘上，只读导出给 `w2`（2026-11-24 采集，`w2-w3-compute-topology.md` §1、§2）：
 
 ```bash
-ssh -p 32099 frd_muziyao@210.77.77.22
-cd /scratch/frd_muziyao/NWM
-set -a
-. infra/env/compute.scheduler-dbfree.env
-set +a
-test -d "$NHMS_BASINS_ROOT"
-NHMS_SCHEDULER_REQUIRE_DIRECT_GRID=false \
-.venv/bin/python scripts/publish_scheduler_file_registry.py \
-  --basins-root "$NHMS_BASINS_ROOT" \
-  --registry-manifest /ghdc/data/nwm/object-store/scheduler/baseline-registry/manifest-last.json \
-  --object-store-root "$OBJECT_STORE_ROOT" \
-  --object-store-prefix "$OBJECT_STORE_PREFIX" \
-  --work-dir "$WORKSPACE_ROOT/scheduler/basins-file-registry-publish" \
-  --output "$WORKSPACE_ROOT/scheduler/basins-file-registry-publish/receipt.json"
+# 计算控制主机，生产用户；子 shell 让 cd 与 envfile 不留在当前 shell 里，cd 失败则整段不跑
+(
+  cd /scratch/frd_muziyao/NWM || exit
+  set -a
+  . infra/env/compute.scheduler-dbfree.env
+  set +a
+  test -d "$NHMS_BASINS_ROOT"
+  NHMS_SCHEDULER_REQUIRE_DIRECT_GRID=false \
+  .venv/bin/python scripts/publish_scheduler_file_registry.py \
+    --basins-root "$NHMS_BASINS_ROOT" \
+    --registry-manifest /ghdc/data/nwm/object-store/scheduler/baseline-registry/manifest-last.json \
+    --object-store-root "$OBJECT_STORE_ROOT" \
+    --object-store-prefix "$OBJECT_STORE_PREFIX" \
+    --work-dir "$WORKSPACE_ROOT/scheduler/basins-file-registry-publish" \
+    --output "$WORKSPACE_ROOT/scheduler/basins-file-registry-publish/receipt.json"
+)
 ```
 
 运行 baseline publisher 时必须对该单次 staging 命令显式设置
@@ -349,7 +351,7 @@ NHMS_SCHEDULER_REQUIRE_DIRECT_GRID=false \
 `scripts/provision_direct_grid_scheduler_registry.py`，输入上述 baseline staging、输出
 direct-only candidate。候选必须满足：18 个现有流域加新增流域，每个流域恰有 GFS/IFS
 两行，`resource_profile.forcing_mapping_mode` 唯一值为 `direct_grid`。把新 variant package
-复制到 node-22 私有 object store 后，先用 `FileSchedulerModelRegistry(...,
+复制到计算角色的私有 object store 后，先用 `FileSchedulerModelRegistry(...,
 require_direct_grid=True)` 校验，再依次原子发布 Slurm worker mirror 与 shared canonical，
 并重建 canonical readiness。任何一步失败都保留上一份 canonical，不允许退回 IDW。
 
@@ -361,12 +363,12 @@ require_direct_grid=True)` 校验，再依次原子发布 Slurm worker mirror �
 
 | 角色 | 路径 | 说明 |
 |---|---|---|
-| node-22 计算侧 Basins 源 | `/volume/nwm/Basins`（本地 175T `/dev/sda`） | 流域原始目录，用**原名** |
-| node-27 `BASINS_ROOT` = NFS Basins | 22 侧 `/ghdc/data/nwm/Basins` = 27 侧 `/home/ghdc/nwm/Basins` | seed 的 inventory 源，用**已定名** |
-| NFS object store | 22 侧 `/ghdc/data/nwm/object-store` = 27 侧 `/home/ghdc/nwm/object-store` | node-27 `OBJECT_STORE_ROOT`；baseline 包与 dg 变体落这里 |
-| node-22 调度器私有 object store | `/scratch/frd_muziyao/nhms-prod/object-store` | **调度器只认这个根**，dg 变体必须回拷 |
+| 计算主机上的 Basins 源 | `/volume/nwm/Basins`（`w3` 本地盘，只读导出给 `w2`） | 流域原始目录，用**原名** |
+| node-27 `BASINS_ROOT` = NFS Basins | 计算主机上 `/ghdc/data/nwm/Basins` = node-27 上 `/home/ghdc/nwm/Basins` | seed 的 inventory 源，用**已定名** |
+| NFS object store | 计算主机上 `/ghdc/data/nwm/object-store` = node-27 上 `/home/ghdc/nwm/object-store` | node-27 `OBJECT_STORE_ROOT`；baseline 包与 dg 变体落这里 |
+| 计算角色的调度器私有 object store | `/scratch/frd_muziyao/nhms-prod/object-store` | **调度器只认这个根**，dg 变体必须回拷 |
 
-**hop 1 — baseline 发布（node-22）。**
+**hop 1 — baseline 发布（计算控制主机）。**
 
 ```bash
 PYTHONPATH=/scratch/frd_muziyao/NWM NHMS_SCHEDULER_REQUIRE_DIRECT_GRID=false \
@@ -407,7 +409,7 @@ PYTHONPATH=/scratch/frd_muziyao/NWM NHMS_SCHEDULER_REQUIRE_DIRECT_GRID=false \
 **hop 1b — 把 staged 树拷进 NFS Basins（零 run 流域的 seed 前提）。**
 拷**staging 副本**（含 IC 修复、含有意剔除的目录），不是源；两边必须 `diff -rq` 为空，
 因为 publisher 与 seed 各自对同一棵树跑 `discover_basins_inventory`，身份一致是靠内容相同保证的。
-拷完 `chmod -R a+rX`（22 侧 uid 1103 建的目录，27 侧 uid 1005 要读）。
+拷完 `chmod -R a+rX`（计算主机上 uid 1103 建的目录，node-27 上 uid 1005 要读）。
 
 **hop 2 — node-27 登记 baseline。** 就是 autopipeline 的 seed：
 
@@ -440,7 +442,7 @@ mkdir -p /home/nwm/tmp && export TMPDIR=/home/nwm/tmp   # dry-run 的临时构�
 SUCCESSION_ID=<succession-id>
 PROVISION_ARGS=(
   --baseline-registry "<本次上线 hop 1 的 --registry-manifest 写出的 baseline registry>"   # 不是固定的 manifest-last.json
-  # 写到两节点都读得到的共享 NFS 上（node-27 的 /home/ghdc/nwm/... 即 node-22 的 /ghdc/data/nwm/...）
+  # 写到两节点都读得到的共享 NFS 上（node-27 的 /home/ghdc/nwm/... 即计算主机的 /ghdc/data/nwm/...）
   --output-registry "<共享 NFS 上的本次 workspace>/direct-grid-registry.json"
   --operator-id "<operator>"
   --model-id "<baseline_model_id>"   # 每个新增 baseline 重复一次
@@ -472,15 +474,15 @@ PYTHONPATH=/home/nwm/NWM uv run python scripts/provision_direct_grid_scheduler_r
 
 几个坑：
 
-- **回执根要先在 node-22 建好并放权**（一次性）：`scheduler/` 属 `frd_muziyao`，node-27 的 `nwm` 建不了子目录。在 node-22 以 `frd_muziyao` 执行
+- **回执根要先在计算控制主机上建好并放权**（一次性）：`scheduler/` 属 `frd_muziyao`，node-27 的 `nwm` 建不了子目录。在计算控制主机上以 `frd_muziyao` 执行
   `mkdir -p /ghdc/data/nwm/object-store/scheduler/succession && chgrp nwmuser <该目录> && chmod 2775 <该目录>`。
   没建时脚本在做任何事之前就拒绝，并在报错里给出这条命令；脚本自己从不改回执根的权限。
 
 - `direct_grid_variants/<baseline_model_id>/` 的父目录属 `frd_muziyao:huser` 且带 sticky，
-  node-27 的 `nwm` 建不了子目录 → `PermissionError`。**先在 node-22 侧建好并放权**：
+  node-27 的 `nwm` 建不了子目录 → `PermissionError`。**先在计算控制主机上建好并放权**：
   `mkdir -p <dir> && chgrp nwmuser <dir> && chmod 2775 <dir>`（两个账号共有组 `nwmuser`/1107）。
-- `--output-registry` 必须写在**两节点都读得到**的地方：hop 4 在 node-22 上读这份文件。放共享 NFS（node-27 写 `/home/ghdc/nwm/...`，
-  node-22 看到的是同一挂载的 `/ghdc/data/nwm/...`），并且仍须满足下一条的「父目录须属本人、且不能组/他人可写」。
+- `--output-registry` 必须写在**两节点都读得到**的地方：hop 4 在计算控制主机上读这份文件。放共享 NFS（node-27 写 `/home/ghdc/nwm/...`，
+  计算主机看到的是同一挂载的 `/ghdc/data/nwm/...`），并且仍须满足下一条的「父目录须属本人、且不能组/他人可写」。
 - `--output-registry` 的**父目录须属执行账号本人、且不能组/他人可写**（发布时 `provider_lock_parent_unsafe` 那条）。#2753 起 dry-run 与 `--apply`
   一开头就查，不合格即拒绝、不连库不落回执：自己的目录 `chmod 755` 后原命令重跑；否则换到自建目录（`mkdir -m 755`），仅当本 id 已有写着旧路径的 dry-run 回执时才须换新 `--succession-id` 重做 dry-run。
 - **`--output-registry` 绝不能指向生产 canonical manifest。** 与 hop 1 的坑不同形：
@@ -493,16 +495,17 @@ PYTHONPATH=/home/nwm/NWM uv run python scripts/provision_direct_grid_scheduler_r
   产出的 dg 变体行**整体替换**，其余所有流域的行当场消失。且此处未传 `expected_preimage`，
   **没有 CAS 保护**兜底。正确姿势始终是：输出到本次 workspace 下的独立路径，再在 hop 4 合并发布。
 
-**hop 3b — 变体包回拷 node-22 scratch。** 首选 hop 4 提到的 succession 命令；手工回拷用 `cp -r`，**不要 `cp -a`**：
-flash `/scratch` 不支持保留权限位，`cp -a` 每个文件都报
+**hop 3b — 变体包回拷到计算主机的 scratch 根（在计算控制主机上执行）。** 首选 hop 4 提到的 succession 命令；手工回拷用 `cp -r`，**不要 `cp -a`**：
+2026-08-22 在 node-22 上，flash `/scratch` 不支持保留权限位，`cp -a` 每个文件都报
 `preserving permissions ... Operation not supported` 并以非零码退出，配 `set -e` 会中途断掉
-（数据其实已拷完，容易误判）。拷完 `diff -rq` 对齐。
+（数据其实已拷完，容易误判）。`w3` 的 scratch 是经 NFS 挂载的 ext4 LV，没有重测，仍用 `cp -r`。拷完 `diff -rq` 对齐。
 
 **发布前的硬闸：packaged-IC 探针必须对每一行 qualified。** dg 变体 manifest 只有
 `direct_grid_forcing` 键、没有 `included_files`，走 tier (b) 对象探针，URI 由
 `{model_package_uri}{shud_input_name}.cfg.ic` 推出并在 **scratch 根**上解析。用现成工具，别手搓：
 
 ```bash
+# 计算控制主机，生产用户，在 /scratch/frd_muziyao/NWM 下（脚本路径是相对的）
 PYTHONPATH=/scratch/frd_muziyao/NWM /scratch/frd_muziyao/NWM/.venv/bin/python scripts/audit_first_cycle_initial_state.py \
   --registry-manifest <candidate>.json \
   --object-store-root /scratch/frd_muziyao/nhms-prod/object-store \
@@ -527,7 +530,7 @@ PYTHONPATH=/scratch/frd_muziyao/NWM /scratch/frd_muziyao/NWM/.venv/bin/python sc
 hop 3b 到 hop 4（回拷、packaged-IC 审计、发布、refresh 与 timer 停启）现在由 `scripts/node22_model_succession.py` 的 `--kind add_basin` 一条命令完成，见 `recalibration-and-archive.md` 的 5.7.3（率定切换见 5.7.1）；下面的手工做法是它 hard stop 之后的回退路径。
 
 ```bash
-# node-22，frd_muziyao
+# 计算控制主机，生产用户 frd_muziyao
 cd /scratch/frd_muziyao/NWM
 set -a
 . infra/env/compute.scheduler-provider-refresh.env   # 两份 manifest 路径、两个根、prefix、refresh 锁；不含 DB 变量
@@ -535,8 +538,8 @@ set +a
 SUCCESSION_ID=<succession-id>                        # 与 hop 3 相同
 PUBLISH_ARGS=(
   --add "<新流域的 gfs model_id>" --add "<新流域的 IFS model_id>"   # 每个新流域两行，重复写
-  # hop 3 的 --output-registry 在 node-22 上的路径；它在 object store 之外时回执不记 object_store_key，必须给
-  --new-rows-registry "<node-22 视角的路径>"            # /home/ghdc/nwm/... 在这里写成 /ghdc/data/nwm/...
+  # hop 3 的 --output-registry 在计算主机上的路径；它在 object store 之外时回执不记 object_store_key，必须给
+  --new-rows-registry "<计算主机视角的路径>"           # /home/ghdc/nwm/... 在这里写成 /ghdc/data/nwm/...
   --operator-id "<operator>"
   --succession-id "$SUCCESSION_ID"
 )
@@ -582,7 +585,7 @@ canonical 与 worker mirror 的逐字节比对、首轮初始状态审计，全�
 于是**回滚并抛 `provider_restored_previous`**（canonical 完好无损，这是闸门在正常工作，不是数据损坏）。
 
 **读写两端必须先跑同一份代码，才能发布超过旧上限的 manifest。** 处置顺序是死的：
-**改常量 → CI → merge → 22 与 27 都 `git pull --ff-only` 并重启读这份 manifest 的常驻进程 → 才能发布**。
+**改常量 → CI → merge → 计算控制主机与 node-27 都 `git pull --ff-only` 并重启读这份 manifest 的常驻进程 → 才能发布**。
 先发布后升级 = 旧代码的调度器读不动新 manifest（超过 16 MiB 或 400,000 节点即被拒），等于全量停摆。
 refresh 的 canonical 与 worker mirror 均走同一注册表发布器；两端升级后再发布并回读验证。
 
@@ -675,6 +678,7 @@ strict 车道上的 quarantine retry 也可能带 `journal_predecessor_identity`
 而 `met.met_station` 是按**新** binding 身份注册的。
 
 ```bash
+# 计算控制主机，生产用户，在 /scratch/frd_muziyao/NWM 下（解释器与脚本路径都是相对的）
 .venv/bin/python scripts/node22_backfill_forcing_for_model_ids.py \
   --previous-manifest <registry>/manifest-last.json.pre-<stamp> \
   --current-manifest  <registry>/manifest-last.json \
@@ -688,8 +692,8 @@ strict 车道上的 quarantine retry 也可能带 `journal_predecessor_identity`
 测站真移动了（`station_bindings` 归一化后仍不等）时工具**拒绝回补**并把该行记进
 `rebound_models_skipped`：那是重新绑定，得走正常 provisioning，不是回补。
 默认 dry-run；不传 `--cycle` 会扫出**所有**历史 cycle，而历史预报不追溯——按需只补下一趟要跑的。
-`--jobs N` 并发跑（每个 item 写各自的 model 目录，互不争用；实战 `--jobs 5`，单个 model
-约 20 分钟，node-22 48 核，注意别顶满）。注意 forcing 路径的 source 段是
+`--jobs N` 并发跑（每个 item 写各自的 model 目录，互不争用；#1825 于 2026-08-24 记录的实战 `--jobs 5`，单个 model
+约 20 分钟，node-22 48 核，注意别顶满；计算控制主机 `w3` 是 40 核，2026-11-24 采集，见 `w2-w3-compute-topology.md` §3）。注意 forcing 路径的 source 段是
 `normalize_source_id(x).lower()`——canonical `IFS` 落在 `forcing/ifs/` 下，
 按 canonical id 去扫会一条都找不到、静默漏掉一半的活。
 
@@ -761,6 +765,7 @@ policy 门 + cycle 写锁 + 冲突/缺失拒绝 + 证据留痕），`classify_fa
 用这个带门的类型化 API 正是它指向的替代路径。
 
 ```bash
+# 计算控制主机，生产用户，在 /scratch/frd_muziyao/NWM 下（解释器与脚本路径都是相对的）
 .venv/bin/python scripts/node22_manual_retry_failed_runs.py \
   --journal-root /scratch/frd_muziyao/nhms-prod/workspace/scheduler/journal \
   --run-id fcst_<source>_<cycle>_<model_id> \
@@ -772,7 +777,7 @@ cycle 全部 model 的 **cohort master** 行，标错它会把整个 cohort 重�
 行 id 打出来——实战命中的是 `job_fcst_..._forecast_reconciled_34817_6`（逐 run），不是
 `job_cycle_..._forecast_cohort_...`。逐 run 逐个标，不做批量扫。
 
-标完跑一趟 bounded pass（`systemctl --user start nhms-compute-scheduler.service`，
+标完在计算控制主机上跑一趟 bounded pass（`systemctl --user start nhms-compute-scheduler.service`，
 timer 全程保持关闭），验收判据不是候选变成 `selected`，而是 **forecast 真跑成、
 `state_save_qc` 在新 id 下写出下一个 `valid_time` 的 state**——那才是接回 warm chain 的东西。
 顺带核对没被标记的 run 仍是 `blocked`，以证明 marker 是逐 run 生效的。全部通过后再
@@ -858,7 +863,7 @@ pass-blocking failure。合同缺失或损坏仍须 fail closed。
 file registry 决定全量自动计算；只在定向 rollback/drill 时临时收窄。
 生产并发由 scheduler 的全局 Slurm 数组预算
 `NHMS_SCHEDULER_SLURM_ARRAY_CONCURRENCY_BOUND=64` 和 resource profile 的
-`max_concurrent=64` 共同约束（2026-11-27 起，#3344，测量中，回退值 32，见下文"并发上限"）。scheduler 登录节点
+`max_concurrent=64` 共同约束（2026-11-27 起，#3344，测量中，回退值 32，见下文"并发上限"）。计算控制主机上的 scheduler
 只按“数据源 × 时次 × restart-compatible stage × 网关资源 profile 键”构造 cohort、
 提交和轮询，不执行 direct-grid forcing。每个 cohort 的全部流域进入 `produce_forcing_array.sbatch`，Gateway
 生成 `--array=0-(N-1)%min(cohort预算,resource profile上限,N)`；同一 pass 同时运行的
@@ -876,7 +881,7 @@ restart-compatible cohort 内再按 profile 键拆分：`overrides` 里有条目
 `SLURM_GATEWAY_BACKEND=slurm` 时生效（与 gateway 选后端的判据相同；mock 后端不读该文件，
 cohort 不拆）。scheduler 与 gateway 读
 同一份 yaml（`SLURM_GATEWAY_RESOURCE_PROFILES_PATH`，默认相对 `WorkingDirectory` 的
-`config/resource_profiles.yaml`；node-22 两个 unit 的 WorkingDirectory 都是
+`config/resource_profiles.yaml`；计算控制主机上这两个 unit 的 WorkingDirectory 都是
 `/scratch/frd_muziyao/NWM`）。文件缺失、不是合法 YAML 或缺 `default` 段时，scheduler 在
 构造 cohort 阶段抛 `ConfigurationError`、整趟 pass 失败退出，零提交（fail closed）。要给某个大流域更多
 核，需同时做两件事：
@@ -930,7 +935,7 @@ job type 压过 model：model override 说的是求解器对这个流域要多�
   （最后一项即上一条：2026-11-27 起两个值为 64，测量中）。
 - 其它 stage 暂不加条目：`nhms_convert` 每趟只有 4 个作业；`nhms_state_save_qc` 主要在等待
   （CPU 占 8–15%），且在 w2 上慢 3 倍，放出它的核只会把更多 task 挤到 w2。
-- **生效与回滚**：yaml 每次提交都重读，但解析代码在 gateway 进程里。代码首次上线后必须重启一次
+- **生效与回滚**：yaml 每次提交都重读，但解析代码在 gateway 进程里。代码首次上线后必须在计算控制主机上重启一次
   `nhms-slurm-gateway.service`（在部署窗口内、`squeue` 里没有 `nhms_*` 作业时：gateway 的作业表只在
   内存里，数组的 `array_task_count` 丢了会让记账不全的数组被提前判成 COMPLETED）。此后增删条目
   只需正常提交 + 同步 checkout，不用重启；删掉条目就是回滚。旧代码的 gateway 读到新文件时
@@ -948,7 +953,7 @@ authority、readiness 与 state index，不从 Basins 自动生成 IDW replaceme
 里复制同覆盖期 radiation 模板，原始 NFS Basins 源保持不变。
 
 **回填窗必须落在 node-27 压缩截止之内（2026-09-22 onboarding-19 事故）。**
-node-22 的回填深度是 `NHMS_SCHEDULER_LOOKBACK_HOURS + NHMS_SCHEDULER_CYCLE_LAG_HOURS`
+计算角色调度器的回填深度是 `NHMS_SCHEDULER_LOOKBACK_HOURS + NHMS_SCHEDULER_CYCLE_LAG_HOURS`
 （`services/orchestrator/scheduler_discovery.py` 的 `discover_cycles`：
 `start = floor(now - lag - lookback)`）；node-27 压缩满足
 `range_end < MAX(cycle_time) - NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS` 的 chunk，
@@ -983,7 +988,7 @@ cycle 开始逐 cycle 追赶，旧 cycle 的河段时序落进已压缩 chunk，
 
 禁止直接把 `/scratch/frd_muziyao/NWM` checkout 到 pre-inventory writer 后启动。
 受支持流程必须保留当前版本作为 rollback controller，并为目标 SHA 创建一个临时、
-clean、detached checkout；目标 generation 一律使用完整 SHA：
+clean、detached checkout；目标 generation 一律使用完整 SHA。本节的命令都在计算控制主机上以生产用户执行：
 
 ```bash
 ROLLBACK_SHA=$(git rev-parse '<rollback-ref>^{commit}')
@@ -1091,7 +1096,7 @@ authority 在 unsettled job 为空时执行 `prepared -> rolling_forward -> comp
 缺失或被篡改时禁止手工删除 fence。只有 completed receipt 才允许恢复 timer 或清理
 receipt/generation retention root；原 worktree 可在 active 发布后独立删除。
 
-node-22 live drill 必须保存 preparation、old-writer launch、roll-forward 三段 receipt，
+计算角色的 live drill 必须保存 preparation、old-writer launch、roll-forward 三段 receipt，
 并证明 A receipt 只能运行 clean A commit 快照；B/dirty/unresolved checkout、不可用目标
 runtime、root/lock override 和非 submit/eager-exit 命令均为零启动；还必须保存三个
 worker stage 的 sbatch，证明它们引用 launch receipt 中同一
