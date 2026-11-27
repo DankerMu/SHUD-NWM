@@ -121,7 +121,7 @@ Minimal mergeable slice: 4.1 - two documents and one test function, shared with 
 
 ## 5. Historical runbooks with shared followers
 
-- [ ] 5.1 Delete the QHH MVP family: `qhh-continuous.md`, `qhh-mvp-smoke-evidence.md`,
+- [x] 5.1 Delete the QHH MVP family: `qhh-continuous.md`, `qhh-mvp-smoke-evidence.md`,
   `qhh-mvp-production-like-e2e-checklist.md`, `qhh-controlled-failure-retry-evidence.md`; the two
   section-marker entries of `tests/test_production_scheduler.py`; the requirement of
   `evidence-boundary-hardening` that demands the checklist (the slice's own change); the rows of the

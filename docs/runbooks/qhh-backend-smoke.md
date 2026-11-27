@@ -29,13 +29,13 @@
 
 ## #214 evidence boundary
 
-Issue #214 evidence freeze 的索引见 [`qhh-mvp-smoke-evidence.md`](qhh-mvp-smoke-evidence.md)。本文记录的是 QHH GFS 后端链路的 live diagnostic/reproduction evidence，不是 formal backend scheduler readiness，也不是 final production readiness。
+本文记录的是 QHH GFS 后端链路的 live diagnostic/reproduction evidence，不是 formal backend scheduler readiness，也不是 final production readiness。
 
 引用本文时必须保留这些边界：
 
 - `qhh_gfs_2026052100_smoke` 和相关 `.nhms-runs/qhh-smoke/` artifact 只能支持已记录周期的诊断链路完成。
 - 未在 #214 PR 中重跑的 live external 步骤保持 existing diagnostic evidence，不能写成新的 production receipt。
-- `/hydro-met` browser proof、`/ops` retry proof、OpenAPI/API type checks、frontend build 和 opt-in live smoke 状态以 #214 evidence matrix 为准。
+- `/hydro-met` browser proof、`/ops` retry proof、OpenAPI/API type checks、frontend build 和 opt-in live smoke 状态属于 #214 的历史证据，不在本文复核。
   UI 重试已退役（#3179）：`/ops` 没有重试控件，retry 恢复证据走 node-22 manual-repair marker 车道（`scripts/node22_manual_retry_failed_runs.py`）。
 
 ## 环境与入口

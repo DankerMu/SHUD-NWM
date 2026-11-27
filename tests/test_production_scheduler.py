@@ -35645,14 +35645,6 @@ def test_docs_reserve_plan_for_no_mutation_and_use_submit_for_production_submiss
             "Production submission uses the same backend scheduler entrypoint",
             "Slurm mode rejects missing or localhost-only",
         ),
-        "docs/runbooks/qhh-continuous.md": (
-            "生产提交路径使用同一个 backend scheduler",
-            "该生产路径负责所有 active runnable 注册模型",
-        ),
-        "docs/runbooks/qhh-mvp-production-like-e2e-checklist.md": (
-            "### 10.1 生产模式 plan-production",
-            "### 10.2 pipeline job 持久化",
-        ),
     }
 
     for relative_path, (start_marker, end_marker) in production_sections.items():
