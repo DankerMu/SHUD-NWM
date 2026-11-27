@@ -496,9 +496,9 @@ PYTHONPATH=/home/nwm/NWM uv run python scripts/provision_direct_grid_scheduler_r
   **没有 CAS 保护**兜底。正确姿势始终是：输出到本次 workspace 下的独立路径，再在 hop 4 合并发布。
 
 **hop 3b — 变体包回拷到计算主机的 scratch 根（在计算控制主机上执行）。** 首选 hop 4 提到的 succession 命令；手工回拷用 `cp -r`，**不要 `cp -a`**：
-flash `/scratch` 不支持保留权限位，`cp -a` 每个文件都报
+2026-08-22 在 node-22 上，flash `/scratch` 不支持保留权限位，`cp -a` 每个文件都报
 `preserving permissions ... Operation not supported` 并以非零码退出，配 `set -e` 会中途断掉
-（数据其实已拷完，容易误判）。拷完 `diff -rq` 对齐。
+（数据其实已拷完，容易误判）。`w3` 的 scratch 是经 NFS 挂载的 ext4 LV，没有重测，仍用 `cp -r`。拷完 `diff -rq` 对齐。
 
 **发布前的硬闸：packaged-IC 探针必须对每一行 qualified。** dg 变体 manifest 只有
 `direct_grid_forcing` 键、没有 `included_files`，走 tier (b) 对象探针，URI 由

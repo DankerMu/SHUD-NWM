@@ -815,7 +815,7 @@ dry-run 与 enforce 都要显式带 `--retention-days <N>`（`N` 取该值或 wa
 
 ```bash
 # 计算控制主机，生产用户 frd_muziyao（provider 属主）
-# 分步粘贴（enforce 前要审核 dry-run）；cd、envfile 与 N 留在当前 shell 里，下面"exit 3 之后"的比对命令也要用它们
+# 分步粘贴（enforce 前要审核 dry-run）；cd、envfile 与 N 留在当前 shell 里，上文"exit 3 之后"的比对命令也要用它们
 cd /scratch/frd_muziyao/NWM
 set -a
 . infra/env/compute.scheduler-provider-refresh.env
