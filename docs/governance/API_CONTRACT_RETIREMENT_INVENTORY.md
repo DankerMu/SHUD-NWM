@@ -140,7 +140,6 @@ rg --files apps/frontend/e2e | sort
   `m15-visual-conformance.spec.ts`, and `m11-routes.mocked.spec.ts` (the last
   through `e2e/support/layerCatalog.mocked.ts`; spec names refreshed by #3164).
 - Docs/runbook references: current runbooks and plans include
-  `docs/runbooks/two-node-production-e2e-plan.md`,
   `docs/runbooks/node-27-bringup-checklist.md`,
   `docs/bugs.md`, `docs/plans/2026-05-25-mvp-launch-plan.md`,
   `docs/plans/2026-05-27-two-node-readonly-display-refactor-plan.md`, and
@@ -177,7 +176,6 @@ rg --files apps/frontend/e2e | sort
   more; the current branch is `apps/frontend/e2e/support/curveSheet.mocked.ts`
   (used by the curve-sheet mocked specs).
 - Docs/runbook references: `docs/runbooks/qhh-backend-smoke.md`,
-  `docs/runbooks/two-node-production-e2e-plan.md`,
   `docs/plans/2026-05-25-mvp-launch-plan.md`,
   `docs/plans/2026-05-27-two-node-readonly-display-refactor-plan.md`, and
   `docs/spec/04_api_design.md`.

@@ -36,6 +36,85 @@ Required canonical published artifact variables:
 
 Do not use unprefixed `PUBLISHED_ARTIFACT_ROOT` as an app runtime variable.
 
+## Readonly DB boundary validation with a local secret source
+
+The full form of the fail-closed guard described above, as the readonly DB
+boundary validation on node-27 uses it.
+
+- `EVIDENCE_ROOT` is the evidence directory of the run: a directory named after
+  the run under one of the approved evidence roots (see "All generated validation
+  evidence" below), for example `artifacts/two-node-e2e/<run id>`. The validator
+  is given the parent of that directory and its last component, so it writes into
+  `$EVIDENCE_ROOT/db/readonly-db-boundary/` and not into a second directory of the
+  same name below it.
+- `NHMS_READONLY_DB_VALIDATION_RUN_ID` is the business run under validation
+  (`hydro.hydro_run.run_id`), not the evidence bundle. To name the bundle through
+  the environment use `NHMS_READONLY_DB_VALIDATION_EVIDENCE_RUN_ID`.
+- The four per-source exports inside the loop are optional overrides: without
+  them the validator discovers the latest display-ready run of the source itself
+  (#2484).
+- Without a real readonly database URL the lane reports `BLOCKED`, never `PASS`.
+- On node-27 load the display environment first (`set -a; . infra/env/display.env; set +a`),
+  as step C2 of `docs/runbooks/node-27-bringup-checklist.md` says: without
+  `NHMS_PUBLISHED_ARTIFACT_ROOT` the job-log check reports `BLOCKED`.
+- The merge accepts a per-source run id of the form `<merged run id>-db-<source>`, used
+  below, or `<merged run id>-<source>`, in either letter case.
+
+```bash
+: "${EVIDENCE_ROOT:?export EVIDENCE_ROOT first}"
+EVIDENCE_PARENT="$(dirname "$EVIDENCE_ROOT")"
+EVIDENCE_RUN_ID="$(basename "$EVIDENCE_ROOT")"
+export NHMS_SERVICE_ROLE=display_readonly
+export NHMS_DISPLAY_DISABLE_CONTROL_MUTATIONS=true
+export NHMS_DISPLAY_ALLOW_LOCAL_FILE_LOGS=false
+
+# Load the real readonly DSN in a secret-safe way; the env file is untracked and mode 0600.
+# Create the local secret-source file once; do not run install on an existing file, it truncates.
+READONLY_SECRET_SOURCE=infra/env/display-readonly-secrets.env
+if [ ! -e "$READONLY_SECRET_SOURCE" ]; then
+  install -m 0600 /dev/null "$READONLY_SECRET_SOURCE"
+elif [ ! -f "$READONLY_SECRET_SOURCE" ]; then
+  echo "BLOCKED: $READONLY_SECRET_SOURCE must be a regular 0600 file before sourcing" >&2
+  exit 1
+fi
+$EDITOR "$READONLY_SECRET_SOURCE"
+readonly_secret_mode="$(stat -c '%a' "$READONLY_SECRET_SOURCE")" || {
+  echo "BLOCKED: cannot stat $READONLY_SECRET_SOURCE before sourcing" >&2
+  exit 1
+}
+if [ "$readonly_secret_mode" != "600" ]; then
+  echo "BLOCKED: $READONLY_SECRET_SOURCE must be mode 0600 before sourcing" >&2
+  exit 1
+fi
+set -a
+. "$READONLY_SECRET_SOURCE"
+set +a
+# Or read it from the site secret manager:
+# export NHMS_DISPLAY_READONLY_DATABASE_URL="$(secret-manager read nhms/display/readonly-db-url)"
+
+for SOURCE in GFS IFS; do
+  export NHMS_READONLY_DB_VALIDATION_SOURCE="$SOURCE"
+  export NHMS_READONLY_DB_VALIDATION_CYCLE_TIME='<cycle_time-for-source>'
+  export NHMS_READONLY_DB_VALIDATION_RUN_ID='<business-run-id-for-source>'
+  export NHMS_READONLY_DB_VALIDATION_MODEL_ID=basins_qhh_shud
+  export NHMS_READONLY_DB_VALIDATION_JOB_ID='<job-id-with-published-log-for-source>'
+
+  uv run python scripts/validate_readonly_db_boundary.py \
+    --evidence-root "$EVIDENCE_PARENT" \
+    --run-id "$EVIDENCE_RUN_ID-db-$SOURCE" \
+    --force
+done
+
+uv run python scripts/validate_readonly_db_boundary.py \
+  --evidence-root "$EVIDENCE_PARENT" \
+  --run-id "$EVIDENCE_RUN_ID" \
+  --merge-declared-source GFS \
+  --merge-declared-source IFS \
+  --merge-source-dir "$EVIDENCE_PARENT/$EVIDENCE_RUN_ID-db-GFS/db/readonly-db-boundary" \
+  --merge-source-dir "$EVIDENCE_PARENT/$EVIDENCE_RUN_ID-db-IFS/db/readonly-db-boundary" \
+  --force
+```
+
 ## node-22 unit → EnvironmentFile authority (#1694)
 
 Which file a node-22 user systemd unit actually loads. Paths are on node-22

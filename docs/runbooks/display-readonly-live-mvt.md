@@ -8,7 +8,7 @@
 > 本机 `:55432`，node-22 `:55433` 是 historical PG，已 archived/stopped，
 > 仅作显式 rollback archive，当前不应连接。
 > 新配置以 `infra/env/display.example`、`docs/governance/ROLE_BOUNDARY.md` 和
-> `docs/runbooks/two-node-production-e2e-plan.md` 为准。
+> `docs/runbooks/node-27-bringup-checklist.md` 为准。
 
 ## 背景与原始症状
 
@@ -68,7 +68,7 @@ OBJECT_STORE_ROOT=/home/ghdc/nwm/object-store
 
 `infra/env/display.example` 记录 display env 模板；当前物理 DB 归属以
 `docs/governance/ROLE_BOUNDARY.md` 为准；node-27 display 启动检查见
-`docs/runbooks/two-node-production-e2e-plan.md`。
+`docs/runbooks/node-27-bringup-checklist.md`。
 
 改后重启服务：`bash scripts/ops/start-display-api.sh`（issue [#597](https://github.com/DankerMu/SHUD-NWM/issues/597)）。
 脚本流程：preflight 检查 env file + venv →

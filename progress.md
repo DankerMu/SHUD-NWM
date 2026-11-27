@@ -59,7 +59,7 @@
 - **业务化数据 source-of-truth（硬约束）**：每个流域参数以 `data/Basins/<流域>/input/<流域>/` 真实 SHUD 模型为唯一真值（`.sp.riv` 河道=产品/输出层 1633、`.sp.rivseg`/`seg.shp` GIS 层、`.cfg.para` 参数…）；注册与运行参数一律从此派生，**严禁手配/即兴覆盖**。
 - ⚠️ **已知待修（不阻塞）**：`QHH_FORCE_UPSTREAM` 未透传进 sbatch（兜底删 canonical 行触发重转，runbook §6/§9；m24 改走 chain 自动重转消解）；`curve_duration` 跨标签 re-run 孤儿 peak 行（fresh 跑不受影响）。
 - ⚠️ **运行纪律**：作业运行中**禁止在 node-22 `git pull`**（换 inode 触发 NFS stale handle 杀作业）。
-- 运行手册：[`docs/runbooks/qhh-22-business-bringup.md`](docs/runbooks/qhh-22-business-bringup.md)、[`docs/runbooks/qhh-continuous.md`](docs/runbooks/qhh-continuous.md)。m24 细节见 [`openspec/changes/m24-multibasin-continuous-daemon-live/`](openspec/changes/m24-multibasin-continuous-daemon-live/)。
+- 运行手册：[`docs/runbooks/qhh-22-business-bringup.md`](docs/runbooks/qhh-22-business-bringup.md)。m24 细节见 [`openspec/changes/m24-multibasin-continuous-daemon-live/`](openspec/changes/m24-multibasin-continuous-daemon-live/)。
 
 ## 已完成里程碑
 
@@ -77,7 +77,7 @@ cross-plane identity（同一 `run_id/source/cycle/model/basin` 串起 22 生产
 ## 入口
 
 - 文档权威状态与冲突解决顺序见 [`docs/governance/DOC_STATUS.md`](docs/governance/DOC_STATUS.md)。
-- 证据索引：[`docs/runbooks/qhh-mvp-smoke-evidence.md`](docs/runbooks/qhh-mvp-smoke-evidence.md)、[`docs/runbooks/two-node-production-e2e-plan.md`](docs/runbooks/two-node-production-e2e-plan.md)、[`docs/VALIDATION.md`](docs/VALIDATION.md)
+- 证据索引：[`docs/runbooks/node-27-bringup-checklist.md`](docs/runbooks/node-27-bringup-checklist.md)、[`docs/VALIDATION.md`](docs/VALIDATION.md)
 - 常用验证：
 
   ```bash

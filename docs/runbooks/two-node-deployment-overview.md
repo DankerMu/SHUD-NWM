@@ -57,7 +57,7 @@ M22 设计将系统从“单机既计算又展示”的形态，收敛为两个�
 - 27 节点的设计目标是“能看、能诊断、能复制交接信息”，不是“能直接重跑或停止计算”。
 
 这份文档用于说明系统怎么运转、每个节点负责什么、怎么部署、会产生哪些产物。当前值守命令、生产路径、产物位置和已知卡点见
-[`current-production-ops.md`](current-production-ops.md)。端到端证据要求见 [`docs/runbooks/two-node-production-e2e-plan.md`](two-node-production-e2e-plan.md)。
+[`current-production-ops.md`](current-production-ops.md)。端到端证据要求见 [`docs/runbooks/node-27-bringup-checklist.md`](node-27-bringup-checklist.md)。
 
 ## 2. 整体运转流程
 
@@ -462,7 +462,7 @@ jq -c 'select(.record_type == "pipeline_event"
 
 ## 10. 相关文档
 
-- 两节点 E2E 证据计划：[`docs/runbooks/two-node-production-e2e-plan.md`](two-node-production-e2e-plan.md)
+- node-27 bring-up 与证据清单：[`docs/runbooks/node-27-bringup-checklist.md`](node-27-bringup-checklist.md)
 - 两节点 Docker 部署方案：[`docs/plans/2026-05-27-two-node-docker-readonly-display-deployment-plan.md`](../plans/2026-05-27-two-node-docker-readonly-display-deployment-plan.md)
 - 只读展示重构方案：[`docs/plans/2026-05-27-two-node-readonly-display-refactor-plan.md`](../plans/2026-05-27-two-node-readonly-display-refactor-plan.md)
 - M22 OpenSpec：[`openspec/changes/m22-two-node-docker-readonly-display/`](../../openspec/changes/m22-two-node-docker-readonly-display/)

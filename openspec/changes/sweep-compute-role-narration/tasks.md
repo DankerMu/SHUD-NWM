@@ -126,7 +126,7 @@ Minimal mergeable slice: 4.1 - two documents and one test function, shared with 
   section-marker entries of `tests/test_production_scheduler.py`; the requirement of
   `evidence-boundary-hardening` that demands the checklist (the slice's own change); the rows of the
   two governance inventories that name these four.
-- [ ] 5.2 Delete `two-node-production-e2e-plan.md` and `node22-db-retirement-runbook.md`; the plan's
+- [x] 5.2 Delete `two-node-production-e2e-plan.md` and `node22-db-retirement-runbook.md`; the plan's
   snippet (0600 check, `source`, validator command with its evidence arguments) moves to
   `infra/env/README.md`, and both assertions of `tests/test_readonly_db_validation_routes.py` read it
   there (red runs: the order swapped; the run-id directory doubled); the scenario of

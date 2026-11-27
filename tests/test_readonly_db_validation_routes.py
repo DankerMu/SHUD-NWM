@@ -403,26 +403,26 @@ def test_bounded_database_url_options_survive_percent_only_decoding() -> None:
     assert unquote(raw_options) == _validation_pgoptions()
 
 
-def test_runbook_command_uses_evidence_root_without_double_nested_run_id() -> None:
-    runbook = (REPO_ROOT / "docs" / "runbooks" / "two-node-production-e2e-plan.md").read_text(encoding="utf-8")
+def test_env_readme_command_uses_evidence_root_without_double_nested_run_id() -> None:
+    env_readme = (REPO_ROOT / "infra" / "env" / "README.md").read_text(encoding="utf-8")
 
-    assert 'EVIDENCE_PARENT="$(dirname "$EVIDENCE_ROOT")"' in runbook
-    assert 'EVIDENCE_RUN_ID="$(basename "$EVIDENCE_ROOT")"' in runbook
-    assert '--evidence-root "$EVIDENCE_PARENT"' in runbook
-    assert '--run-id "$EVIDENCE_RUN_ID"' in runbook
-    assert '--evidence-root "artifacts/two-node-e2e/$EVIDENCE_RUN_ID"' not in runbook
+    assert 'EVIDENCE_PARENT="$(dirname "$EVIDENCE_ROOT")"' in env_readme
+    assert 'EVIDENCE_RUN_ID="$(basename "$EVIDENCE_ROOT")"' in env_readme
+    assert '--evidence-root "$EVIDENCE_PARENT"' in env_readme
+    assert '--run-id "$EVIDENCE_RUN_ID"' in env_readme
+    assert '--evidence-root "artifacts/two-node-e2e/$EVIDENCE_RUN_ID"' not in env_readme
 
     create_command = 'install -m 0600 /dev/null "$READONLY_SECRET_SOURCE"'
     mode_check = 'if [ "$readonly_secret_mode" != "600" ]; then'
     source_command = '. "$READONLY_SECRET_SOURCE"'
     validator_command = "uv run python scripts/validate_readonly_db_boundary.py"
-    assert "READONLY_SECRET_SOURCE=infra/env/display-readonly-secrets.env" in runbook
-    assert "BLOCKED: $READONLY_SECRET_SOURCE must be mode 0600 before sourcing" in runbook
-    assert create_command in runbook
-    assert mode_check in runbook
-    assert runbook.index(create_command) < runbook.index(source_command)
-    assert runbook.index(mode_check) < runbook.index(source_command)
-    assert runbook.index(source_command) < runbook.index(validator_command)
+    assert "READONLY_SECRET_SOURCE=infra/env/display-readonly-secrets.env" in env_readme
+    assert "BLOCKED: $READONLY_SECRET_SOURCE must be mode 0600 before sourcing" in env_readme
+    assert create_command in env_readme
+    assert mode_check in env_readme
+    assert env_readme.index(create_command) < env_readme.index(source_command)
+    assert env_readme.index(mode_check) < env_readme.index(source_command)
+    assert env_readme.index(source_command) < env_readme.index(validator_command)
 
 
 def test_stat_dialect_substitution_table_is_guard_equivalent(tmp_path: Path) -> None:
@@ -613,15 +613,14 @@ touch header-sentinel
 
 
 def test_docs_secret_source_snippets_use_fail_closed_guards() -> None:
-    runbook = (REPO_ROOT / "docs" / "runbooks" / "two-node-production-e2e-plan.md").read_text(encoding="utf-8")
     env_readme = (REPO_ROOT / "infra" / "env" / "README.md").read_text(encoding="utf-8")
 
-    assert "READONLY_SECRET_SOURCE=infra/env/display-readonly-secrets.env" in runbook
-    assert 'readonly_secret_mode="$(stat -c \'%a\' "$READONLY_SECRET_SOURCE")" || {' in runbook
-    assert 'if [ "$readonly_secret_mode" != "600" ]; then' in runbook
-    assert "BLOCKED: $READONLY_SECRET_SOURCE must be mode 0600 before sourcing" in runbook
-    assert "test -f infra/env/display-readonly-secrets.env || install -m 0600" not in runbook
-    assert 'test "$(stat -c \'%a\' infra/env/display-readonly-secrets.env)" = "600"' not in runbook
+    assert "READONLY_SECRET_SOURCE=infra/env/display-readonly-secrets.env" in env_readme
+    assert 'readonly_secret_mode="$(stat -c \'%a\' "$READONLY_SECRET_SOURCE")" || {' in env_readme
+    assert 'if [ "$readonly_secret_mode" != "600" ]; then' in env_readme
+    assert "BLOCKED: $READONLY_SECRET_SOURCE must be mode 0600 before sourcing" in env_readme
+    assert "test -f infra/env/display-readonly-secrets.env || install -m 0600" not in env_readme
+    assert 'test "$(stat -c \'%a\' infra/env/display-readonly-secrets.env)" = "600"' not in env_readme
 
     assert "use a fail-closed guard" in env_readme
     assert "prints `BLOCKED:`" in env_readme
