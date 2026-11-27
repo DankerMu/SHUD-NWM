@@ -1,7 +1,9 @@
 # production-topology-contract Specification
 
 ## Purpose
-TBD - created by archiving change stabilize-data-compute-plane-handoff. Update Purpose after archive.
+Keep the facts of the current production topology stated the same way in every active
+runbook, role-boundary document, script and verification instruction, and have a static
+guard report text that contradicts them.
 
 ## Requirements
 
@@ -15,9 +17,9 @@ The compute role SHALL be hosted on two dedicated LAN hosts behind node-27:
 journal) and `w2` (compute, `workspace/runs`). The host `210.77.77.22` SHALL be
 treated as retired from NHMS compute and kept only as a rollback archive.
 `node-22` and `node22` SHALL remain the codename of the compute role in
-identifiers (script names, unit names, env keys, receipt schema ids, spec and
-requirement names); an identifier carrying that codename denotes the compute
-role, not the retired host.
+identifiers (script names, unit names, env keys, receipt schema ids and
+capability names); an identifier carrying that codename denotes the compute
+role, not the retired host. A requirement title is prose, not an identifier.
 
 #### Scenario: Active docs describe the current split
 
@@ -103,16 +105,26 @@ The project SHALL provide automated or scripted checks that flag active
 compute-role database-writer and display-env-writer drift in current operational
 surfaces.
 
-The database-writer check SHALL recognise the compute role by each of its names:
-the codename and the two host names (`w3`, `w2`).
+The guard reports on the compute role under each of its names: the codename,
+the two host names (`w3`, `w2`) and the role terms. The role terms are "compute
+role", "compute control host", "compute host" and "compute node" (the words joined by
+one space or one hyphen, in any letter case; "host" and "node" also in the
+plural) and
+计算角色, 计算控制主机, 计算主机, 计算节点.
 The local-PostgreSQL check SHALL have a compute-host leg that recognises the two
-host names. Its other legs SHALL NOT recognise the host names.
+host names and the role terms. Its other legs SHALL NOT recognise them.
 A host name SHALL be matched on the original text as a lower-case whole token
 that is not adjacent to an ASCII letter, digit or underscore, is not part of a
 dotted name and is not part of a hyphenated longer name, the ssh alias form
 `nwm-` plus host name aside. An upper-case spelling,
 a domain name, a longer word that contains the letters and a hyphenated
 identifier that contains them are not host names.
+An English role term SHALL be matched inside one line as a whole token with the
+same boundaries: inside an identifier, a dotted name or a hyphenated longer name
+it is not a name of the role, and a term broken across a line end is not matched.
+A path segment that is exactly a term is read as the term, as a path segment
+that is exactly a host name is. A role term and
+host names joined only by the separators that join host names are one name.
 
 #### Scenario: Active node-22 DB writer assumptions are flagged
 
@@ -140,6 +152,57 @@ identifier that contains them are not host names.
   outside today's topology is not a denial
 - **AND** the archived, stopped or rollback wording that excuses a reference to
   the retired host's own PostgreSQL does not excuse it
+
+#### Scenario: The guard reports a database-writer claim made with a role term
+
+- **WHEN** an active script, runbook, or governance entry uses a role term for
+  the subject of a current NHMS active database-writer claim or of an
+  active-primary claim
+- **THEN** the guard reports the same finding it reports for the codename
+- **AND** a negative wording that is allowed for the codename is allowed when it
+  uses a role term instead
+- **AND** a line that holds only a role term opens a claim the way a line that
+  holds only the codename does
+
+#### Scenario: The compute-host leg reads role terms
+
+- **WHEN** a clause of an active surface uses a role term, and the same clause
+  names a local PostgreSQL
+- **THEN** the guard reports what it reports for a host name in that clause,
+  with the same denials; the table-row and scenario-title scenarios are the
+  only other exceptions, for a role term and for a host name
+- **AND** the legs for the retired host's mirror and port do not read role
+  terms
+
+#### Scenario: A scenario title that says what is flagged is not a claim
+
+- **WHEN** the text of a line starts with `#### Scenario:` and contains "is
+  flagged" or "are flagged" after it (any letter case), in any scanned file
+- **THEN** the guard reports no database-writer finding for that line, whichever
+  name of the role it uses, and no compute-host-leg finding
+- **AND** the same words without the title prefix are still reported
+- **AND** a title that says something "is not flagged" is read as any other
+  line
+- **AND** the rule excuses no other line: a claim on a neighbouring line is
+  judged as it would be without the rule
+
+#### Scenario: A role term inside a longer name is not a name of the role
+
+- **WHEN** a line names a database writer and contains the words of a role term
+  only inside an identifier, a dotted name or a hyphenated longer name
+- **THEN** the guard reports no compute-role finding for it
+
+#### Scenario: A table row about node-27 is not a claim about the compute role
+
+- **WHEN** a line starts with `|` and its first cell, asterisks and code
+  font aside, is exactly `node-27`
+- **THEN** the compute-host leg reads each cell of the row on its own, so a name
+  of the role in one cell and node-27's own PostgreSQL in a different cell are
+  not a claim
+- **AND** a cell that holds both is still reported
+- **AND** a cell ends at a `|` that is not escaped
+- **AND** a row with any other first cell (a name of the role, a longer name
+  that contains `node-27`, both, neither) is read as a whole line
 
 #### Scenario: Text that only looks like a host name is not flagged
 
