@@ -51,7 +51,7 @@
 - 缺省或 `idw` 表示 legacy 模式，模型包保留原 SHUD/rSHUD forcing station 与 `.att FORC` 覆盖，Forcing Producer 在运行期把 canonical 气象场插值到这些固定站点。
 - `direct_grid` 表示模型包已经迁移到 direct-grid station ownership。该版本必须携带 direct-grid binding URI/checksum、`model_input_package_id`、`.sp.att` path/checksum、`applicable_source_ids`、`grid_id`、`grid_signature` 和每站 `shud_forcing_index`/`grid_cell_id`/`forcing_filename`。
 
-缺省/`idw` 只表示仓库仍能解释历史资产，不代表当前生产默认值。node-22 生产设置
+缺省/`idw` 只表示仓库仍能解释历史资产，不代表当前生产默认值。计算角色的生产设置
 `NHMS_SCHEDULER_REQUIRE_DIRECT_GRID=true`；新增模型若没有 direct-grid contract，发布器
 不会覆盖 canonical registry，consumer 也不会加载该行。
 

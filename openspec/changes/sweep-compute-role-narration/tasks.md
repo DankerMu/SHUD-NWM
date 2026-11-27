@@ -95,7 +95,7 @@ Minimal mergeable slice: 3.1 - three pages with no pinned sentence, no command t
 - [x] 4.1 `docs/governance/ROLE_BOUNDARY.md` and `openspec/project-profile.md`, with their three
   pinned sentences and the required-term set in `tests/test_role_boundary_static.py`; the host
   statement of `ROLE_BOUNDARY.md` stays.
-- [ ] 4.2 `docs/spec/*`, `docs/modules/*`, the two forcing notes under `docs/`, the host line of
+- [x] 4.2 `docs/spec/*`, `docs/modules/*`, the two forcing notes under `docs/`, the host line of
   `docs/VALIDATION.md`, the two narration lines of `docs/governance/LEGACY_DEAD_CODE_INVENTORY.md`,
   `scripts/diagnostic/qhh/README.md` (the tokens its test pins stay).
 - [ ] 4.3 `infra/env/README.md`: the body, the authority heading with its two tests and three inbound

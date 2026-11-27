@@ -834,11 +834,11 @@ Canary route 必须显式 pin：
 
 禁止一次性全国切换。
 
-## 切换可见性边界（node-22 计算 / node-27 展示）
+## 切换可见性边界（计算角色 / node-27 展示）
 
 “无感迁移”必须按组件拆开回答，不许笼统承诺：
 
-**node-22 计算侧：可以无感。**
+**计算角色：可以无感。**
 runtime 的标准多站 staging 是双模式共用路径（direct-grid 只是叠加 fail-closed 校验）；Slurm/sbatch、SHUD 二进制、producer 产物布局（`shud/qhh.tsd.forc` + 每站 CSV）全部不变。唯一前提：scheduler 按 Change 4 路由到新 model variant。
 
 **node-27 数据/展示侧：不是自动无感，有三个具体断点，逐个处理：**
@@ -1036,7 +1036,7 @@ Evidence package 必须不可变，并与 mapping asset checksum 互相绑定。
 
 - direct-grid variant 注册：新 `core.model_instance` 行（新 model_id），粒度为 basin × source/grid；GFS/IFS 即使签名相同也分别注册，`applicable_source_ids` 只含对应 source，legacy 行保留作 calibration/replay；
 - variant 注册同步写入 `met.met_station` cell 站 mirror 行（初始 `active_flag=false`）——§8.1 禁 mapping 阶段写 met 表，镜像行归注册步骤；
-- 切换开关复用现有 model activation 生命周期（单事务换活/审计/幂等/并发安全），不新建 per-(basin, source) 路由表；activation → scheduler registry manifest 重发 → NFS → node-22 被动消费；
+- 切换开关复用现有 model activation 生命周期（单事务换活/审计/幂等/并发安全），不新建 per-(basin, source) 路由表；activation → scheduler registry manifest 重发 → NFS → 计算角色被动消费；
 - 源级隔离：dispatch/staging 层按 `applicable_source_ids` fail-closed（源不在列表 → 拒跑，INV-4 延伸）；
 - 计算层零跨源替代：一轮 run 全程单源、禁 mid-run 拼接、禁 legacy 包兼容层；某源某 cycle 缺数据 = 该源该轮无 run（记录原因），跨源可用性仍由 display best-available-selection 负责；
 - lifecycle 硬 guard：basin 有 direct-grid 激活史后，activate(legacy-mapping) 一律 REFUSE；direct→direct′ fix-forward 换活允许（§11）；

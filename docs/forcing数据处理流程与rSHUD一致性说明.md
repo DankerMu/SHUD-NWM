@@ -308,7 +308,7 @@ legacy `idw` 复用既有 Thiessen 覆盖并 IDW 到固定站点；`direct_grid`
    - 高纬距离按球面缩放（`:282-299`）；
    - 风速 `√(u²+v²)`（`:302-303`）；
    - **SHUD 包格式**：`qhh.tsd.forc` 头、按 `shud_forcing_index` 排序、每站 CSV、`forcing_package.json` 的 `units` 断言 `{PRCP:mm/day, TEMP:degC, RH:0-1, wind:m/s, Rn:W/m2, Press:Pa}`（`:323-382`）。
-2. **node-22 真实 SHUD 运行 oracle**：forcing 包最终由 `workers/shud_runtime/runtime.py` 喂给真实 SHUD 二进制执行（CLAUDE.md 规定 node-22 为 SHUD 行为权威），即"能被 SHUD 正确读入并跑出结果"是端到端验收。
+2. **计算角色的真实 SHUD 运行 oracle**：forcing 包最终由 `workers/shud_runtime/runtime.py` 喂给真实 SHUD 二进制执行（生产的 SHUD 作业由计算角色经 Slurm 运行；SHUD 产物校验按 `CLAUDE.md` 的验证 oracle 路由在 node-27 上做），即"能被 SHUD 正确读入并跑出结果"是端到端验收。
 3. **阈值/语义对齐有据**：`workers/canonical_converter/converter.py`（提交 `8cced52`、`8a8ba3d`）、`docs/spec/02_data_product_and_time_semantics.md`。
 4. **逐字节格式同构有据**：本文 §4 全部给出 rSHUD 源码与本项目源码的并排行号，可直接 `diff` 复核。
 
