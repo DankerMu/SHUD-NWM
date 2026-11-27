@@ -857,12 +857,12 @@ pass-blocking failure。合同缺失或损坏仍须 fail closed。
 `NHMS_SCHEDULER_MODEL_IDS` 和 `NHMS_SCHEDULER_BASIN_IDS` 正常保持为空，由
 file registry 决定全量自动计算；只在定向 rollback/drill 时临时收窄。
 生产并发由 scheduler 的全局 Slurm 数组预算
-`NHMS_SCHEDULER_SLURM_ARRAY_CONCURRENCY_BOUND=32` 和 resource profile 的
-`max_concurrent=32` 共同约束。scheduler 登录节点
+`NHMS_SCHEDULER_SLURM_ARRAY_CONCURRENCY_BOUND=64` 和 resource profile 的
+`max_concurrent=64` 共同约束（2026-11-27 起，#3344，测量中，回退值 32，见下文"并发上限"）。scheduler 登录节点
 只按“数据源 × 时次 × restart-compatible stage × 网关资源 profile 键”构造 cohort、
 提交和轮询，不执行 direct-grid forcing。每个 cohort 的全部流域进入 `produce_forcing_array.sbatch`，Gateway
 生成 `--array=0-(N-1)%min(cohort预算,resource profile上限,N)`；同一 pass 同时运行的
-cohort 预算总和不超过 32。GFS 与 IFS cohort 可同时在 Slurm 中推进，scheduler
+cohort 预算总和不超过该全局预算。GFS 与 IFS cohort 可同时在 Slurm 中推进，scheduler
 只在 pass 收尾时汇总全部 cohort。`NHMS_SCHEDULER_CONCURRENT_SUBMIT_BOUND` 仅限制少量
 cohort 提交/轮询控制线程，不能作为流域计算并发口径，也不能替代 Slurm `%N`。
 cohort run id 包含排序后 candidate membership 的稳定摘要；同一成员集合重启时复用，
@@ -913,9 +913,16 @@ job type 压过 model：model override 说的是求解器对这个流域要多�
   而每个 task 占 4 核（HLJ 两个模型占 12 核）；同日 forecast 为 3.5–4.0，不动。
 - **内存没有改**：集群是 `select/cons_tres` + `CR_CORE`，`cgroup.conf` 里 `ConstrainRAMSpace=no`，
   内存既不是可消耗资源也不被强制，`--mem` 不影响并发；forcing 实测峰值 RSS 约 0.46 GB。
-- **并发上限没有改**：`NHMS_SCHEDULER_SLURM_ARRAY_CONCURRENCY_BOUND` 与 `max_concurrent` 仍是 32。
-  forcing 降到 1 核以后，限制它的是这个预算（约 30 个并发）而不再是核数（原来 80 核 / 4 = 20）。
-  要不要提高，看降核后那趟 pass 的实测（各节点 task 数、forcing 阶段墙钟）再定，一次只动一个变量。
+- **并发上限（#3344）**：2026-11-27 起 `NHMS_SCHEDULER_SLURM_ARRAY_CONCURRENCY_BOUND` 与
+  `max_concurrent` 都是 64（owner 决定，原为 32）。
+  按 `_array_concurrency_budgets`（worker 上限 4）算的每数组预算：双源 pass（各数组 65 / 1 / 65 / 1 个
+  task）在 32 下是 15 / 1 / 15 / 1，在 64 下是 31 / 1 / 31 / 1；单源 pass（65 / 1）在 32 下是 31 / 1，
+  在 64 下是 63 / 1。profile 若留在 32，双源时不起约束（31 小于 32），单源时起约束，所以两个值一起改。
+  `--repair-missing-forcing` 随之拒绝高于 64 的总预算（原为高于 32），否则读同一份 env 的 repair 会全被拒。
+  - **测量中**：基线是 2026-11-26 22:00Z 那趟 pass，回退判据见 #3344 的 OpenSpec change
+    `raise-forcing-array-bound`；回退值是 32（改回两个值，repair 上限可以留在 64）。
+  - **生效与回退都不用重启**：gateway 每次提交都重读 checkout 里的 profile 文件，scheduler 在每趟
+    pass 开始时读 env。
 - **收益取决于 task 落在哪台机器**：forcing 每个 task 在 w3 上约 387 s user CPU，在 w2 上约 828 s
   （w2 的单线程解释型负载慢 2 倍以上，主机层问题，见 issue 3384）；两节点 `Weight` 相同，空闲集群
   先填 w2。降核后整个 forcing 阶段可能全落在 w2，预计约 57 min（原 70 min），而不是按核数推算的
