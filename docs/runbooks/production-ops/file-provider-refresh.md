@@ -621,7 +621,8 @@ scripts/install_node22_scheduler_file_provider_refresh.sh --rollback
    timer 触发的 refresh 若排在一趟长 pass 后面，会在 7200 秒被 systemd 杀掉，而不是由 wrapper 以
    exit 3 干净拒绝。
 2. 所以紧接着在**同一个会话**里走 installer 的 `--rollback` → `--install` → 经 unit 手动跑一趟
-   refresh → `--enable`（顺序与前置条件见下面的演练顺序），**绝不把「已 pull、未 `--install`」留过夜**。
+   refresh → `--enable`（顺序与前置条件见下面的演练顺序；`w3` 上没有基线，`--rollback` 这一步在这里会失败，先读下面的"`w3` 现状"），
+   **绝不把「已 pull、未 `--install`」留过夜**。
    整个会话必须在 refresh 可能在跑的时段之外，即 02:15Z 至约 08:45Z（timer 02:15Z 加至多 30 分钟抖动，再加 `TimeoutStartSec=21600`）之外。
    `--rollback` 到 `--enable` 之间 timer 是解除的，每小时一次的探针在这段时间报 `probe_failed` 或
    `timer_not_enabled`，属预期。pull 之后已安装的 unit 与仓库里的不再相同，而 `--enable` 会逐个
@@ -676,7 +677,10 @@ scripts/install_node22_scheduler_file_provider_refresh.sh --rollback
 - **`w3` 现状**（2026-11-27 核对，见 [receipt](../receipts/2026-11-27-w3-refresh-install-state.md)）：`install-state/` 目录不存在，
   refresh timer 是 enabled/active、service 是 static/inactive。这台主机上的 unit 不是经一次有记录的 `--install` 装上的，
   没有 `refresh.before`，也没有遗留的 `scheduler.before`；上一条的基线只属于原 node-22 主机。下面的演练顺序是按原主机当时的状态写的，
-  在 `w3` 上还没有跑过：第 2 步的 `od -c` 在这里没有文件可读，第 4 步 `--rollback` 的预期（读回等于基线）在这里没有基线可比。
+  在 `w3` 上还没有跑过，照写也跑不通：第 2 步的 `od -c` 在这里没有文件可读；第 4 步 `--rollback` 因为没有 `refresh.before`
+  会在任何 mutation 之前失败；第 5 步 `--install` 因为 timer 是 armed 的会被拒绝。两步都是 fail-closed，不改任何东西。
+  要在这台主机上建基线，走上面"armed 时拒绝 `--install`"一条末尾写的出口（没有基线、timer 是手工 arm 的主机：先手工
+  `disable --now` refresh timer 再 `--install`）；这条出口在 `w3` 上同样没有演练过，是一次生产变更，要 owner 放行。
 - **演练顺序**（在计算控制主机上以生产用户执行；原 node-22 主机按 #1831 决定长期保持 3.12.7，演练不再等待任何切换窗口）：timer 现在是
   armed（2026-09-25 记录，#2294）。issue 原文的演练从 `--install` 开始：在 D4 下它会被拒绝，照原文跑完还会让生产停在
   解除态。所以演练顺序是：
@@ -896,7 +900,8 @@ node-22 旧状态（2026-09-25 记录，#2294）没有这个标记：探针 time
 unit"记为基线。已安装但未 arm 的旧主机，第一次新 `--install` 之前先跑一次 `--rollback`，否则已
 安装的文件会被记成基线。
 `w3` 上（2026-11-27 核对，见 [receipt](../receipts/2026-11-27-w3-refresh-install-state.md)）探针的 state root 同样不存在，
-探针 timer 是 enabled/active：这里的 `--rollback` 会删掉一个正在值守的探针 unit，动手前先想清楚。
+探针 timer 是 enabled/active：这里的 `--rollback` 走的是同一条路，会删掉正在值守的探针 unit，
+从那一刻到下一次 `--install` 加 `--enable` 完成之前探针不值守。
 
 `--install` 与 `--rollback` 的成功都**以读回为准，不以 systemctl 调用是否报错为准**：
 `--install` 在 `disable --now` 之后、`--rollback` 在 `daemon-reload` 之后，脚本对探针

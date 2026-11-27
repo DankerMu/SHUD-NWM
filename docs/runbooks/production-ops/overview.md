@@ -39,7 +39,7 @@
 | node-27 ingest | node-27 `/home/nwm/NWM` | 扫描 object-store runs、seed registry、register、parse、publish、refresh coverage | `infra/env/node27-ingest.env` -> `nhms-node27-autopipe.timer` -> `scripts/node27_autopipe_cron.sh` -> `scripts/node27_autopipeline.py` |
 | node-27 display API | node-27 `127.0.0.1:8080` | display_readonly FastAPI, `/health`, `/api/v1/*`, frontend backend | `infra/systemd/nhms-display-api.service` -> `scripts/ops/start-display-api.sh` |
 | node-27 public entry | `https://test.nwm.ac.cn` | nginx reverse proxy to local display API | `/etc/nginx/conf.d/test.nwm.ac.cn.conf` |
-| compute role | compute control host `/scratch/frd_muziyao/NWM` | Slurm Gateway（计算控制主机上唯一的 API）、DB-free scheduler、Slurm/SHUD compute wrapper | `nhms-compute-scheduler.timer`, `/scratch/frd_muziyao/NWM/.venv/bin/python -m services.slurm_gateway`, Slurm jobs |
+| compute role | compute control host `/scratch/frd_muziyao/NWM` (exported to both compute hosts) | Slurm Gateway（计算控制主机上唯一的 API）、DB-free scheduler、Slurm/SHUD compute wrapper | `nhms-compute-scheduler.timer`, `/scratch/frd_muziyao/NWM/.venv/bin/python -m services.slurm_gateway`, Slurm jobs |
 | Shared NFS data | compute hosts `/ghdc/data/nwm`, node-27 `/home/ghdc/nwm` | object-store mirror, published artifacts, Basins source data | NFS mount, no rsync step |
 
 The retired node-22 host's historical PostgreSQL `:55433` was archived and stopped on 2026-06-29

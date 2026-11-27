@@ -151,14 +151,14 @@ squeue -u "$USER" -o "%.18i %.20j %.2t %.10M %.10l %.6D %R"
 - **进程级 loopback bind guard（可部署的等价网络漂移控制）**：
   `python -m services.slurm_gateway` 在 uvicorn 前 fail-closed，拒绝任何
   非 loopback bind（`0.0.0.0` / `::` / hostname / 非 loopback IP）；
-  node-22 用户无非交互 sudo（#1684，2026-08-28 记录），这即是本 issue 要求的用户级等价第二控制。
+  原 node-22 主机上的生产用户无非交互 sudo（#1684，2026-08-28 记录；`w3` 上没有重测），这即是本 issue 要求的用户级等价第二控制。
 - **HTTP 实现协议固定 h11（checked-in 模块入口已钉死）**：
   `services/slurm_gateway/__main__.py` 以 `uvicorn.run(..., http="h11")` 启动，
   规避 uvicorn 默认 `http="auto"` 落到原 node-22 主机当时长期保持的活动 Python 3.12.7 环境里
   已实测损坏（2026-08-29 现场复现，见 §3.2.2）的可选原生 httptools（`AttributeError: module 'httptools.parser'
   has no attribute '__all__'`，gateway 在 bind 前 exit 1）。
   `UVICORN_HTTP=h11` 不影响程序化 `uvicorn.run`，只有显式关键字参数是确定性控制；
-  这是**兼容性钉，不是依赖修复**，不授权 `uv sync`。
+  这是**兼容性钉，不是依赖修复**，不授权 `uv sync`。`w3` 的 Python 3.11 环境里没有重测 httptools，钉照旧保留。
 - root 管理的 host packet-filter/ACL deny 规则属于**可选**的更强防线：仅在
   实际存在并留证时记录（本 run 的 PASS 不依赖它）；remote negative probe +
   bind-guard 拒绝即 live receipt。
@@ -197,7 +197,7 @@ timer。代码回滚由标准 ff-only 部署循环负责
 `http="h11"`——原 node-22 主机当时长期保持的活动 Python 3.12.7 环境的可选原生 httptools
 2026-08-29 现场复现为损坏（`module 'httptools.parser' has no attribute '__all__'`，
 无法 bind），`UVICORN_HTTP=h11` 对程序化调用无效且不改这里任何行为；这是
-兼容性钉，不是依赖修复，**不授权 `uv sync`**。
+兼容性钉，不是依赖修复，**不授权 `uv sync`**（`w3` 的 Python 3.11 环境里没有重测 httptools，钉照旧保留）。
 
 ```bash
 # 0) FENCE the scheduler with REVERSIBLE RUNTIME `ConditionPathExists` drop-ins
