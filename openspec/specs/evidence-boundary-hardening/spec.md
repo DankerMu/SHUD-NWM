@@ -1,7 +1,7 @@
 # evidence-boundary-hardening Specification
 
 ## Purpose
-Harden the boundary between mocked regression and live evidence: current runbooks follow the active route authority, historical MVP runbooks are marked as such, mock detection covers multiline route registrations, artifact ownership wording matches the audit, and the display runtime rejects compute-only copyback authority.
+Harden the boundary between mocked regression and live evidence: current runbooks follow the active route authority, mock detection covers multiline route registrations, artifact ownership wording matches the audit, and the display runtime rejects compute-only copyback authority.
 
 ## Requirements
 
@@ -37,19 +37,6 @@ aliases, compatibility references, or historical evidence.
   concrete forms such as `/basins/demo` and `/segments/demo` are each
   classified as historical evidence, redirect alias checks, compatibility
   context, or drift
-
-### Requirement: Historical MVP runbooks are clearly marked
-
-Old MVP runbooks that preserve pre-M26 `/hydro-met` evidence SHALL be marked as
-historical or superseded before current agents can mistake them for active
-instructions.
-
-#### Scenario: historical checklist remains in docs/runbooks
-- **WHEN** a runbook such as
-  `docs/runbooks/qhh-mvp-production-like-e2e-checklist.md` keeps M21/MVP
-  historical `/hydro-met` redirect-era steps
-- **THEN** the file or affected section contains a visible historical or
-  superseded notice that points to current M26 route authority
 
 ### Requirement: Mocked Playwright regression is separate from live proof
 
