@@ -716,6 +716,39 @@ def _assert_backend_smoke_local_lane_section(text: str) -> None:
     assert block.index("scripts/local_pg.sh start") > cd_index
     assert block.index("scripts/run_qhh_backend_smoke.sh") > cd_index
     assert "uv run" not in block
+
+    # The production postmaster listens on 55432 on node-27: no command of the
+    # recipe may name that port (comments may warn against it).
+    block_lines = block.splitlines()
+    commands = [line.split(" #", 1)[0] for line in block_lines if not line.lstrip().startswith("#")]
+    assert not [line for line in commands if "55432" in line], "recipe commands name the production port 55432"
+    pgport_lines = [line for line in block_lines if line.startswith("export PGPORT=")]
+    assert pgport_lines, "recipe does not export PGPORT"
+    assert block.index("\n" + pgport_lines[0]) < block.index("scripts/local_pg.sh start"), (
+        "export PGPORT= must come before scripts/local_pg.sh start"
+    )
+
+    # The smoke script must be reachable only when the local database started.
+    start_and = "./scripts/local_pg.sh start &&\n"
+    assert start_and in block, "smoke script is not chained after `./scripts/local_pg.sh start &&`"
+    assert block.index("scripts/run_qhh_backend_smoke.sh") > block.index(start_and), (
+        "smoke script must come after `./scripts/local_pg.sh start &&`"
+    )
+    assert not [
+        line
+        for line in block_lines
+        if line.startswith(("./scripts/run_qhh_backend_smoke.sh", "export DATABASE_URL="))
+    ], "a standalone smoke-script or DATABASE_URL line runs even when the start failed"
+    start_at = block_lines.index(start_and.rstrip("\n"))
+    script_at = next(
+        number
+        for number, line in enumerate(block_lines)
+        if number > start_at and "scripts/run_qhh_backend_smoke.sh" in line
+    )
+    assert all(line.endswith(" \\") for line in block_lines[start_at + 1 : script_at]), (
+        "lines between `start &&` and the smoke script must form one continued command (each ends with ` \\`)"
+    )
+
     assert "$PWD/SHUD/shud" not in section
     assert "SHUD_EXECUTABLE=$QHH_DIAGNOSTIC_CHECKOUT/SHUD/shud" in section
 
