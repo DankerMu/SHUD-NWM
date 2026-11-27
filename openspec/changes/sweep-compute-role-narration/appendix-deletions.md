@@ -15,10 +15,10 @@ means a test writes a file of that name into a temporary repository and does not
 | `docs/runbooks/node22-db-retirement-runbook.md` | 151 | delete | 5.2 |
 | `docs/runbooks/qhh-backend-smoke.md` | 254 | delete after moving about 12 lines | 6.1 |
 | `docs/runbooks/qhh-22-business-bringup.md` | 510 | delete; residues listed below | 6.2 |
-| `docs/runbooks/forcing-copyback-backfill.md` | 203 | keep: the CLI is live code under test and `forcing-copyback-backfill` requires the operator documentation | 4.4 (narration and header) |
+| `docs/runbooks/forcing-copyback-backfill.md` | 203 | keep: the CLI is live code under test and `forcing-copyback-backfill` requires the operator documentation | 4.6 (narration and header) |
 | `docs/runbooks/two-node-deployment-overview.md` | | keep: authority for the env allowlist and read by tests | 4.5 |
 | `docs/runbooks/display-readonly-live-mvt.md` | | keep | 4.4 |
-| `docs/governance/LEGACY_DEAD_CODE_INVENTORY.md` | | keep; rows that name deleted files are edited with them | 5.1, 6.2 |
+| `docs/governance/LEGACY_DEAD_CODE_INVENTORY.md` | | keep; rows that name deleted files are edited with them; its two narration lines | 5.1, 6.1, 6.2; 4.2 |
 
 ## Followers per deleted file
 
@@ -37,10 +37,11 @@ and `qhh-continuous.md`.
 
 **`two-node-production-e2e-plan.md`**:
 
-- `tests/test_readonly_db_validation_routes.py`: one test's subject is the plan's snippet (check mode
-  0600, then `source`, then the validator). The invariant is real. The snippet moves to
-  `infra/env/README.md`, which already states the rule and is already read by the same file's other
-  test.
+- `tests/test_readonly_db_validation_routes.py`: two tests read the plan's snippet. One pins the
+  order (check mode 0600, then `source`, then the validator); the other pins the validator command's
+  evidence arguments (a parent directory, `--evidence-root`, `--run-id`, no doubled run-id
+  directory). Both invariants are real. The whole snippet moves to `infra/env/README.md`, which
+  already states the rule, and both tests read it there.
 - `openspec/specs/evidence-boundary-hardening/spec.md`: one scenario names the plan.
 - Pointer sentences that name the plan as the authority for the current display database and env:
   `display-readonly-live-mvt.md` (two), `object-store-forcing-series-read.md` (one). Retargeted to
@@ -52,9 +53,10 @@ and `qhh-continuous.md`.
   merge semantics. The behaviour is enforced by the validator; live usage examples are in
   `tier-node27-timeseries-storage.md` and the node-27 checklist.
 
-**`node22-db-retirement-runbook.md`**: `tests/test_role_boundary_static.py` (the file constant and the
-rollback-cleanup snippet test; the snippet survives on the 2026-06-29 receipt, which is history);
-two synthetic paths in `tests/test_entropy_audit_topology_db_boundary.py`.
+**`node22-db-retirement-runbook.md`**: `tests/test_role_boundary_static.py` (the file constant; one
+rollback-cleanup snippet test that walks the runbook and the 2026-06-29 receipt: the runbook leaves
+the tuple, the receipt stays); two synthetic paths in
+`tests/test_entropy_audit_topology_db_boundary.py` (no change needed).
 
 **`qhh-backend-smoke.md`**:
 
@@ -65,7 +67,11 @@ two synthetic paths in `tests/test_entropy_audit_topology_db_boundary.py`.
 - `tests/test_qhh_scripts_static.py`: the test that reads the runbook's recipe is re-pointed at the
   README.
 - The freshness anchor in the governance schema and the line of `apps/api/AGENTS.md` that names the
-  runbook.
+  runbook; the four synthetic instruction files in
+  `tests/test_entropy_audit_instruction_inventory.py` that carry the reference the schema requires.
+- A citation in `docs/forcing数据处理流程与rSHUD一致性说明.md`; rows in
+  `LEGACY_DEAD_CODE_INVENTORY.md` and `API_CONTRACT_RETIREMENT_INVENTORY.md`. One bullet of each
+  inventory names this file together with files of 5.1 and 5.2, so 6.1 lands after them.
 
 **`qhh-22-business-bringup.md`**:
 

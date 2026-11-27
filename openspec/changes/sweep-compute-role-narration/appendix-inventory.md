@@ -9,6 +9,27 @@ the per-PR figures come from `narration_count.py`, whose mechanical classes diff
 (`design.md` §3). Where this appendix and `design.md` or `tasks.md` disagree on what is done or in
 which group, the design and the tasks hold: §8 below is the inventory's first cut of the slices.
 
+Corrections found in review, 2026-11-27 (the snapshot text below is left as taken):
+
+- The inventory searched `node-?22` only. The spellings "node 22" and "22-node" add these live lines:
+  `apps/api/routes/pipeline.py` (two "Ask a node 22 operator" messages, one asserted by
+  `tests/test_retry_cancel_consistency.py`); a second OpenAPI description chain
+  (`apps/api/openapi_patching_pipeline.py` "…compute_control runbook on node 22" →
+  `openapi/nhms.v1.yaml` → `apps/frontend/src/api/types.ts`); `infra/env/README.md` ("Compute role,
+  node 22:"); the example unit `infra/systemd/nhms-slurm-gateway.service` (two comments and its
+  `Description=`); the specs `hydro-result-ingest-and-publish` ("produced by node 22"),
+  `display-readonly-ops-ui` ("22-node", two lines) and `multibasin-product-discovery` ("22 节点").
+- §8 item 6 says the files under `infra/systemd/node22/` have no narration. Two do:
+  `nhms-compute-scheduler.service` and `nhms-slurm-gateway.service` end their `Description=` with
+  "(node 22 user)". With the 14 found, 16 manifest units carry the codename in `Description=`.
+- §3 says no test pins the text of `apps/api/routes/pipeline.py`. One does (above).
+- A third heading is a link target: `production-ops/recalibration-and-archive.md` §5.8, linked from
+  `current-production-ops.md`.
+- Hyphenated compounds are narration, not names: `node-22-local` (6 lines), `node-22-operator` (2),
+  `node-22-only` (1), `node-22/operator` (1).
+- Other unlisted lines: `config/calibration_overrides.yaml` ("Measured on node-22", undated);
+  `docs/VALIDATION.md` (host alias of the retired host).
+
 Scope: `git grep -iE 'node-?22'` minus the six history paths = 390 files / 2507 lines (matches the baseline).
 Non-ASCII file names (docs/ForcingReplace/..., docs/forcing数据处理...) need `core.quotepath=false`; without it a tracked-file walk reports 388/2500.
 

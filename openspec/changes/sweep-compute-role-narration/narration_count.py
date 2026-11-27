@@ -5,14 +5,15 @@ Every PR of the sweep quotes this output before and after its diff.
 A line is filed under the strongest class any of its occurrences has:
 
 - bare: the codename stands alone in running text (narration, or a statement
-  about the retired host);
+  about the retired host), also spelled "node 22" or as a hyphenated compound
+  such as "node-22-local";
 - quoted: the codename stands alone inside code font;
 - name: the codename is part of a longer token (file, unit, env key, schema id,
   path) and is not touched by the sweep.
 
 History is listed in one row and is not swept. Two more counts cover the stale
 text that does not contain the codename: literal ssh lines to the retired host
-and the bare "22" shorthand.
+and the bare "22" shorthand ("22 节点", "22-node").
 
 Usage (repository root): python -I <this file> [--tokens] [--files]
 """
@@ -53,11 +54,13 @@ AREAS = (
     "schemas/",
     "db/",
 )
-CODENAME = re.compile(r"node-?22", re.IGNORECASE)
+# "node 22" and "node_22" are spellings of the codename; "Node 22+" is a Node.js version.
+CODENAME = re.compile(r"node[-_ ]?22(?!\+)", re.IGNORECASE)
+COMPOUND = re.compile(r"node-22(?:[-/][a-z]+)+", re.IGNORECASE)
 TOKEN_CHARS = re.compile(r"[\w./@#-]")
-HOST_LIST = re.compile(r"(?:node-?2[27]|w[23])(?:/(?:node-?2[27]|w[23]))*", re.IGNORECASE)
+HOST_LIST = re.compile(r"(?:node[-_ ]?2[27]|w[23])(?:/(?:node[-_ ]?2[27]|w[23]))*", re.IGNORECASE)
 SSH_RETIRED_HOST = re.compile(r"ssh\b.*210\.77\.77\.22")
-SHORTHAND = re.compile(r"(?<![\w.:-])22 ?(?:节点|侧|compute-control)")
+SHORTHAND = re.compile(r"(?<![\w.:-])22(?: ?(?:节点|侧|compute-control)|-node\b)")
 RANK = {"name": 0, "quoted": 1, "bare": 2}
 
 
@@ -70,7 +73,7 @@ def occurrences(line: str):
         while end < len(line) and TOKEN_CHARS.match(line[end]):
             end += 1
         token = line[start:end].strip("./-#@")
-        if not HOST_LIST.fullmatch(token):
+        if not (HOST_LIST.fullmatch(token) or COMPOUND.fullmatch(token)):
             yield "name", token
         elif line[max(start - 1, 0) : start] == "`" and line[end : end + 1] == "`":
             yield "quoted", token

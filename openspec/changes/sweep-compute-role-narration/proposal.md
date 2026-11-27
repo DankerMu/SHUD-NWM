@@ -7,7 +7,7 @@ w3 (control) and w2. The first slice of #3345 updated the agent instructions, ad
 `docs/runbooks/w2-w3-compute-topology.md` and put a banner on the runbooks that still say "node-22".
 Everything else still narrates the old host: about 670 prose lines in docs and specs, about 160 lines
 of human-read text in code, 31 literal `ssh ...@210.77.77.22` command lines in seven production-ops
-pages, 14 unit descriptions, the alert mail subject, a UI hint, and the guards that pin that prose.
+pages, 16 unit descriptions, the alert mail subject, a UI hint, and the guards that pin that prose.
 A reader has to carry the banner in their head for every sentence; an operator has to translate every
 command.
 
@@ -34,17 +34,19 @@ several PRs, first slice first; every PR goes through the issue workflow.
    recognises `node-22`, `w3` and `w2` today.
 2. **Terms**: `openspec/glossary.md` defines the vocabulary; the agent instructions use it
    consistently; generated roots are regenerated.
-3. **Production-ops pages**: the bodies are rewritten; the 31 literal `ssh` lines go; the banners go
-   with the pages that carried them.
+3. **Production-ops pages**: the bodies are rewritten; the 31 literal `ssh` command lines go; the
+   banners go with the pages that carried them, and the statement of which hosts carry the role moves
+   into the body of the index page.
 4. **Other live docs**: the remaining runbooks, `ROLE_BOUNDARY.md`, the project profile,
    `infra/env/README.md`, design docs.
 5. **Historical runbooks with shared followers**: six files deleted.
 6. **Historical runbooks that need a home for a residue first**: two files.
 7. **Human text in scripts, services, packages, workers**: messages, help, docstrings, comments.
-8. **API and UI text**: retry message, OpenAPI description chain, the monitoring hint and its live
-   probe; node-27 deployment and live receipt.
-9. **Units and alert lane**: 14 `Description=` lines, the mail subject and host fallback, env template
-   comments; manifest, redeploy on the compute control host, operator receipt.
+8. **API and UI text**: retry message and suggested action, two OpenAPI description chains, the
+   monitoring hint and its live probe; node-27 deployment and live receipt.
+9. **Units and alert lane**: the `Description=` lines of 16 deployed units, the mail subject and host
+   fallback; manifest, a new receipt for the two receipt-pinned units, redeploy on the compute control
+   host.
 10. **Specs**: present-tense location statements in the remaining capability specs; requirement
     titles that state a location are renamed.
 11. **Tests**: comments, docstrings and the literals that follow the earlier slices.
@@ -54,21 +56,22 @@ several PRs, first slice first; every PR goes through the issue workflow.
 This change carries one delta of its own: the end state, which becomes true with the last slice and
 is archived then. A slice that changes a capability spec writes its own OpenSpec change, generates
 its deltas from the main spec text of that day, and archives it in its PR's last push (`design.md`
-§7). The table is the expected set; a slice's fixture is where the exact blocks are decided.
+§7). A capability has one owning task, or an order between the tasks that touch it (`design.md` §6). The table is the expected set; a slice's fixture is where the exact blocks are decided.
 
 | Group | Capability | Kind | What |
 |---|---|---|---|
 | this change | `production-topology-contract` | ADDED | "Live text names the compute role and keeps the codename for names" |
-| 1 | `production-topology-contract` | MODIFIED | "Static guardrails block topology drift": the role terms are subjects of both legs |
+| 1 | `production-topology-contract` | MODIFIED | "Static guardrails block topology drift": the role terms are subjects of both legs. "Current production topology is a governed contract": requirement names leave the list of identifiers that keep the codename |
 | 2 | none | | the glossary and the instructions are not capability specs |
-| 3 | `production-ops-readiness` | MODIFIED | the runbook requirement loses its banner scenario; the rule about commands is this change's own scenario and is not added again |
+| 3 | `production-ops-readiness` | MODIFIED | "Current production ops runbook reflects verified 27-centric topology": the banner scenario goes; the scenarios that say what the runbook calls the compute side follow the page. The rule about commands is this change's own scenario and is not added again |
 | 3, 4 | `production-topology-contract` | MODIFIED | the scenario "Runbooks that still say node-22 carry a banner" is narrowed by group 3 and removed by group 4 |
-| 4 | specs that quote a renamed heading or anchor of `infra/env/README.md` | MODIFIED | found by search in the slice's fixture; none is known today |
+| 4 | none | | two spec sentences describe the table under the renamed `infra/env/README.md` heading without quoting it (`node22-unit-tracking`, `compute-scheduler-operationalization`); their narration is rewritten by the tasks that own those specs (9.2, 10.3) |
 | 5 | `evidence-boundary-hardening` | MODIFIED, REMOVED | one scenario that names the deleted plan; the requirement that demands the deleted checklist |
 | 6, 7 | none expected | | a spec sentence that quotes a moved recipe or a changed message is handled where found |
-| 8 | `display-readonly-ops-ui`, `ops-monitoring-api` | MODIFIED | the recovery guidance text; the description of the retired retry lane |
-| 9 | `node22-unit-failure-alert` | MODIFIED | the mail subject and the host fallback |
-| 10 | about 45 capability specs (`appendix-inventory.md`, Appendix B) | MODIFIED, RENAMED | present-tense location statements; 18 requirement titles |
+| 8 | `display-readonly-ops-ui` | MODIFIED | the recovery guidance requirement and scenario ("22-node", "22 compute-control") |
+| 8 | `ops-monitoring-api` | MODIFIED, Purpose edit | the sentence of the retry requirement that names the manual lane; the Purpose line |
+| 9 | `node22-unit-tracking` | MODIFIED, RENAMED | which receipt records which tracked file; the spec's narration and title. No spec text states the mail subject or the host fallback, so 9.1 has no delta |
+| 10 | about 45 capability specs (`appendix-inventory.md` Appendix B, `appendix-titles.md`) | MODIFIED, RENAMED, Purpose edits | present-tense location statements; the renamed requirement titles (14 of the 18 that carry the codename, less the one 9.2 owns) |
 | 11 | none | | comments and docstrings |
 
 ## Not in this change
@@ -89,5 +92,5 @@ its deltas from the main spec text of that day, and archives it in its PR's last
 - Docs: about 55 files rewritten, 8 deleted. Specs: about 50 capability specs touched by deltas.
 - Code: human-read strings and comments only, plus the gate's vocabulary (behaviour) and the alert
   script's subject line (deployed text).
-- Hosts: one redeploy of 14 unit files on the compute control host (group 9); one frontend rebuild and
+- Hosts: one redeploy of 16 unit files on the compute control host (group 9); one frontend rebuild and
   one display API restart on node-27 (group 8). Each is a production action with its own go-ahead.
