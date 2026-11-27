@@ -1,15 +1,12 @@
-# node-22 Control-Plane Manual Recovery Runbook
+# Control-Plane Manual Recovery Runbook of the Compute Role
 
-> **计算角色主机说明（2026-11-23 起）**：本文里的 "node-22" 指 NHMS **计算角色**，现由
-> LAN 主机 w3（控制）+ w2 承载；原主机 `210.77.77.22` 已退出 NWM 计算，仅作 rollback archive。
-> 路径、生产用户、unit 名、Slurm 分区与账户都没变，文中的计算侧命令在 w3 上以生产用户执行：
-> 凡是字面写着 `ssh -p 32099 frd_muziyao@210.77.77.22` 的命令，一律改为登录 w3 后执行，
-> **不得**在原主机上执行（那里的 journal 副本已经过期）。活动 checkout 的 `.venv` 经 NFS 被
-> w3 / w2 共用，"不得在活动 checkout 里重建环境"的禁令照旧适用。主机布局、存储、Slurm、部署与
-> 冷启动见 [`w2-w3-compute-topology.md`](w2-w3-compute-topology.md)。
->
-> **回滚提示**：原主机上的 scheduler journal 副本停在 2026-11-23T02:34Z。回滚到原主机不是"把定时器
-> 开回来"——必须先停 w3 的 scheduler 定时器，再把 w3 的 journal（或 NFS 上
+本文的命令都在**计算控制主机**上以生产用户执行；主机与角色、怎么进入见
+[`w2-w3-compute-topology.md`](w2-w3-compute-topology.md#1-主机与角色) §1。
+计算角色自 2026-11-23 起由 `w3`（计算控制主机）和 `w2` 承载；原 node-22 主机 `210.77.77.22` 已退出 NWM 计算，仅作 rollback archive，
+本文的任何命令都**不得**在那台主机上执行。`node22` 是计算角色的代号，留在本文的文件名、slug、脚本名和 unit 名里。
+
+> **回滚提示**：原 node-22 主机上的 scheduler journal 副本停在 2026-11-23T02:34Z。回滚到那台主机不是"把定时器
+> 开回来"——必须先停 `w3` 的 scheduler 定时器，再把 `w3` 的 journal（或 NFS 上
 > `operator-archives/w3-scheduler-journal/` 的备份）拷回去；步骤见
 > [`w2-w3-compute-topology.md`](w2-w3-compute-topology.md) 第 9 节，且需要新的运维决定。
 
@@ -20,7 +17,7 @@ display API 在 `display_readonly` 模式下对控制面动作返回 409；`POST
 `retry_policy.manual_retry_required: true`，本文给出"怎么找到它们"和"每一类走哪个
 入口"。
 
-## 执行纪律（node-22）
+## 执行纪律（计算控制主机）
 
 - 活动 checkout 的 `.venv`（Python 3.11.x）经 NFS 被 w3、w2 上的 Slurm 作业和 scheduler 定时器
   共用：**禁止** `uv sync` 与裸 `uv run`，系统 Python 也不是替代；原 node-22 主机上按 #1831 保留的
@@ -52,8 +49,9 @@ display API 在 `display_readonly` 模式下对控制面动作返回 409；`POST
   交互 shell 不加载 unit 的 EnvironmentFile，那个变量多半**根本没设**（空串 → `--evidence-root ""`
   → 命令回落到同名环境变量 → 仍是空 → exit 2），更糟的情况是它被谁 export 成了别的路径，于是
   命令在**错的目录**上干净地返回 `exit 0`——"没有待办"其实是"这里一份 pass 都没有"。
-  权威是 systemd unit `nhms-compute-scheduler.service` 实际加载的那份 env 文件；node-22 checkout
-  里的 `infra/env/compute.env` 是另一份、已漂移，**不要**用它。下面第一条命令把 root 从该文件里
+  权威是 systemd unit `nhms-compute-scheduler.service` 实际加载的那份 env 文件；原 node-22 主机的 checkout
+  里还有一份 `infra/env/compute.env`，是另一份、已漂移的文件（`w3` 的生产 checkout 里没有它，2026-11-27 读，见
+  [receipt](receipts/2026-11-27-w3-env-dir-and-copyback-root.md)），在哪里看到它都**不要**用它。下面第一条命令把 root 从该文件里
   显式取出来（`sed`，不 source，避免把整份 env 灌进当前 shell）：
 
 ```bash
@@ -191,7 +189,7 @@ receipt 字段：`evidence_root`（**实际扫描的** root，按上面那条自
   以及部署窗口之外的 `lease_absent`）：确认该 pass_id 的
   进程/作业确实已经死了（`systemctl --user status nhms-compute-scheduler.service`、看那趟的日志），
   再按第二步处置它可能留下的半截状态；有待办时 `exit 1` 优先，孤儿预留不会盖掉待办。
-  node-22 的 pass 文件接近 5 MB 上限，size fallback 现实中会出现。
+  2026-09-15 记录时 node-22 的 pass 文件接近 5 MB 上限，size fallback 现实中会出现（`w3` 上未重测）。
   `unreadable_passes` 里还会出现**扫描期被删掉**的文件（retention timer
   `nhms-scheduler-evidence-retention.timer` 与本命令并发时的正常现象）：这类文件连 mtime 都没读到，
   在时间序里定不了位，因此按**全局否决**处理——不论它落在哪个位置，本趟结果都是 `3`。隔一会儿重跑
@@ -330,7 +328,7 @@ receipt 字段：`evidence_root`（**实际扫描的** root，按上面那条自
      id 与 `State`；另一个还在跑就先等或升级。
    - `name_window_count`：窗口里至少有一个 master 的 `SubmitLine` 缺失/无 key/不一致，只能按
      名字+窗口计数；用下面的只读 `sacct` 看是哪一个。
-   - 字段**不存在**：node-22 checkout 早于 #2655，`git pull --ff-only` 后会按 SubmitLine
+   - 字段**不存在**：计算角色的生产 checkout 早于 #2655，`git pull --ff-only` 后会按 SubmitLine
      精确 key 自动绑定（绑定用的仍是 `slurm_name_window_unique`，不引入新 token）；多行 held 时
      一趟大约只绑一行，见下面的注意事项。
 2. 只读核对（不写任何东西）：
@@ -463,13 +461,13 @@ hydro run 已成功时，选择器对 hydro run id 一律拒绝（`no_retryable_
 409 之后，compute_control / dev_monolith / display_readonly 一律返回 409 `CONTROL_PLANE_MANUAL_ACTION_REQUIRED`，
 `details` 含 `run_id`、`suggested_action`（指向 `scripts/node22_manual_retry_failed_runs.py` /
 `record_manual_repair`）和 `recovery_runbook=node22-control-plane-manual-recovery`；不连 DB、不构造 retry
-service 或 gateway，所以 node-22 没有 `DATABASE_URL` 时也是这个 409，而不是 500。受支持的人工重试**只有**上一节的
+service 或 gateway，所以进程没有 `DATABASE_URL` 时也是这个 409，而不是 500。受支持的人工重试**只有**上一节的
 marker 车道：它在 cycle 写锁内写 `manual_repair_requested` marker，不在进程内写 `pending` 行，也不在进程内 sbatch，
 由 scheduler 下一趟 pass 铸出并提交 retry job。
 
 自 #3179 起 `/ops` 与 `/monitoring` 的作业表没有重试控件（任何角色、任何服务模式），页面不会发出这个请求；
 发布的 OpenAPI `retryRun` 只声明 409（及 4XX/5XX），没有 2xx 和成功 schema。路由本身作为 409 stub 保留，
-供旧调用方与 deny-write probe 得到同样的 401/403/409。看到失败行后，按上一节在 node-22 打 marker。
+供旧调用方与 deny-write probe 得到同样的 401/403/409。看到失败行后，按上一节在计算控制主机上打 marker。
 
 **历史遗留行**：退役前的 API 手动重试先提交一条 `pending` retry 行，再调用 sbatch。两步之间进程被杀、OOM 或重启，
 会留下一条 `status = pending`、`retry_count > 0`、`slurm_job_id` 为空、`manual_retry_marker = true` 的行（job id
@@ -477,7 +475,7 @@ marker 车道：它在 cycle 写锁内写 `manual_repair_requested` marker，不
 
 - **DB 车道**（`ops.pipeline_job`）：唯一的生产写入方曾是 DB 版 retry service 的 `attempt_manual_retry`（该方法 #3157 退役，
   该 SQL retry service 整体已由 #3261 删除，此处为历史说明），只可能出现在带
-  `DATABASE_URL` 的 compute_control / dev_monolith 上（例如回滚演练或隔离 E2E；node-22 生产不连 DB）。marker
+  `DATABASE_URL` 的 compute_control / dev_monolith 上（例如回滚演练或隔离 E2E；计算角色的生产不连 DB）。marker
   脚本读的是 file journal，**看不到**这条行，所以它不挡 marker 车道；API retry 也已退役，没有东西再因它返回
   `RETRY_CONFLICT`。它挡住的是同一 DB 环境里读 `ops.pipeline_job` 的 active 判定：`pending` 属于 active 集合，
   这些判定会一直把该 run 当作在飞。
@@ -493,7 +491,7 @@ marker 车道：它在 cycle 写锁内写 `manual_repair_requested` marker，不
    没法证明不存在时，同样停下来上报，不要猜。
 2. **证明 Slurm 侧没有作业后**：
    - **DB 车道**：没有 API 出口。原先能把这种行改成 `cancelled` 的 `POST /api/v1/runs/{run_id}/cancel` 已随 #3394
-     退役（生产上本来也没有进程能提供它：display API 只读，计算侧的 API 单元从未启用）；那条从未接入生产的
+     退役（生产上本来也没有进程能提供它：display API 只读，计算角色的 API 单元从未启用）；那条从未接入生产的
      stale-pending 过期路径已随 #3157 PR 2 删除。仓内没有任何工具能清理这种行，手改生产库不是被授权的路径：
      保留证据并上报。
    - **文件车道**：本文没有验证过任何 operator CLI 能清理这种行（`demote-reserved-job` / `bind-reserved-job`

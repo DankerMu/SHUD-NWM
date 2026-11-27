@@ -5,14 +5,6 @@
 分配操作手册。当前值守入口见
 [`current-production-ops.md`](current-production-ops.md)。
 
-> **计算角色主机说明（2026-11-23 起）**：本文里的 "node-22" 指 NHMS **计算角色**，现由
-> LAN 主机 w3（控制）+ w2 承载；原主机 `210.77.77.22` 已退出 NWM 计算，仅作 rollback archive。
-> 路径、生产用户、unit 名、Slurm 分区与账户都没变，文中的计算侧命令在 w3 上以生产用户执行：
-> 凡是字面写着 `ssh -p 32099 frd_muziyao@210.77.77.22` 的命令，一律改为登录 w3 后执行，
-> **不得**在原主机上执行（那里的 journal 副本已经过期）。活动 checkout 的 `.venv` 经 NFS 被
-> w3 / w2 共用，"不得在活动 checkout 里重建环境"的禁令照旧适用。主机布局、存储、Slurm、部署与
-> 冷启动见 [`w2-w3-compute-topology.md`](w2-w3-compute-topology.md)。
->
 > **⚠️ 2026-06-22 当前部署事实 vs 本文档设计意图的差异**：
 >
 > 本文档描述的是 M22 **设计意图**（22 = writer / DB mutation，27 = readonly）。
@@ -33,49 +25,54 @@
 >
 > **#2420 live acceptance passed on 2026-09-20:** see the
 > [reviewed-source receipt](receipts/2026-09-20-issue2420-job-provenance.json).
-> The DB-free node-22 lane writes only the source-authoritative
+> The DB-free lane of the compute role writes only the source-authoritative
 > `runs/<run_id>/input/pipeline_jobs.json` sidecar and verified published log
 > artifacts before normal run-tree copyback.  The physical node-27 ingest lane
 > (using `nhms_ingest_rw`) later projects that sidecar into the derived
 > `ops.pipeline_job` read model; `nhms_display_ro` remains unable to write it.
 > This is a metadata-only catch-up and does not give node-27 Slurm control or
-> node-22 a live database connection.  The concrete rollout, recovery, and
+> the compute role a live database connection.  The concrete rollout, recovery, and
 > rollback commands are maintained in
 > [`current-production-ops.md`](current-production-ops.md#311-pipeline-job-provenance-sidecar-and-recovery-2420).
 
 ## 1. M22 设计结论（历史）
 
-以下是 M22 设计意图，不是 2026-06-22 的当前物理部署事实。当前事实见上方
-banner 和 [`current-production-ops.md`](current-production-ops.md)。
+以下是 M22 设计意图，不是当前物理部署事实。当前事实见
+[`current-production-ops.md`](current-production-ops.md) 和 [`ROLE_BOUNDARY.md`](../governance/ROLE_BOUNDARY.md)；
+上方 2026-06-22 的差异说明是当时的快照。
+
+M22 设计意图里写数据库的是计算角色，这一点已成历史：今天只有 node-27 ingest 写活动数据库，计算角色不连任何活 DB。
+计算角色自 2026-11-23 起由 `w3`（计算控制主机）和 `w2` 承载，主机布局见 [`w2-w3-compute-topology.md`](w2-w3-compute-topology.md)。
+下文标着“M22 设计”的小节和句子按设计叙述，其余写的是现行做法。
 
 M22 设计将系统从“单机既计算又展示”的形态，收敛为两个清晰角色：
 
-- 22 节点是计算控制面，负责生产数据、提交计算、发布结果和执行运维控制动作。
-- 27 节点是只读展示面，负责面向用户提供 `/` 单页地图、`/ops` 和查询 API，只读取数据库、已发布展示产物和 shared object-store mirror。
-- 两个节点之间不通过 27 调 22 控制接口完成生产操作；共享边界只有 PostgreSQL、published artifacts 和只读 shared object-store mirror。
+- 计算角色负责生产数据、提交计算、发布结果和执行运维控制动作。
+- node-27 是只读展示面，负责面向用户提供 `/` 单页地图、`/ops` 和查询 API，只读取数据库、已发布展示产物和 shared object-store mirror。
+- 两个角色之间不通过 node-27 调计算角色的控制接口完成生产操作；共享边界只有 PostgreSQL、published artifacts 和只读 shared object-store mirror。
 - Docker 部署使用同一个 app 镜像，但用不同 Compose/env/systemd 文件启动成不同角色。
-- 27 节点的设计目标是“能看、能诊断、能复制交接信息”，不是“能直接重跑或停止计算”。
+- node-27 的设计目标是“能看、能诊断、能复制交接信息”，不是“能直接重跑或停止计算”。
 
 这份文档用于说明系统怎么运转、每个节点负责什么、怎么部署、会产生哪些产物。当前值守命令、生产路径、产物位置和已知卡点见
 [`current-production-ops.md`](current-production-ops.md)。端到端证据要求见 [`docs/runbooks/node-27-bringup-checklist.md`](node-27-bringup-checklist.md)。
 
 ## 2. 整体运转流程
 
-一次 QHH 预报或展示链路可以按下面顺序理解：
+M22 设计里，一次 QHH 预报或展示链路按下面顺序运转（今天写 PostgreSQL 的是 node-27 ingest，不是计算角色）：
 
 ```text
 资料源 GFS/IFS
-  -> 22 发现周期并下载资料
-  -> 22 调度 canonical / forcing / SHUD / parse / publish 任务
+  -> 计算角色发现周期并下载资料
+  -> 计算角色调度 canonical / forcing / SHUD / parse / publish 任务
   -> Slurm 计算节点执行具体计算
-  -> 22 写入 pipeline、met、hydro、ops 状态到 PostgreSQL
-  -> 22 把完整 runs/<run_id>/... copyback 到 shared object-store mirror
-  -> 22 把展示产品、manifest、日志和诊断证据发布到 published artifacts
-  -> 27 只读查询 PostgreSQL、published artifacts 和 shared object-store mirror
+  -> 计算角色写入 pipeline、met、hydro、ops 状态到 PostgreSQL
+  -> 计算角色把完整 runs/<run_id>/... copyback 到 shared object-store mirror
+  -> 计算角色把展示产品、manifest、日志和诊断证据发布到 published artifacts
+  -> node-27 只读查询 PostgreSQL、published artifacts 和 shared object-store mirror
   -> 用户在 / 和 /ops 查看结果、日志、异常和人工处理建议
 ```
 
-关键边界是：22 生产并发布，27 只读消费并展示。27 不使用 22 的私有 workspace 来拼出结果，也不调用 Slurm Gateway 来处理失败任务。
+关键边界是：计算角色生产并发布，node-27 只读消费并展示。node-27 不使用计算主机的私有 workspace 来拼出结果，也不调用 Slurm Gateway 来处理失败任务。
 
 当前展示 route authority：`/` 是 active single-map display entrypoint，`/ops` 是 active
 operational display path。`/hydro-met`、`/forecast`、`/meteorology`、`/flood-alerts`、
@@ -85,26 +82,26 @@ operational display path。`/hydro-met`、`/forecast`、`/meteorology`、`/flood
 当前发布目录约定为：
 
 ```text
-22 host path: /ghdc/data/nwm/published
-27 host path: /home/ghdc/nwm/published
+compute hosts: /ghdc/data/nwm/published
+node-27:       /home/ghdc/nwm/published
 URI prefix: published://
 ```
 
-22 看到的 `/ghdc/data` 是 27 上 `/home/ghdc` 的 NFS 导出；因此 22 写入
-`/ghdc/data/nwm/published` 后，27 可以从本机 `/home/ghdc/nwm/published` 读取同一份发布产物。
+计算主机看到的 `/ghdc/data` 是 node-27 上 `/home/ghdc` 的 NFS 导出；因此计算角色写入
+`/ghdc/data/nwm/published` 后，node-27 可以从本机 `/home/ghdc/nwm/published` 读取同一份发布产物。
 
 ## 3. 角色和职责
 
-### 3.1 22 节点：计算控制面
+### 3.1 计算角色（M22 设计）
 
-22 节点运行角色为 `compute_control`。
+M22 设计里，计算角色的进程以服务角色 `compute_control`（`NHMS_SERVICE_ROLE`）运行。
 
 它负责：
 
 - 发现 GFS/IFS 周期，下载或读取资料缓存。
 - 运行正式生产调度入口 `nhms-pipeline plan-production`。
 - 访问 Slurm Gateway 或本机 Slurm 能力，提交计算任务。
-- 管理计算侧 workspace、Basins/model assets、对象存储或发布目录。
+- 管理计算主机上的 workspace、Basins/model assets、对象存储或发布目录。
 - 写入 PostgreSQL 中的 run、stage、job、met、hydro、ops 等状态。
 - 将完整 `runs/<run_id>/...` copyback 到 shared object-store mirror，并把展示需要的结果、manifest、日志、诊断证据写入 published artifacts。
 - 执行 retry/cancel 等控制面动作，并把执行后的状态和日志继续发布出来。
@@ -112,12 +109,12 @@ URI prefix: published://
 它不应该：
 
 - 把控制面 API 暴露成公网入口。
-- 让 27 通过私有目录挂载来绕过发布面读取中间态。
+- 让 node-27 通过私有目录挂载来绕过发布面读取中间态。
 - 用 mock Gateway 或 historical latest 代替真实生产链路证据。
 
 ### 3.2 Slurm 计算节点：执行环境
 
-Slurm 计算节点不是第三个业务部署节点，但它是 22 计算控制面的执行资源。
+Slurm 计算节点不是第三个业务部署节点，但它是计算角色的执行资源。
 
 它负责：
 
@@ -125,17 +122,18 @@ Slurm 计算节点不是第三个业务部署节点，但它是 22 计算控制�
 - 读取 Basins/model assets、workspace 输入和对象存储输入。
 - 写回运行日志、阶段产物、manifest 或状态文件。
 
-它必须能访问 22 调度任务所需的共享路径、数据库或对象存储。计算节点的可达性属于 22 侧 live proof，不属于 27 展示节点能力。
+M22 设计里，它必须能访问计算角色调度任务所需的共享路径、数据库或对象存储。计算节点的可达性属于计算角色的 live proof，不属于 node-27 的展示能力。
 
-当前 22 节点 live probe 已确认一个重要边界：Slurm 计算节点可运行作业，但计算节点未必直接挂载
-`/ghdc`。因此 `/ghdc/data/nwm/published` 和 `/ghdc/data/nwm/object-store` 是 22 与 27 之间的共享读面，
-不应被默认当成 Slurm 作业运行目录。Slurm 作业应使用计算节点可见的 workspace/object-store 路径运行；
-任务完成后，由 22 侧 publish/copyback 步骤把完整 `runs/<run_id>/...` 同步到
+`/ghdc/data/nwm/published` 和 `/ghdc/data/nwm/object-store` 是计算角色与 node-27 之间的共享读面，
+不应被默认当成 Slurm 作业运行目录。Slurm 作业使用计算节点可见的 workspace/object-store 路径运行；
+任务完成后，由计算角色的 publish/copyback 步骤把完整 `runs/<run_id>/...` 同步到
 `/ghdc/data/nwm/object-store`，把展示产品、manifest、日志和诊断证据写入 `/ghdc/data/nwm/published`。
+这条边界最初来自原 node-22 主机所在集群的 live probe（本文 2026-06-22 更新时的记录）：那里的计算节点未必直接挂载 `/ghdc`。
+今天两台计算主机都挂载 `/ghdc/data`（[`w2-w3-compute-topology.md`](w2-w3-compute-topology.md) 的导出表，2026-11-24 采集），作业目录与共享读面分开的做法不变。
 
-### 3.3 27 节点：只读展示面
+### 3.3 node-27：只读展示面
 
-27 节点运行角色为 `display_readonly`。
+node-27 运行角色为 `display_readonly`。
 
 它负责：
 
@@ -152,18 +150,18 @@ Slurm 计算节点不是第三个业务部署节点，但它是 22 计算控制�
 - 不调用 Slurm Gateway。
 - 不执行 retry/cancel。
 - 不写 hydro/met/pipeline 终态。
-- 不挂载 22 私有 workspace、`.nhms-runs`、private `/scratch`、Munge 或 Slurm 配置。
+- 不挂载计算主机的私有 workspace、`.nhms-runs`、private `/scratch`、Munge 或 Slurm 配置。
 
-用户在 27 看到失败任务时，正确动作是复制诊断信息，交给 22 的 operator 在计算控制面处理。22 处理完成后，27 再通过只读状态刷新看到结果。
+用户在 node-27 看到失败任务时，正确动作是复制诊断信息，交给 operator 在计算控制主机上处理。处理完成后，node-27 再通过只读状态刷新看到结果。
 
 ### 3.4 操作权限矩阵
 
-22 节点拥有全部自动化能力（计算 + 发布的读写）；27 节点只读消费，即只读 DB 副本、
-只读 published 产物（`/ghdc/data/nwm/published`，27 本机为 `/home/ghdc/nwm/published`）和
-只读 shared object-store mirror（`/ghdc/data/nwm/object-store`，27 本机为 `/home/ghdc/nwm/object-store`），
+M22 设计里，计算角色拥有全部自动化能力（计算 + 发布的读写）；node-27 只读消费，即只读 DB 账号、
+只读 published 产物（`/ghdc/data/nwm/published`，node-27 本机为 `/home/ghdc/nwm/published`）和
+只读 shared object-store mirror（`/ghdc/data/nwm/object-store`，node-27 本机为 `/home/ghdc/nwm/object-store`），
 不调用任何写入或调度命令。
 
-| 操作 | node-22（compute_control） | node-27（display_readonly） |
+| 操作 | 计算角色（compute_control） | node-27（display_readonly） |
 | --- | --- | --- |
 | `nhms-pipeline plan-production`（调度计划/提交） | 拥有（dry-run 计划 + `--submit` 提交） | 禁止（不运行正式调度入口） |
 | `nhms-pipeline publish-qdown`（发布 q_down 产物） | 生产链路不跑（DB-free，终态 `forecast_state_save_qc`；手工执行在未配 `DATABASE_URL` 时报 `DATABASE_URL_MISSING`） | 禁止 |
@@ -179,12 +177,12 @@ Slurm 计算节点不是第三个业务部署节点，但它是 22 计算控制�
 | `/ghdc/data/nwm/object-store` 写 | 写（publish/copyback only） | 禁止（只读挂载） |
 | Slurm Gateway / job 提交 | 拥有 | 禁止（不调用、不安装 CLI） |
 
-27 出现任何写/调度能力（可写 DB、可写 published、可提交 Slurm、可触发 retry/cancel），都视为
-角色边界破坏，按第 7.3 节处理，不能临时把 27 改成单机控制面。
+node-27 出现任何写/调度能力（可写 DB、可写 published、可提交 Slurm、可触发 retry/cancel），都视为
+角色边界破坏，按第 7.3 节处理，不能临时把 node-27 改成单机控制面。
 
 ## 4. 节点之间共享什么
 
-| 共享面 | 22 节点 | 27 节点 | 用途 |
+| 共享面 | 计算角色（M22 设计） | node-27 | 用途 |
 | --- | --- | --- | --- |
 | PostgreSQL/PostGIS/TimescaleDB | 读写账号 | 只读账号 | pipeline、met、hydro、model、ops 状态源 |
 | published artifacts | 写 `/ghdc/data/nwm/published` | 只读读 `/home/ghdc/nwm/published` | `/` 单页地图、`/ops`、日志弹窗和诊断 |
@@ -192,85 +190,85 @@ Slurm 计算节点不是第三个业务部署节点，但它是 22 计算控制�
 
 不共享的内容：
 
-- 22 私有 workspace。
-- 22 `.nhms-runs`。
-- 22 私有 `/scratch`。
+- 计算主机的私有 workspace。
+- 计算主机的 `.nhms-runs`。
+- 计算主机的私有 `/scratch`。
 - Slurm/Munge/Docker socket。
-- 22 的 writer DB credential 和控制面 credential。
+- 计算角色的 writer DB credential 和控制面 credential（M22 设计；今天计算角色不持有数据库凭据）。
 
 ## 5. 部署方式
 
-两节点都以 systemd user unit 运行；docker/compose 部署线已由 #3231 退役。
+计算控制主机和 node-27 上的服务都以 systemd user unit 运行；docker/compose 部署线已由 #3231 退役。
 
-### 5.1 22 节点部署入口
+### 5.1 计算角色的部署入口
 
-`infra/env/compute.env` 是已退役的 docker-e2e 产物，node-22 没有任何单元加载它；单元到环境文件的权威见 [`infra/env/README.md`](../../infra/env/README.md#unit--environmentfile-authority-of-the-compute-role-1694)。
+`infra/env/compute.env` 是已退役的 docker-e2e 产物，计算角色没有任何单元加载它（`w3` 的生产 checkout 里没有这个文件）；单元到环境文件的权威见 [`infra/env/README.md`](../../infra/env/README.md#unit--environmentfile-authority-of-the-compute-role-1694)。
 
-下面这段是设计意图（见文首 banner），不是现行配置：现行 scheduler 是 DB-free 的，各单元实际加载的环境文件以上面的权威表为准。
+下面这段是 M22 设计意图，不是现行配置：现行 scheduler 是 DB-free 的，各单元实际加载的环境文件以上面的权威表为准。
 
-22 的环境文件需要配置 writer DB、workspace、object-store、published artifact 写入路径、scheduler
+M22 设计里，计算角色的环境文件需要配置 writer DB、workspace、object-store、published artifact 写入路径、scheduler
 lock/evidence/runtime/temp roots、非空 `NHMS_SCHEDULER_ALLOWED_ROOTS`、service role、
 source/model/basin filters、interval/max-pass bounds、Basins/model assets、Slurm Gateway 和资料源参数。
 
-当前 22 published artifact host root 使用 `/ghdc/data/nwm/published`，即写入 27 导出的 NFS 发布面。
+计算主机上的 published artifact host root 是 `/ghdc/data/nwm/published`，即 node-27 导出的 NFS 发布面。
 scheduler 不传 `--workspace-root`、`--lock-path` 或 `--evidence-dir`；这些路径必须分别由
 `WORKSPACE_ROOT`、`NHMS_SCHEDULER_LOCK_ROOT` 和 `NHMS_SCHEDULER_EVIDENCE_ROOT` 解析。显式 root flags
-只保留给本地诊断兼容，不作为 22 business proof path。
+只保留给本地诊断兼容，不作为计算角色的 business proof path。
 连续或 timer 模式也使用同一套 env roots，并显式限定 `NHMS_SCHEDULER_INTERVAL_SECONDS`、
 `NHMS_SCHEDULER_MAX_PASSES`、`NHMS_SCHEDULER_MAX_CYCLES_PER_SOURCE` 和 source/model/basin filters；不得改回
 应用目录内 `.nhms-workspace`。
 `NHMS_SCHEDULER_ALLOWED_ROOTS` 是独立批准的 root 边界，不能在运行时由这些候选 root 自动推导；缺失或为空时
 no-flag scheduler 必须在 registry/adapters/orchestrator 前阻塞。
 
-### 5.2 27 节点部署入口
+### 5.2 node-27 部署入口
 
-27 使用：
+node-27 使用：
 
 - 环境样例：[`infra/env/display.example`](../../infra/env/display.example)
 - 本地真实环境文件：`infra/env/display.env`，不提交
 - systemd 单元：[`infra/systemd/nhms-display-api.service`](../../infra/systemd/nhms-display-api.service)，由 [`scripts/ops/start-display-api.sh`](../../scripts/ops/start-display-api.sh) 安装和重启
 
-27 的环境文件需要配置 readonly DB、readonly published artifact root、只读对象存储凭证或只读 shared object-store mirror 挂载、CORS 和端口。不能配置 Slurm Gateway、workspace、Basins/model assets、Docker socket、`NHMS_OBJECT_STORE_COPYBACK_ROOT` 或其他计算控制能力。
+node-27 的环境文件需要配置 readonly DB、readonly published artifact root、只读对象存储凭证或只读 shared object-store mirror 挂载、CORS 和端口。不能配置 Slurm Gateway、workspace、Basins/model assets、Docker socket、`NHMS_OBJECT_STORE_COPYBACK_ROOT` 或其他计算控制能力。
 
-当前 27 published artifact host root 使用 `/home/ghdc/nwm/published`。
+当前 node-27 published artifact host root 使用 `/home/ghdc/nwm/published`。
 
 ### 5.3 systemd 的作用
 
-27 的 display API 是 `nhms-display-api.service`，加载 `infra/env/display.env`；22 的单元和它们加载的环境文件见 [`infra/env/README.md`](../../infra/env/README.md#unit--environmentfile-authority-of-the-compute-role-1694) 的单元到环境文件表。
+node-27 的 display API 是 `nhms-display-api.service`，加载 `infra/env/display.env`；计算角色的单元和它们加载的环境文件见 [`infra/env/README.md`](../../infra/env/README.md#unit--environmentfile-authority-of-the-compute-role-1694) 的单元到环境文件表。
 
-systemd 不是新的应用运行模式，也不会改变 22/27 的职责边界。
+systemd 不是新的应用运行模式，也不会改变计算角色与 node-27 的职责边界。
 
 ## 6. 每个节点的产物
 
-### 6.1 22 节点产物
+### 6.1 计算角色的产物（M22 设计）
 
-22 会产生或更新：
+M22 设计里，计算角色会产生或更新（今天 PostgreSQL 状态由 node-27 ingest 写，retry/cancel 入口已退役）：
 
 - PostgreSQL 中的 run、stage、job、event、met、hydro、ops 状态。
 - workspace 中的计算中间态和任务工作目录。
 - object-store 或发布目录中的 raw/canonical/forcing/output/manifest 等产物。
-- published artifacts 中供 27 读取的展示产品、manifest、日志和诊断证据。
+- published artifacts 中供 node-27 读取的展示产品、manifest、日志和诊断证据。
 - Slurm job id、array task 状态、stdout/stderr、retry/cancel receipt。
-- 22 侧部署和 E2E 证据，通常放在 `artifacts/` 或 `/scratch/frd_muziyao/` 下。
+- 计算角色的部署和 E2E 证据，通常放在 `artifacts/` 或 `/scratch/frd_muziyao/` 下。
 
-22 的关键交付不是“本机跑过”，而是“把可展示、可追踪、可诊断的发布产物写到了 27 可读的共享面”。
+计算角色的关键交付不是“本机跑过”，而是“把可展示、可追踪、可诊断的发布产物写到了 node-27 可读的共享面”。
 
-### 6.2 27 节点产物
+### 6.2 node-27 的产物
 
-27 自身不生产水文气象结果。它产生的是展示和诊断相关产物：
+node-27 自身不生产水文气象结果。它产生的是展示和诊断相关产物：
 
 - 面向用户的 `/` 单页地图页面。
 - 面向运维查看的 `/ops` 页面。
 - API 响应中的 runtime config、latest-product、pipeline、jobs、logs 等只读查询结果。
-- 失败任务的诊断复制内容，供 operator 带到 22 处理。
-- 27 侧 security/readonly DB/browser evidence。
-- 27 服务日志和反向代理日志。
+- 失败任务的诊断复制内容，供 operator 带到计算控制主机处理。
+- node-27 的 security/readonly DB/browser evidence。
+- node-27 的服务日志和反向代理日志。
 
-27 的关键交付是“只读展示链路可用，并且物理上没有控制计算的能力”。
+node-27 的关键交付是“只读展示链路可用，并且物理上没有控制计算的能力”。
 
 ### 6.3 共享产物
 
-共享产物用于把 22 生产结果交给 27 展示：
+共享产物用于把计算角色的生产结果交给 node-27 展示：
 
 - 严格绑定同一个 `run_id/source/cycle_time/model_id/basin_id` 的 DB 状态。
 - `published://`、allowlisted `file://` 或 allowlisted `s3://` 日志 URI。
@@ -281,38 +279,39 @@ systemd 不是新的应用运行模式，也不会改变 22/27 的职责边界�
 
 ## 7. 典型操作路径
 
-### 7.1 正常生产和展示
+### 7.1 正常生产和展示（M22 设计）
 
-1. 22 operator 确认资料源、DB、Slurm、workspace、published artifacts 可用。
-2. 22 运行调度，提交计算任务。
+1. operator 在计算控制主机上确认资料源、DB、Slurm、workspace、published artifacts 可用。
+2. 计算角色运行调度，提交计算任务。
 3. 计算节点完成 SHUD 和后处理。
-4. 22 写 DB 状态并发布展示产品、manifest 和日志。
-5. 27 读取 readonly DB、published artifacts 和只读 shared object-store mirror。
+4. 计算角色写 DB 状态（今天由 node-27 ingest 写）并发布展示产品、manifest 和日志。
+5. node-27 读取 readonly DB、published artifacts 和只读 shared object-store mirror。
 6. 用户访问 `/` 查看水文气象结果，访问 `/ops` 查看运行状态和日志。
 
-### 7.2 失败诊断和人工处理
+### 7.2 失败诊断和人工处理（M22 设计）
 
-1. 用户或 operator 在 27 `/ops` 看到失败 stage/job。
-2. 27 页面只提供诊断复制、日志查看和 22 处理建议。
-3. 22 operator 根据诊断信息在计算控制面执行 retry/cancel 或其他处理。
-4. 22 更新 DB 状态并发布新的日志或 receipt。
-5. 27 刷新后展示处理后的只读状态。
+1. 用户或 operator 在 node-27 `/ops` 看到失败 stage/job。
+2. node-27 页面只提供诊断复制、日志查看和交给计算角色处理的建议。
+3. operator 根据诊断信息在计算控制主机上执行 retry/cancel 或其他处理（现行入口见
+   [`node22-control-plane-manual-recovery.md`](node22-control-plane-manual-recovery.md)）。
+4. 计算角色更新 DB 状态（今天由 node-27 ingest 写）并发布新的日志或 receipt。
+5. node-27 刷新后展示处理后的只读状态。
 
 ### 7.3 只读边界异常
 
-如果 27 出现下面任一情况，不能继续声明部署通过：
+如果 node-27 出现下面任一情况，不能继续声明部署通过：
 
 - `/api/v1/slurm/*` 可访问。
-- 27 上出现真实 retry/cancel 控制按钮或控制 POST。
-- 27 需要 writer DB credential 才能展示。
-- 27 需要挂载 22 私有 workspace 才能看日志。
-- 27 挂载 Slurm/Munge 或额外可写业务目录。
+- node-27 上出现真实 retry/cancel 控制按钮或控制 POST。
+- node-27 需要 writer DB credential 才能展示。
+- node-27 需要挂载计算主机的私有 workspace 才能看日志。
+- node-27 挂载 Slurm/Munge 或额外可写业务目录。
 
-这些都是角色边界破坏，应该先修部署配置或回滚展示入口，而不是临时把 27 改成单机控制面。
+这些都是角色边界破坏，应该先修部署配置或回滚展示入口，而不是临时把 node-27 改成单机控制面。
 
 ### 7.4 canonical 降水镜像回执判读
 
-22 的 `convert` stage（链首，也就是**写出**降水产物的那个 stage）走到终态后会把
+计算角色的 `convert` stage（链首，也就是**写出**降水产物的那个 stage）走到终态后会把
 `canonical/<S>/<cycle>/prcp_rate_or_amount/` 和 `canonical/<S>/grid/<grid_id>/` 镜像到
 `NHMS_OBJECT_STORE_COPYBACK_ROOT`，并写一条 `canonical_precip_mirror` pipeline_event。镜像
 fail-open：失败不影响 stage 结果，只在回执里留证据，所以判读入口就是这条回执。
@@ -376,16 +375,16 @@ jq -c 'select(.record_type == "pipeline_event"
 
 ### 8.1 两边都要确认
 
-- 两台机器 checkout 同一个 git commit。
+- 计算主机的生产 checkout 和 node-27 的 checkout 在同一个 git commit。
 - 本机依赖按 Linux 环境重建，不复用其他机器的 `.venv` 或 `node_modules`。
 - 磁盘空间、`TMPDIR` 和 evidence root 已记录。
 - 本地 env 文件权限为 `0600`，且没有被提交。
 - 项目生成的临时产物写入仓库 ignored 的 `artifacts/` 或 `/scratch/frd_muziyao/`。
 
-### 8.2 22 重点确认
+### 8.2 计算角色重点确认
 
 - `NHMS_SERVICE_ROLE=compute_control`。
-- `DATABASE_URL` 只供 `compute-api` / rollback 使用；scheduler runtime env 中必须缺席。
+- `DATABASE_URL` 只属于显式的归档 rollback 演练（`compute-api` 已随 #3394 退役）；scheduler runtime env 中必须缺席。
 - scheduler state/lock/registry/readiness/journal/state-index selectors 都是 `file`，对应
   manifest/index/journal paths 非空且位于允许根内。`NHMS_SCHEDULER_DB_FREE_REQUIRED=true` 保留在模板里，
   作为 job-env 契约（run manifest 与 Slurm 作业 env 一律带 `true`），不再是模式开关：自 #3255 起
@@ -401,7 +400,7 @@ jq -c 'select(.record_type == "pipeline_event"
 - Basins/model assets 可读。
 - Slurm Gateway 或 Slurm CLI 能提交、查询和取消任务。
 - 资料源或资料缓存可访问。
-- 计算节点的 GRIB 工具链（`cdo` + `libeccodes`）：计算节点（cn01-24）系统通常不带 `cdo`
+- 计算节点的 GRIB 工具链（`cdo` + `libeccodes`）：计算节点（原 node-22 主机所在集群 cn01-24 上的记录，`w3` / `w2` 上未重读）系统通常不带 `cdo`
   和 `libeccodes`，IFS 下载裁剪（cdo）与 canonical 的 cfgrib 读 GRIB 都依赖它们。通过
   共享盘上的 conda env 提供（`conda create -p <root> -c conda-forge cdo eccodes`，root 在
   全计算节点可达的共享盘），并设 `NHMS_GRIB_ENV_ROOT=<root>`；调度渲染 sbatch 时会把
@@ -434,7 +433,7 @@ jq -c 'select(.record_type == "pipeline_event"
   需一次性删除旧 `grid.json` 并清空对应 interp_weights，让其用区域场重建（否则 canonical
   会因 grid signature 不匹配 fail-loud）。
 
-### 8.3 27 重点确认
+### 8.3 node-27 重点确认
 
 - `NHMS_SERVICE_ROLE=display_readonly`。
 - `DATABASE_URL` 是 readonly 账号，并有 denied write probe 证据。
@@ -448,15 +447,15 @@ jq -c 'select(.record_type == "pipeline_event"
 可以声明的：
 
 - M22 deterministic 边界已在代码、测试和 CI 中覆盖。
-- 22/27 的 env 示例、systemd 示例和只读边界已经落地。
-- 27 的产品定位是只读展示和诊断交接。
+- 计算角色与 node-27 的 env 示例、systemd 示例和只读边界已经落地。
+- node-27 的产品定位是只读展示和诊断交接。
 
 不能直接声明的：
 
 - 目标生产环境已 final production ready。
 - 任何历史 latest 可以代表本轮两节点 E2E。
-- 27 可以执行 retry/cancel。
-- 27 可以用 writer DB 或挂载 22 workspace 作为临时生产形态。
+- node-27 可以执行 retry/cancel。
+- node-27 可以用 writer DB 或挂载计算主机的 workspace 作为临时生产形态。
 
 正式上线前还需要目标环境 live proof：真实 DB、真实 published artifacts、真实 Slurm、真实 GFS/IFS 下载、真实 QHH SHUD runtime、无 mock 浏览器 E2E、跨面身份一致性和 `docs/bugs.md` 中问题的复测归因。
 
@@ -465,5 +464,5 @@ jq -c 'select(.record_type == "pipeline_event"
 - node-27 bring-up 与证据清单：[`docs/runbooks/node-27-bringup-checklist.md`](node-27-bringup-checklist.md)
 - 两节点 Docker 部署方案：[`docs/plans/2026-05-27-two-node-docker-readonly-display-deployment-plan.md`](../plans/2026-05-27-two-node-docker-readonly-display-deployment-plan.md)
 - 只读展示重构方案：[`docs/plans/2026-05-27-two-node-readonly-display-refactor-plan.md`](../plans/2026-05-27-two-node-readonly-display-refactor-plan.md)
-- M22 OpenSpec：[`openspec/changes/m22-two-node-docker-readonly-display/`](../../openspec/changes/m22-two-node-docker-readonly-display/)
+- M22 OpenSpec（已归档）：[`openspec/changes/archive/2026-06-18-m22-two-node-docker-readonly-display/`](../../openspec/changes/archive/2026-06-18-m22-two-node-docker-readonly-display/)
 - 当前项目进度索引：[`progress.md`](../../progress.md)
