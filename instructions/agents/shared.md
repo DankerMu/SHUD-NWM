@@ -14,13 +14,13 @@
 | 端 | 地址 / 仓库路径 | 角色 | DB |
 |---|---|---|---|
 | 本地 Mac | `/Users/danker/Desktop/Hydro-SHUD/NWM` | 编辑、commit、push、ruff、openspec、前端 tsc/test | 不连远端 DB |
-| 计算节点 w3（控制）+ w2 | LAN 主机 `10.0.1.13` / `10.0.1.12`（见下），`/scratch/frd_muziyao/NWM` | 纯计算（Slurm/SHUD/forcing wrapper），产物写 NFS `/ghdc/data/nwm/` | **不连任何活 DB** |
-| node-27 | `ssh -p 32099 nwm@210.77.77.27`，`/home/nwm/NWM` | active primary PG + ingest + display API(:8080) + 前端；自己读 NFS 上计算节点的产物 | **本机 PG :55432**（自写自读） |
+| 计算主机 w3（计算控制主机）+ w2 | LAN 主机 `10.0.1.13` / `10.0.1.12`（见下），`/scratch/frd_muziyao/NWM` | 纯计算（Slurm/SHUD/forcing wrapper），产物写 NFS `/ghdc/data/nwm/` | **不连任何活 DB** |
+| node-27 | `ssh -p 32099 nwm@210.77.77.27`，`/home/nwm/NWM` | active primary PG + ingest + display API(:8080) + 前端；自己读 NFS 上计算角色的产物 | **本机 PG :55432**（自写自读） |
 
-- 计算节点只能经 node-27 ProxyJump 到达（本机 ssh 别名 `nwm-w3` / `nwm-w2`），生产用户 `frd_muziyao`；w3 = Slurm 控制器 + scheduler 定时器 + slurm-gateway + journal，w2 = 计算 + `workspace/runs`。
+- 计算主机只能经 node-27 ProxyJump 到达（本机 ssh 别名 `nwm-w3` / `nwm-w2`），生产用户 `frd_muziyao`；w3 是计算控制主机（Slurm 控制器 + scheduler 定时器 + slurm-gateway + journal），w2 = 计算 + `workspace/runs`。
 - 生产用户的 user manager 只允许在 w3 上运行：家目录经 NFS 共享到 w2，**不要**以生产用户登录 w2（ssh / `su -` / linger），否则 w2 会再起一套 scheduler 定时器。
-- 计算节点的 `/ghdc/data/nwm/` 与 27 的 `/home/ghdc/nwm/` 是同一份 NFS，零延迟无需 rsync；basin 源数据在 `/home/ghdc/nwm/Basins`。
-- `node-22` / `node22` 是计算角色的历史代号：脚本名、unit 名、env key、receipt schema id、规格名里的它指 w3 / w2，不改名。存储布局、Slurm、部署与冷启动细则见 `docs/runbooks/w2-w3-compute-topology.md`。
+- 计算主机的 `/ghdc/data/nwm/` 与 27 的 `/home/ghdc/nwm/` 是同一份 NFS，零延迟无需 rsync；basin 源数据在 `/home/ghdc/nwm/Basins`。
+- `node-22` / `node22` 是计算角色的历史代号：脚本名、unit 名、env key、receipt schema id、规格名里的它指计算角色，不改名；散文里不把它当地点用。用词见 `openspec/glossary.md` 的 Topology terms。存储布局、Slurm、部署与冷启动细则见 `docs/runbooks/w2-w3-compute-topology.md`。
 - 原 node-22 主机（`210.77.77.22`）自 2026-11-23 起退出 NWM 计算，仅作 rollback archive：不要在其上跑 NWM 作业；本机 :55433 已 archived/stopped，**不要连**。
 - node-27 的 readonly 是 **role-level**（`nhms_display_ro` 无 INSERT/UPDATE/DELETE），不是 standby 副本。
 - 生产 display API + 前端公网入口：`https://test.nwm.ac.cn`（27 反代对外，无需 SSH 隧穿）。
@@ -38,7 +38,7 @@
 | 验证类型 | oracle 节点 |
 |---|---|
 | 后端单测/集成、真实 DB pytest、`e2e`/`grib` marker、SHUD 产物校验、display 部署 receipt、display 边界 deny-write、cross-plane identity live、`/`(单图展示，旧 `/hydro-met` 为 redirect alias)+`/ops` 浏览器 e2e | **node-27** |
-| Slurm 调度行为本身的验证（罕见；改 sbatch / 计算资源时） | **w3**（计算角色的控制节点；作业也会落到 w2） |
+| Slurm 调度行为本身的验证（罕见；改 sbatch / 计算资源时） | **w3**（计算控制主机；作业也会落到 w2） |
 | ruff、openspec validate、前端 tsc / pnpm test / check:api-types | 本地 |
 
 涉及 display/前端生产化与只读边界的改动，**必须在 node-27 实机产出 live receipt**（见 `docs/runbooks/node-27-bringup-checklist.md` C1-C4），不得用本地 ruff 冒充 PASS。

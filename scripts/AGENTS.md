@@ -11,7 +11,7 @@ there.
 - `openspec/specs/python-environment-truth/spec.md`
 - `scripts/diagnostic/qhh/README.md`
 
-Python tooling rules (uv only, and the node-22 interpreter exception) are
+Python tooling rules (uv only, and the interpreter exception for the compute hosts) are
 defined once in root `CLAUDE.md` and `openspec/specs/python-environment-truth/spec.md`.
 Follow them there; do not restate or reinterpret them in a script header.
 
@@ -23,8 +23,9 @@ Follow them there; do not restate or reinterpret them in a script header.
   `packages/common/node27_pgdata_migrate.py`. Library code must never import
   `scripts`; `tests/test_import_layering_guard.py` enforces that for
   `packages/`.
-- The `node27_*` and `node22_*` filename prefixes name the host a script
-  targets. Host roles come from the three-node table in root `CLAUDE.md`;
+- The `node27_*` filename prefix names the host a script targets. The `node22_*`
+  prefix is the codename of the compute role (today the hosts `w3` and `w2`), not
+  the retired node-22 host. Host roles come from the hosts table in root `CLAUDE.md`;
   check it before adding or renaming a host-scoped script.
 - Pull requests run the full sharded pytest suite, so a new test file needs
   no CI wiring. Marker routing (`e2e`, `grib`) is described in
