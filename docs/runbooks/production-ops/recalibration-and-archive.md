@@ -1,11 +1,8 @@
 **分册：率定 warm carry-over 与 file-journal 冷归档**
 
-> **计算角色主机说明**：本页的 "node-22" 指计算角色，现由 w3 / w2 承载；字面的
-> `ssh … 210.77.77.22` 命令一律登录 w3 后执行，**不得**在原主机上执行。详见
-> [`current-production-ops.md`](../current-production-ops.md) 顶部横幅。
-
 本页是当前生产值守手册的 §5.7、§5.8 分册（#1103 拆分，正文逐字保留）。
 索引与全部分册入口见 [`../current-production-ops.md`](../current-production-ops.md)。
+本页里在计算控制主机上执行的步骤都以生产用户执行；是哪台主机、怎么进入见 [`w2-w3-compute-topology.md`](../w2-w3-compute-topology.md#1-主机与角色) §1。
 
 ### 5.7 率定参数更新（recalibration）的 warm carry-over
 
@@ -15,8 +12,8 @@ river / gis / `cfg.ic` 全不变，需要让新包 `M1'` **接着** 老包 `M1` 
 land / `.sp.att` 非 `FORC` 字段 / `cfg.ic`）有变化，工具会 fail-closed 拒绝——这是
 对的，新 `cfg.ic` 意味着建模侧声明了新起点。
 
-**执行节点：node-22（唯一）。** 它是唯一同时能访问 NFS canonical state index 与
-node-22 本地 scratch mirror 的机器；node-22 本身 DB-free，recalibration 模式只写
+**执行主机：计算控制主机。** 同时能访问 NFS canonical state index 与
+scratch mirror 的只有计算主机，node-27 看不到 scratch mirror；计算角色本身不连任何活库，recalibration 模式只写
 文件索引、不取任何 DB 句柄。不要在 node-27 上跑这个工具。
 
 **必须一次写两份索引。** canonical（`/ghdc/data/nwm/object-store/scheduler/state-index/`）
@@ -26,7 +23,7 @@ node-22 本地 scratch mirror 的机器；node-22 本身 DB-free，recalibration
 留下两份不一致的索引。
 
 ```bash
-ssh -p 32099 frd_muziyao@210.77.77.22   # 必须是 provider 属主 frd_muziyao
+# 计算控制主机，生产用户 frd_muziyao（必须是 provider 属主）
 cd /scratch/frd_muziyao/NWM
 export PATH=$HOME/.local/bin:$PATH
 
@@ -148,7 +145,7 @@ RUN_TAG=huai-2026081512   # 流域 + --cutover-time；每次调用换一个，re
 
 ```text
 provision M1′（node-27，写 core.model_instance；工具 scripts/provision_direct_grid_scheduler_registry.py）
-  -> 写克隆行（node-22，两份 state-index）
+  -> 写克隆行（计算控制主机，两份 state-index）
   -> 最后才发布合并 manifest
 ```
 
@@ -159,7 +156,7 @@ manifest——**不是** §3.1.2 的 cutover declaration。
 **provision 这一步先 dry-run 再 `--apply`**（#2737）。不带 `--apply` 时脚本什么都不写
 （不写库、不在 object store 上建包或 chmod、不写 `--output-registry`），只预测每个变体的
 `model_id` 并落一份回执；三步共用同一个 `--succession-id`。`--output-registry` 必须写在**两节点都读得到**
-的地方——发布那一步在 node-22 上读它：放共享 NFS（node-27 写 `/home/ghdc/nwm/...`，node-22 看到的是
+的地方——发布那一步在计算控制主机上读它：放共享 NFS（node-27 写 `/home/ghdc/nwm/...`，计算主机看到的是
 同一挂载的 `/ghdc/data/nwm/...`），且父目录须属执行账号本人、不能组/他人可写（见 [`service-bringup.md`](service-bringup.md) hop 3 的坑）。
 这一条 dry-run 与 `--apply` 都在最开头检查（#2753）：不合格就拒绝，不连库、不落回执，报错里点名目录、属主 uid 与 mode。
 自己的目录 `chmod 755` 后原命令重跑；别人的目录（例如组可写的共享候选目录）改不了，就把 `--output-registry` 换到自建目录
@@ -176,7 +173,7 @@ mkdir -p /home/nwm/tmp && export TMPDIR=/home/nwm/tmp
 SUCCESSION_ID=<succession-id>          # [A-Za-z0-9._-]{1,80}，一次率定切换一个
 PROVISION_ARGS=(
   --baseline-registry "<含新率定 baseline 行的 registry>"
-  # 写到两节点都读得到的共享 NFS 上（node-27 的 /home/ghdc/nwm/... 即 node-22 的 /ghdc/data/nwm/...），绝不指向生产 canonical manifest
+  # 写到两节点都读得到的共享 NFS 上（node-27 的 /home/ghdc/nwm/... 即计算主机的 /ghdc/data/nwm/...），绝不指向生产 canonical manifest
   --output-registry "<共享 NFS 上的本次 workspace>/direct-grid-registry.json"
   --operator-id "<operator>"
   --model-id "<baseline_model_id>"
@@ -204,7 +201,7 @@ dry-run 回执，输入或预测集合有任何出入就拒绝并回滚；回执
 `--registry-manifest` 指向本次专属文件（理由见 [`service-bringup.md`](service-bringup.md) hop 1 的坑）；版本号变了，
 `package_checksum` 与变体 `model_id` 随之变，再把这份 registry 交给上面的 `--baseline-registry` 走 dry-run 与 `--apply`。
 
-**node-22 这一侧用一条命令（#2739）。** provision `--apply` 之后，回拷、克隆、发布、refresh 以及调度器 timer 的停与启，
+**计算角色这一侧用一条命令（#2739）。** provision `--apply` 之后，回拷、克隆、发布、refresh 以及调度器 timer 的停与启，
 由 `scripts/node22_model_succession.py` 按固定顺序做完，不连库、不跨机 ssh：
 
 ```text
@@ -219,7 +216,7 @@ copyback（新包从共享根拷到 scratch 根） -> preflight（克隆工具�
 （`clone-dry-run.json` / `clone-apply.json` / `publish-dry-run.json` / `publish-apply.json`）原样落在同一目录。
 
 ```bash
-# node-22，frd_muziyao
+# 计算控制主机，生产用户 frd_muziyao
 cd /scratch/frd_muziyao/NWM
 set -a
 . infra/env/compute.scheduler-provider-refresh.env   # 两个根、prefix、两份 manifest、state index、refresh 锁与回执根；不含 DB 变量
@@ -230,7 +227,7 @@ SUCCESSION_ARGS=(
   --kind recalibration
   --pair "<旧 M1 的 model_id>:<M1′ 的 model_id>"      # 每个 (流域, source) 一对，重复写
   --cutover-time <YYYYMMDDHH>                        # 克隆行的 valid_time，选法见下文「t* 怎么选」
-  --new-rows-registry "<node-22 视角的路径>"            # provision 的 --output-registry；回执记了 object_store_key 时可省
+  --new-rows-registry "<计算主机视角的路径>"           # provision 的 --output-registry；回执记了 object_store_key 时可省
   --operator-id "<operator>"
 )
 LOG=/scratch/frd_muziyao/nhms-prod/workspace/succession-$SUCCESSION_ID.log
@@ -338,7 +335,7 @@ cycle 边界、cycle 步长 12h。所以 cycle `C` 最早进入调度窗口的�
 > 「retire declaration 恢复顺序」只适用于非 direct-grid 拓扑（见该节的拓扑围栏），
 > 不适用于这里。
 
-手工发布跑 `scripts/node22_publish_merged_scheduler_registry.py`（#2738）。它在 node-22 上、不连库，
+手工发布跑 `scripts/node22_publish_merged_scheduler_registry.py`（#2738）。它在计算控制主机上、不连库，
 以两份 manifest 的属主 `frd_muziyao` 身份运行：把「当前 canonical 全量 − 旧 M1 行 + provision 输出的
 M1′ 行」合并（没被点名的行原样、原序保留，被替换的行原位换成 provision registry 里的那一行），
 先各备份一份，再发 canonical（对读到的那份字节做 CAS），然后用**同一个 `generated_at`** 发 scratch
@@ -347,7 +344,7 @@ mirror（两份字节相同是结构性的，不依赖事后比对），最后�
 不备份、不取锁，只落一份回执。与 provision 共用同一个 `--succession-id`：
 
 ```bash
-# node-22，frd_muziyao
+# 计算控制主机，生产用户 frd_muziyao
 cd /scratch/frd_muziyao/NWM
 set -a
 . infra/env/compute.scheduler-provider-refresh.env   # 两份 manifest 路径、两个根、prefix、refresh 锁；不含 DB 变量
@@ -355,8 +352,8 @@ set +a
 SUCCESSION_ID=<succession-id>                        # 与 provision 那一步相同
 PUBLISH_ARGS=(
   --replace "<旧 M1 的 model_id>:<M1′ 的 model_id>"   # 每个 (流域, source) 一对，重复写
-  # provision 的 --output-registry 在 node-22 上的路径；它在 object store 之外时回执不记 object_store_key，必须给
-  --new-rows-registry "<node-22 视角的路径>"            # /home/ghdc/nwm/... 在这里写成 /ghdc/data/nwm/...
+  # provision 的 --output-registry 在计算主机上的路径；它在 object store 之外时回执不记 object_store_key，必须给
+  --new-rows-registry "<计算主机视角的路径>"           # /home/ghdc/nwm/... 在这里写成 /ghdc/data/nwm/...
   --operator-id "<operator>"
   --succession-id "$SUCCESSION_ID"
 )
@@ -470,7 +467,7 @@ jialingjiang，而这两个流域各已有 73 条 published run。
 > 唯一的身份来源就是 `BASINS_ROOT` inventory（`node27_autopipeline.py` phase-1 的
 > `_discover_seed_basin_identities`），所以新流域**必须**把 staged 树放进 NFS Basins。
 > 2026-08-22 的 #1699 上线即走此路；见上文「新流域上线四跳」hop 1b/hop 2。
-（另注意 node-22 的 `BASINS_ROOT=/volume/nwm/Basins` 在本地 175T 盘上，
+（另注意计算主机上的 `BASINS_ROOT=/volume/nwm/Basins` 在 `w3` 本地盘上（只读导出给 `w2`），
 与 NFS `/ghdc/data` 不是同一个文件系统。）
 
 #### 5.7.2 结构变更的 cold-start succession（#2740）
@@ -509,7 +506,7 @@ SUCCESSION_ARGS=(
   --kind cold_start
   --pair "<旧 model_id>:<新 model_id>"                # 每个 (流域, source) 一对，重复写
   --cutover-time <YYYYMMDDHH>                        # 操作员声明的切换时刻：只记录，工具不强制
-  --new-rows-registry "<node-22 视角的路径>"            # provision 的 --output-registry；回执记了 object_store_key 时可省
+  --new-rows-registry "<计算主机视角的路径>"           # provision 的 --output-registry；回执记了 object_store_key 时可省
   --operator-id "<operator>"
 )
 ```
@@ -559,7 +556,7 @@ dry-run 同样不改任何文件、不写回执（包括 `ic-audit.json`）、�
 用 `--kind add_basin` 一条命令做完，顺序陷阱（先发布后回拷、timer 没停就发布、发布后忘了 refresh）与另外两种
 kind 一样由工具关掉。
 
-**这条命令之前的几跳仍然手工做，命令不变**（都在 `service-bringup.md` 3.1.1）：hop 1 baseline 发布（node-22）、
+**这条命令之前的几跳仍然手工做，命令不变**（都在 `service-bringup.md` 3.1.1）：hop 1 baseline 发布（计算控制主机）、
 hop 1b 把 staged 树拷进 NFS Basins、hop 2 node-27 登记 baseline（seed）、hop 3 node-27 provision dg 变体
 （先 dry-run 再 `--apply`，`--succession-id` 与本节相同）。工具**从不碰任何 Basins 目录**，也不做 seed 与 provision；
 它的输入只有 hop 3 留下的 `provision-apply.json` 与 `--output-registry`。
@@ -582,7 +579,7 @@ SUCCESSION_ARGS=(
   --succession-id "$SUCCESSION_ID"                   # 与 hop 3 的 provision 相同
   --kind add_basin
   --add "<新流域的 gfs model_id>" --add "<新流域的 IFS model_id>"   # 每个新流域每个 source 一个，重复写
-  --new-rows-registry "<node-22 视角的路径>"            # provision 的 --output-registry；回执记了 object_store_key 时可省
+  --new-rows-registry "<计算主机视角的路径>"           # provision 的 --output-registry；回执记了 object_store_key 时可省
   --operator-id "<operator>"
 )
 ```
@@ -627,7 +624,7 @@ SUCCESSION_ARGS=(
 `--kind remove_basin` 一条命令做完：timer 的停与启、回执、发布、refresh、续跑与 `--abort` 都由工具管，
 不再手工停 timer、手工跑发布工具。
 
-**这只是退役的 node-22 一半。** 工具**从不碰任何 Basins 目录**，不动 node-27 上的 run、`AUTOPIPE_EXCLUDE_BASINS`
+**这只是退役的计算角色那一半。** 工具**从不碰任何 Basins 目录**，不动 node-27 上的 run、`AUTOPIPE_EXCLUDE_BASINS`
 与 `core.model_instance`；那些是 `operating-scope.md` 7.2 的第 2 步起，由 node-27 的退役工具
 `scripts/node27_retire_basin.py` 接手（命令、回执与手工复活见 [`operating-scope.md`](operating-scope.md) 7.6），
 它用**同一个 `--succession-id`**，每个 basin version 跑一次，并且在本节的 succession 跑完（`step-finish.json`）之前拒绝运行。
@@ -682,7 +679,7 @@ SUCCESSION_ARGS=(
   `--abort --confirm-timer-start` 放弃时 timer 恢复，该流域照常继续被调度。工具之外的手工回退办法仍是
   `operating-scope.md` 7.2 末尾那段直接跑发布工具的命令。
 
-### 5.8 node-22 file-journal cycle cold archive（已启用，#2119）
+### 5.8 file-journal cycle cold archive（已启用，#2119）
 
 自 2026-09-08 起，生产 `nhms-scheduler-journal-retention.timer` 已启用；激活审计证据见
 [2026-09-08 node-22 journal-retention live activation](../receipts/2026-09-08-node22-journal-retention-live-activation.md)
@@ -692,7 +689,7 @@ SUCCESSION_ARGS=(
 此 user-systemd oneshot 仅会归档 `NHMS_SCHEDULER_JOURNAL_ROOT` 下 `latest/`、`journal/` 和
 `pipeline-events/` 中完整的 `(source_id, cycle)` 切片。它**不会**扫描、改写或删除
 `pipeline-jobs/`、`reconcile-inventory/`、`.locks/`、state-index 或 quarantine；quarantine
-绝不由本服务删除。它不为 tar archive 增加透明读取层，也不会自动恢复。node-22 保持 DB-free：
+绝不由本服务删除。它不为 tar archive 增加透明读取层，也不会自动恢复。计算角色保持不连任何活库：
 retention 命令与 service 不连接任何数据库、也不提交 Slurm 作业；不得运行 `uv sync`、裸 `uv run`
 或任何重建环境的命令。scheduler 自身的业务提交不在本服务范围内。
 

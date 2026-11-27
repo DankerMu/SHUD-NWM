@@ -68,7 +68,7 @@ Each task rewrites the bodies with the glossary, removes the page's literal `ssh
 
 - [x] 3.1 `operating-scope.md`, `frontier-stall-alert.md`, `parse-failure-residency-alert.md` (no
   `ssh` line, no pointer, no pinned sentence, no heading that carries the codename).
-- [ ] 3.2 `artifacts-and-storage.md`, `recalibration-and-archive.md`: the heading §5.8 with its inbound
+- [x] 3.2 `artifacts-and-storage.md`, `recalibration-and-archive.md`: the heading §5.8 with its inbound
   link in `current-production-ops.md`.
 - [ ] 3.3 `service-bringup.md`, `known-issues-state-index.md` (structure readers named in
   `appendix-inventory.md` §2b stay green).
