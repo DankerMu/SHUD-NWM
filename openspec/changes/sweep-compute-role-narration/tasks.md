@@ -23,20 +23,26 @@ its tasks here in its final push.
 - A renamed heading takes every inbound link with it, and a deleted file every reference to it. The
   PR shows a repository-wide search for the old slug or file name returning nothing outside history,
   outside this change's directory and apart from tests' own synthetic inputs (each listed in the PR).
+- No rewritten line ends inside a role term (`design.md` §3): a search of the PR's files for lines
+  that end with "compute" or "compute control" finds none that continues the term on the next line.
+- No rewritten line joins a role term to another word with a hyphen (`design.md` §3, compounds).
+- A rewritten denial sits in the clause of the name it denies (`design.md` §3, denials); the PR
+  lists each rewritten line that carries a denial about a database.
 - History, persisted values and the gate's existing vocabulary are not edited (`design.md` §3).
 
 ## 1. Gate vocabulary
 
-- [ ] 1.1 The role and host-set terms of `design.md` §2 are a subject for both legs of the topology
+- [x] 1.1 The role and host-set terms of `design.md` §2 are a subject for both legs of the topology
   family (DB writer, local PostgreSQL), with the token boundaries of the host names.
-- [ ] 1.2 Synthetic cases: each term × each leg × asserted / denied; boundaries (`compute_control`, a
+- [x] 1.2 Synthetic cases: each term × each leg × asserted / denied; boundaries (`compute_control`, a
   path, an identifier, upper case); mixed runs ("the compute role (w3 / w2)").
-- [ ] 1.3 Real repository: finding multiset before and after; every new or lost finding listed and
+- [x] 1.3 Real repository: finding multiset before and after; every new or lost finding listed and
   judged; mutation: one term removed, its case goes red.
-- [ ] 1.4 Spec deltas in the slice's own change, both in `production-topology-contract`: "Static
+- [x] 1.4 Spec deltas in the slice's own change, both in `production-topology-contract`: "Static
   guardrails block topology drift" (the gate's subjects); "Current production topology is a governed
   contract" (the sentence that lists the identifiers keeping the codename no longer lists requirement
-  names).
+  names). Found by this slice: a scenario cannot be retitled or dropped by a MODIFIED block
+  (`design.md` §3, "Scenario titles").
 
 Suggested fixture level: expanded - changes what a hard gate that runs on every PR matches.
 Minimal mergeable slice: atomic - a term without its synthetic cases and the real-repository comparison cannot be judged; they are one verification path.

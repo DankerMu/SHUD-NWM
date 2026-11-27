@@ -5,11 +5,12 @@ predicates over a single line or clause: normalization, node-22 / database /
 writer mention tests, the relation-clause split, and the local-postgres and
 mirror drift line tests.
 
-#3358: the family covers the compute role by its codename and by its two host
-names (w3, w2). ``_topology_rewrite_compute_hosts`` turns host-name tokens of a
-raw line into the codename, so the database-writer predicates, which match the
-codename, read host-name lines unchanged. The compute-host local-PostgreSQL leg
-is ``_topology_line_has_compute_host_local_postgres_drift``."""
+#3358 and #3403: the family covers the compute role by its codename, by its two
+host names (w3, w2) and by the role terms ("compute role", "compute host", ...,
+计算角色, ...). ``_topology_rewrite_compute_hosts`` turns host-name and role-term
+tokens of a raw line into the codename, so the database-writer predicates, which
+match the codename, read those lines unchanged. The compute-host local-PostgreSQL
+leg is ``_topology_line_has_compute_host_local_postgres_drift``."""
 
 from __future__ import annotations
 
@@ -18,14 +19,23 @@ import re
 # A host name: lower case, on the raw text, not next to an ASCII letter, digit or
 # underscore, not after a dot or hyphen, not before a dot or hyphen plus a letter or
 # digit (part of a dotted or hyphenated longer name). The one hyphenated host name
-# is the ssh alias nwm-<host>. A run of host names joined only by the listed
+# is the ssh alias nwm-<host>. A run of names of the role joined only by the listed
 # separators and spaces is one name; a comma separates clauses, so it joins none.
 _TOPOLOGY_COMPUTE_HOST = (
     r"(?:(?<![A-Za-z0-9_.-])|(?<=(?<![A-Za-z0-9_.-])nwm-))w[23](?![A-Za-z0-9_])(?![.-][A-Za-z0-9])"
 )
+# An English role term: any letter case, one space or one hyphen at each joint, with
+# the host-name boundaries, so an identifier, a dotted name or a hyphenated longer
+# name is not a term; a path segment that is exactly a term is one.
+# A Chinese role term is matched as written: Chinese has no token boundary.
+_TOPOLOGY_COMPUTE_ROLE_TERM = (
+    r"(?<![A-Za-z0-9_.-])(?i:compute[ -](?:role|control[ -]hosts?|hosts?|nodes?))(?![A-Za-z0-9_])(?![.-][A-Za-z0-9])"
+    r"|计算角色|计算控制主机|计算主机|计算节点"
+)
+_TOPOLOGY_COMPUTE_NAME = rf"(?:{_TOPOLOGY_COMPUTE_HOST}|{_TOPOLOGY_COMPUTE_ROLE_TERM})"
 _TOPOLOGY_COMPUTE_HOST_RUN = re.compile(
-    rf"{_TOPOLOGY_COMPUTE_HOST}"
-    rf"(?:(?:[\s/、和]|(?<![A-Za-z])(?:and|or)(?![A-Za-z]))+{_TOPOLOGY_COMPUTE_HOST})*"
+    rf"{_TOPOLOGY_COMPUTE_NAME}"
+    rf"(?:(?:[\s/、和]|(?<![A-Za-z])(?:and|or)(?![A-Za-z]))+{_TOPOLOGY_COMPUTE_NAME})*"
 )
 _TOPOLOGY_COMPUTE_HOST_MARKER = "compute_host_token"
 _TOPOLOGY_LOCAL_POSTGRES_TOKENS = (
@@ -61,7 +71,7 @@ _TOPOLOGY_LOCAL_POSTGRES_ABSENCE = re.compile(
 
 
 def _topology_rewrite_compute_hosts(line: str, name: str = "node-22") -> str:
-    """Replace each compute host name (or run of them) in a raw line with ``name``.
+    """Replace each host name or role term (or run of them) in a raw line with ``name``.
 
     Must run before any lower-casing: an upper-case spelling is not a host name.
     ``name`` gets a space on each side because ``\\b`` sees no boundary between a
@@ -79,17 +89,43 @@ def _topology_line_has_compute_host_local_postgres_drift(line: str) -> bool:
     marked = _topology_rewrite_compute_hosts(line, _TOPOLOGY_COMPUTE_HOST_MARKER)
     if marked == line:
         return False
-    for clause in _topology_relation_clauses(marked):
-        if _TOPOLOGY_COMPUTE_HOST_MARKER not in clause:
-            continue
-        if not any(token in clause for token in _TOPOLOGY_LOCAL_POSTGRES_TOKENS):
-            continue
-        if any(token in clause for token in _TOPOLOGY_LOCAL_POSTGRES_PROHIBITIONS):
-            continue
-        if _TOPOLOGY_LOCAL_POSTGRES_ABSENCE.search(clause):
-            continue
-        return True
+    for part in _topology_compute_host_leg_parts(marked):
+        for clause in _topology_relation_clauses(part):
+            if _TOPOLOGY_COMPUTE_HOST_MARKER not in clause:
+                continue
+            if not any(token in clause for token in _TOPOLOGY_LOCAL_POSTGRES_TOKENS):
+                continue
+            if any(token in clause for token in _TOPOLOGY_LOCAL_POSTGRES_PROHIBITIONS):
+                continue
+            if _TOPOLOGY_LOCAL_POSTGRES_ABSENCE.search(clause):
+                continue
+            return True
     return False
+
+
+def _topology_compute_host_leg_parts(marked: str) -> tuple[str, ...]:
+    """The parts of a marked line that the compute-host leg reads on their own.
+
+    A table row whose first cell, emphasis marks and code font aside, is exactly
+    node-27 is a row about node-27: a name of the role in one cell and node-27's own
+    PostgreSQL in another are not one claim, so each cell is read alone. A cell ends
+    at a pipe that is not escaped. Any other line is read whole, also a row whose
+    first cell is a longer text that contains node-27.
+    """
+    if not marked.lstrip().startswith("|"):
+        return (marked,)
+    cells = re.split(r"(?<!\\)\|", marked.strip())[1:]
+    if cells and cells[0].strip(" \t*`").lower() == "node-27":
+        return tuple(cells)
+    return (marked,)
+
+
+def _topology_line_is_flagged_scenario_title(line: str) -> bool:
+    """A scenario title saying that something is or are flagged is a statement about the gate.
+
+    A title that says something is not flagged is an ordinary line.
+    """
+    return bool(re.match(r"\s*#### Scenario:(?i:.*\b(?:is|are)\s+flagged\b)", line))
 
 
 def _topology_normalized(text: str) -> str:

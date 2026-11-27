@@ -52,7 +52,7 @@ by the first slice of #3345 use three vocabularies side by side (`appendix-inven
 
 Today (`scripts/governance/entropy_audit/topology_predicates.py`): the DB-writer predicates match the
 codename; `_topology_rewrite_compute_hosts` rewrites runs of `w3` / `w2` to the codename before they
-run (#3358); a separate leg flags a compute host named together with a local PostgreSQL. None of the
+run (#3358); a separate leg covers a local database named for one of the two hosts. None of the
 terms of §1 is a subject, so a line that makes the role term the subject of a database-writer claim
 is not seen by the gate.
 
@@ -136,6 +136,17 @@ scenarios that forbid the command, this change's own among them, match it.
 
 **Everything else is rewritten**, by these rules:
 
+- **A term stays on one line.** The topology gate reads lines, and it recognises a role term only
+  inside one line (#3403). Rewritten prose does not break a term across a line end ("compute" at the
+  end of a line, "role" at the start of the next).
+- **A compound of the codename becomes an open phrase.** The gate reads a hyphenated longer name
+  as an identifier, not as a name of the role (#3403), so "node-22-local" is not rewritten to a
+  term plus "-local" but to words ("local to the compute hosts").
+- **A denial stays with the name it denies.** For a role term or a host name the gate's
+  local-database leg reads one clause: a denial on the next line or in the next sentence does not
+  cover it, where with the codename a following line could. The gate ends a clause at a comma,
+  a semicolon, a full stop (English or Chinese), a spaced hyphen and at "while", "whereas",
+  "but". A rewritten sentence that denies keeps the denial in the clause of the name.
 - **Sentences.** The new sentence is written from a read of the whole page or function, not by
   substitution: the subject is chosen from §1 by what the sentence is about (who does it, which
   machine, the set of machines). The PR's reviewer checks each rewritten sentence against §1.
@@ -144,8 +155,14 @@ scenarios that forbid the command, this change's own among them, match it.
 - **Requirement titles.** 18 titles carry the codename (`appendix-titles.md` lists each with its
   class). The 4 about the retired host or its database are kept. The other 14 use the codename for the
   role, or as an adjective for something the role owns, and are renamed with a RENAMED delta (e.g.
-  "Node-22 Slurm submission path"). Capability names stay. Scenario headings are edited inside the
-  MODIFIED block of their requirement.
+  "Node-22 Slurm submission path"). Capability names stay.
+- **Scenario titles.** The validator refuses a MODIFIED block that omits a scenario of the current
+  spec, so a MODIFIED block can change the text under a scenario but cannot retitle or drop it. A
+  slice that has to retitle or drop a scenario removes the requirement and adds it back under a new
+  title (REMOVED and ADDED in one change, as `retire-docker-compose-lane` did), and its PR shows
+  that every other clause is carried over. A scenario title that carries the codename and is
+  otherwise true stays when its requirement has no other reason to be re-added, and is listed in
+  the final residue.
 - **Spec Purpose lines.** A delta cannot carry Purpose text. A slice edits the Purpose of a main spec
   directly, in the push that archives its change (as `2bdc7a71d` did for five specs).
 - **Headings that are anchors.** Three headings are link targets, one of them also a test's anchor:
@@ -166,13 +183,14 @@ scenarios that forbid the command, this change's own among them, match it.
 - **Banners.** A page loses its banner in the PR that rewrites its body. The scenarios of
   `production-ops-readiness` and `production-topology-contract` that demand the banners are narrowed
   by the slice that rewrites the pages they name and removed with the last of those pages (group 3 for
-  the production-ops pages, group 4 for the rest). The rule that replaces them is this change's own
+  the production-ops pages, group 4 for the rest). Narrowing changes the text under a scenario;
+  removing one re-adds its requirement under a new title (see "Scenario titles"). The rule that replaces them is this change's own
   requirement and is not added a second time by a slice.
 - **Scenarios bound to a page's wording.** `production-ops-readiness`, "Current production ops runbook
   reflects verified 27-centric topology", has scenarios that say what the runbook calls the compute
   side ("node-22 remains compute and Slurm Gateway only", "shared artifact paths use both node
   perspectives"). The slice that rewrites `current-production-ops.md` rewrites them in the same
-  MODIFIED block, so the page and the spec change together.
+  change, so the page and the spec change together.
 - **Pages the gate skips.** `forcing-copyback-backfill.md` and `two-node-deployment-overview.md` are
   not scanned by the topology gate because their opening declares the whole document not current.
   They keep that declaration, and the words "historical" / "归档" a test requires. The PR shows the
