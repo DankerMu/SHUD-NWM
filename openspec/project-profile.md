@@ -55,8 +55,8 @@ Active profile for `codex-codeagent-workflow`. It supplements
 - Frontend contract: `cd apps/frontend && corepack pnpm test && corepack pnpm build`
 - Live data/display receipts for active DB, ingest, display API, frontend, and
   cross-plane identity run on node-27.
-- Slurm scheduling/runtime receipts run on node-22 only when sbatch, Slurm
-  gateway, SHUD compute, or scheduler behavior changes.
+- Slurm scheduling/runtime receipts run on the compute control host only when
+  sbatch, Slurm gateway, SHUD compute, or scheduler behavior changes.
 - Local lint/unit/OpenSpec checks are necessary but do not substitute for
   required node-27 live DB/display receipts.
 
@@ -85,7 +85,7 @@ Active profile for `codex-codeagent-workflow`. It supplements
   exit contract and delivered mail captured on the exact head; local pytest alone is not a receipt.
 - Working-set capacity/receipt -> node-27 focused CLI/schema/history/alert tests plus an isolated-checkout read-only live audit -> configured PGDATA path/device/free bytes govern comparison; missing evidence is non-healthy; old receipts remain readable without current-writer home fallback.
 - Display/API/frontend -> node-27 live receipt + frontend test/build -> C1-C4 receipt and passing build.
-- Slurm/SHUD scheduling -> node-22 runtime receipt -> terminal Slurm/SHUD evidence; only when scheduling/runtime changes.
+- Slurm/SHUD scheduling -> runtime receipt on the compute control host -> terminal Slurm/SHUD evidence; only when scheduling/runtime changes.
 
 ## Domain risk packs
 

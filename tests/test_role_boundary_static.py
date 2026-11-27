@@ -407,7 +407,7 @@ def test_role_boundary_document_mentions_required_inventory_and_hard_gate() -> N
         "display_readonly",
         "slurm_gateway",
         "shared_contract",
-        "node-22",
+        "compute role",
         "node-27",
         "#361",
         "hard gate",
@@ -449,11 +449,12 @@ def test_role_boundary_document_mentions_required_inventory_and_hard_gate() -> N
         assert text.count(section) >= 4, section
 
 
-def test_current_topology_docs_state_node27_node22_and_live_oracle_boundaries() -> None:
+def test_current_topology_docs_state_node27_compute_role_and_live_oracle_boundaries() -> None:
     role_boundary = ROLE_BOUNDARY_DOC.read_text(encoding="utf-8")
     current_ops = production_ops_text()
     two_node_overview = TWO_NODE_DEPLOYMENT_OVERVIEW_DOC.read_text(encoding="utf-8")
     project_profile = PROJECT_PROFILE_DOC.read_text(encoding="utf-8")
+    project_profile_flat = " ".join(project_profile.split())
 
     assert "node-27 hosts the active primary PostgreSQL (`:55432`), the ingest workers" in role_boundary
     assert "display API (`:8080`), and the frontend" in role_boundary
@@ -461,10 +462,28 @@ def test_current_topology_docs_state_node27_node22_and_live_oracle_boundaries() 
     assert "本机 PostgreSQL `:55432`" in current_ops
     assert "source download、systemd-driven ingest、display API 和前端公网入口都在 27" in current_ops
 
-    assert "node-22 runs the Slurm/SHUD compute wrapper" in role_boundary
-    assert "node-22 currently\nhosts compute/Slurm/artifact production only" in role_boundary
+    assert "The compute role runs the Slurm/SHUD compute wrapper" in role_boundary
+    assert "The compute hosts currently host compute/Slurm/artifact production only" in role_boundary
     assert "node-22 是纯计算 / Slurm / SHUD / artifact producer" in two_node_overview
-    assert "Slurm scheduling/runtime receipts run on node-22 only when sbatch" in project_profile
+    assert "Slurm scheduling/runtime receipts run on the compute control host only when sbatch" in project_profile_flat
+
+    lines = role_boundary.splitlines()
+    start = next(
+        (i for i, line in enumerate(lines) if line.startswith("- The compute role is hosted since 2026-11-23")),
+        None,
+    )
+    assert start is not None, "ROLE_BOUNDARY lacks the bullet '- The compute role is hosted since 2026-11-23'"
+    end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith("- ")), len(lines))
+    hosted_bullet = " ".join(line.strip() for line in lines[start:end])
+    assert "`w3`" in hosted_bullet and "`w2`" in hosted_bullet, (
+        f"the hosted-since bullet must name the compute hosts `w3` and `w2`: {hosted_bullet!r}"
+    )
+    assert re.search(r"`?210\.77\.77\.22`? is retired from NHMS compute[^.]*rollback archive", hosted_bullet), (
+        f"the hosted-since bullet must name the retired host 210.77.77.22 as a rollback archive: {hosted_bullet!r}"
+    )
+    assert re.search(r"\]\([^)\s]*w2-w3-compute-topology\.md(?:#[^)\s]*)?\)", hosted_bullet), (
+        f"the hosted-since bullet must link w2-w3-compute-topology.md: {hosted_bullet!r}"
+    )
 
     assert "Local checks are required but do not replace node-27 live DB/display receipts." in role_boundary
     assert "Local lint/unit/OpenSpec checks are necessary but do not substitute for" in project_profile
