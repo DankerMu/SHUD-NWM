@@ -272,7 +272,7 @@ legacy `idw` 通过 `workers/model_registry/qhh_production_bootstrap.py:328-473`
 
 ### 4.5 阈值/钳位：显式对齐 SHUD/rSHUD
 
-`docs/runbooks/qhh-22-business-bringup.md` 明确记录：**"对齐 SHUD（`rn<0→0`、`prcp<1e-4→0`、`rh∈[0,1]`）/ rSHUD：亚阈值微负记 anomaly 但保 `ok`"**。对应 AutoSHUD `LDAS_UnitConvert.R:82,85`（`rh>100→100`、`p_mm.day<1e-4→0`）。
+`workers/canonical_converter/converter.py` 按 SHUD 的约定处理（提交 `8cced52`、`8a8ba3d`）：**辐射负值钳为 0、降水负增量钳为 0（SHUD 自身把 `prcp<1e-4` 记为 0）、`rh` 钳到 `[0,1]`；亚阈值的微负值记 anomaly 但 `quality_flag` 保持 `ok`，超阈值仍标 `warn`**。对应 AutoSHUD `LDAS_UnitConvert.R:82,85`（`rh>100→100`、`p_mm.day<1e-4→0`）。
 
 ---
 
@@ -308,7 +308,7 @@ legacy `idw` 复用既有 Thiessen 覆盖并 IDW 到固定站点；`direct_grid`
    - 风速 `√(u²+v²)`（`:302-303`）；
    - **SHUD 包格式**：`qhh.tsd.forc` 头、按 `shud_forcing_index` 排序、每站 CSV、`forcing_package.json` 的 `units` 断言 `{PRCP:mm/day, TEMP:degC, RH:0-1, wind:m/s, Rn:W/m2, Press:Pa}`（`:323-382`）。
 2. **node-22 真实 SHUD 运行 oracle**：forcing 包最终由 `workers/shud_runtime/runtime.py` 喂给真实 SHUD 二进制执行（CLAUDE.md 规定 node-22 为 SHUD 行为权威），即"能被 SHUD 正确读入并跑出结果"是端到端验收。
-3. **阈值/语义对齐有据**：`docs/runbooks/qhh-22-business-bringup.md`、`docs/spec/02_data_product_and_time_semantics.md`。
+3. **阈值/语义对齐有据**：`workers/canonical_converter/converter.py`（提交 `8cced52`、`8a8ba3d`）、`docs/spec/02_data_product_and_time_semantics.md`。
 4. **逐字节格式同构有据**：本文 §4 全部给出 rSHUD 源码与本项目源码的并排行号，可直接 `diff` 复核。
 
 ---
@@ -388,6 +388,6 @@ role boundary 同步调整为“display 可以只读 `OBJECT_STORE_ROOT`”：`a
 | AutoSHUD LDAS 单位换算 | `AutoSHUD/Rfunction/LDAS_UnitConvert.R:1-94` |
 | 单元测试 | `tests/test_forcing_producer.py:259-398` |
 | 时间语义规范 | `docs/spec/02_data_product_and_time_semantics.md` |
-| 阈值对齐 runbook | `docs/runbooks/qhh-22-business-bringup.md` |
+| 阈值对齐实现 | `workers/canonical_converter/converter.py`（提交 `8cced52`、`8a8ba3d`） |
 | API 直读 disk route | `apps/api/routes/data_sources.py:136-174` |
 | object-store station CSV reader | `packages/common/object_store_forcing.py:342-436` |

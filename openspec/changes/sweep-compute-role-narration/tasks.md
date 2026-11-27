@@ -145,7 +145,7 @@ Minimal mergeable slice: 5.1 - the family's followers are two test entries, one 
   with the synthetic instruction files of `tests/test_entropy_audit_instruction_inventory.py` that
   mirror it, and `apps/api/AGENTS.md` follow; its citation in the forcing note; its rows in both
   governance inventories; delete.
-- [ ] 6.2 `qhh-22-business-bringup.md`: script header comments and the authority-invariant test (a
+- [x] 6.2 `qhh-22-business-bringup.md`: script header comments and the authority-invariant test (a
   header names no deleted runbook); the front-matter test in
   `tests/test_node22_entrypoint_invariant.py` goes; the three citations in the forcing note reworded;
   the pointers in `current-production-ops.md` and `stuck-detection.md` and the link in

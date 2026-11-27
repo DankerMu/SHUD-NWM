@@ -7,7 +7,7 @@ Minimal SHUD input package subset extracted from node-27 `/home/nwm/NWM/data/Bas
 - Host: node-27 `nwm@210.77.77.27:32099`
 - Path: `/home/nwm/NWM/data/Basins/qhh/input/qhh/`
 - Basin: qhh (Qinghai Lake)
-- Source SHUD package mtime: 2026-05-14 17:13 (matches [`docs/runbooks/qhh-22-business-bringup.md`](../../../../docs/runbooks/qhh-22-business-bringup.md) baseline)
+- Source SHUD package mtime: 2026-05-14 17:13 (the package of the QHH bring-up baseline)
 - Extracted on: 2026-06-19 via GDAL 3.4.1 (`ogr2ogr` schema-preserving copy)
 
 ## Sampling rule
