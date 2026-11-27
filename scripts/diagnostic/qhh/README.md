@@ -6,7 +6,7 @@ The scripts remain at their current root paths for compatibility. They are diagn
 ## Run Boundary (authoritative)
 
 The QHH diagnostic chain may only run from a **detached diagnostic worktree** with its own virtualenv.
-The canonical active node-22 checkout (`/scratch/frd_muziyao/NWM`) must **fail closed**: its shared
+The canonical active checkout of the compute role (`/scratch/frd_muziyao/NWM`) must **fail closed**: its shared
 `.venv` is owned by the online services, and bare `uv run` / `uv sync` must never touch it. All four
 entrypoints (`scripts/run_qhh_continuous.py`, `scripts/run_qhh_cycle.sh`,
 `scripts/run_qhh_cycle.sbatch`, `scripts/run_qhh_backend_smoke.sh`) refuse to start when their
@@ -115,8 +115,8 @@ receipt and not proof of scheduler readiness.
 
 Use the generic production scheduler/orchestrator path for production automation.
 Dry-run planning is no-mutation evidence only; production submission must be
-explicit. Before the operator-approved maintenance cutover, the active node-22
-checkout's shared `.venv` must not be rebuilt, so these commands run through the
+explicit. Before the operator-approved maintenance cutover, the shared `.venv` of the active
+checkout of the compute role must not be rebuilt, so these commands run through the
 exact pre-window active interpreter
 `/scratch/frd_muziyao/NWM/.venv/bin/python -m services.orchestrator.cli`
 (fail-closed: the interpreter must exist or the command refuses to start; no

@@ -58,7 +58,7 @@
 
 ## 6. 接口
 
-- node-27 raw download runner writes source bundles before node-22 scheduling
+- node-27 raw download runner writes source bundles before the compute role schedules
 - `内部 CLI nhms-ingest download --source --cycle`
 - `状态回写 ops.job_status`
 

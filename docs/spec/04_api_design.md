@@ -168,7 +168,7 @@ GET /api/v1/queue/depth
 `POST /api/v1/runs/{run_id}/retry` 是 fail-closed 人工处置端点（#3157）：在 400 `INVALID_RUN_ID`、401/403 鉴权
 和 display_readonly 409 之后，任何角色都恒返回 409 `CONTROL_PLANE_MANUAL_ACTION_REQUIRED`（`details` 含 `run_id`、
 `suggested_action`、`recovery_runbook=node22-control-plane-manual-recovery`），不提交、不排队、不写状态。人工重试走
-node-22 marker 车道 `scripts/node22_manual_retry_failed_runs.py`（`FileJournalRetryService.record_manual_repair`）。
+计算角色的 marker 车道 `scripts/node22_manual_retry_failed_runs.py`（`FileJournalRetryService.record_manual_repair`）。
 
 pipeline stages 响应示例：
 

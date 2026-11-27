@@ -118,11 +118,14 @@ model packages or delete/upload production object-store assets.
 
 ## Real Slurm Smoke
 
-Use the real cluster smoke only on a host with Slurm CLI access. Keep log paths
+Use the real cluster smoke only on a host with Slurm CLI access: today that is the compute control host
+(host layout: [`w2-w3-compute-topology.md`](runbooks/w2-w3-compute-topology.md)). Keep log paths
 on shared storage such as `/scratch/frd_muziyao/slurm-smoke/`; `/tmp` can be
 compute-node-local and may not be readable from the login node after completion.
 
-Observed test environment on 2026-05-16:
+Observed test environment on 2026-05-16, on the retired node-22 host (`xnode`). The compute role left that
+host on 2026-11-23 and no run of this smoke on the compute hosts is recorded: read the list as the record of
+that day, not as the cluster of today.
 
 - Host/user: `xnode` / `frd_muziyao`.
 - Cluster/account: `shudhpc`, default Slurm account `friends`.
