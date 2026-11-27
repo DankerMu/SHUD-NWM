@@ -624,7 +624,7 @@ SUCCESSION_ARGS=(
 `--kind remove_basin` 一条命令做完：timer 的停与启、回执、发布、refresh、续跑与 `--abort` 都由工具管，
 不再手工停 timer、手工跑发布工具。
 
-**这只是退役的计算角色那一半。** 工具**从不碰任何 Basins 目录**，不动 node-27 上的 run、`AUTOPIPE_EXCLUDE_BASINS`
+**这只是流域退役里计算角色那一半。** 工具**从不碰任何 Basins 目录**，不动 node-27 上的 run、`AUTOPIPE_EXCLUDE_BASINS`
 与 `core.model_instance`；那些是 `operating-scope.md` 7.2 的第 2 步起，由 node-27 的退役工具
 `scripts/node27_retire_basin.py` 接手（命令、回执与手工复活见 [`operating-scope.md`](operating-scope.md) 7.6），
 它用**同一个 `--succession-id`**，每个 basin version 跑一次，并且在本节的 succession 跑完（`step-finish.json`）之前拒绝运行。
@@ -685,6 +685,8 @@ SUCCESSION_ARGS=(
 [2026-09-08 node-22 journal-retention live activation](../receipts/2026-09-08-node22-journal-retention-live-activation.md)
 （[#2119](https://github.com/DankerMu/SHUD-NWM/issues/2119)）。长期 provider-timer 漂移治理由
 [#2146](https://github.com/DankerMu/SHUD-NWM/issues/2146) 跟踪。
+
+这个 timer 与它的 service 装在计算控制主机上（生产用户的 user manager）；本节的命令都在计算控制主机上以生产用户执行。
 
 此 user-systemd oneshot 仅会归档 `NHMS_SCHEDULER_JOURNAL_ROOT` 下 `latest/`、`journal/` 和
 `pipeline-events/` 中完整的 `(source_id, cycle)` 切片。它**不会**扫描、改写或删除

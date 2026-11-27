@@ -254,7 +254,9 @@ ssh -p 32099 nwm@210.77.77.27 \
      现网所有写者恰好是同一个 uid，外来 uid 又在文件创建之前就被拒，两者才重合。
    - 持有者被 kill 时**本机**内核会释放 flock，所以「锁文件存在」≠「锁被持有」。
      但生产 copyback root 不在本机盘上：node-22 的 `/ghdc/data/nwm/object-store`
-     是 `ghdc:/home/ghdc` 的 **NFSv4.2** 挂载（2026-09-10 实测）。**进程**死照样
+     是 `ghdc:/home/ghdc` 的 **NFSv4.2** 挂载（2026-09-10 实测）。计算主机上同样是 node-27
+     `/home/ghdc` 的 NFSv4.2 挂载（2026-11-23 在 `w3` 实测，见
+     [receipt](../receipts/2026-11-23-lock-interop-node27-w3.md)）。**进程**死照样
      立刻释放；**整台主机**死不会——锁由服务端一直持有到该 client 的租约过期。
    - 等待上限由 `NHMS_OBJECT_STORE_COPYBACK_LOCK_TIMEOUT_SECONDS` 控制，
      **默认 900 秒**（一次 acquisition ≈ 2.2 GB / 62 MB/s ≈ 36 s；取锁次数与
@@ -269,7 +271,8 @@ ssh -p 32099 nwm@210.77.77.27 \
      `O_CREAT` 之前就被拒——两个方向都堵死，锁文件不会被别的账号「毒化」。
      跨主机的互斥靠**锁原语**成立（2026-09-14 实测，ADR 0008）：node-22 NFS client 的
      `flock` 与 node-27（NFS server 本地文件系统）的 POSIX 记录锁双向互斥；node-27 本地
-     `flock` 与 node-22 `flock` **不**互斥。因此 node-27 上任何取这把锁的进程都必须用
+     `flock` 与 node-22 `flock` **不**互斥。2026-11-23 在 `w3` 上重测，结论相同（同一 receipt）。
+     因此 node-27 上任何取这把锁的进程都必须用
      `primitive="posix"`，计算角色的写者保持默认 `flock`。
    - **`NHMS_OBJECT_STORE_COPYBACK_ROOT` 必须由那个唯一的写者 uid 属主持有。**
      条件是 **uid 相等**，不是「写者能写这个 root」：一个属主是别的账号、靠组位开放写
