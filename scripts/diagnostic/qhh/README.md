@@ -56,6 +56,61 @@ These helpers are direct dependencies of the diagnostic entrypoints above and re
 
 `scripts/seed_qhh_smoke_met_station.py` is a related QHH smoke helper, but it is not a direct dependency of the governed diagnostic entrypoints listed above. It remains a standalone diagnostic helper unless a later issue wraps, archives, or retires it with focused evidence.
 
+## Backend Smoke On A Local Database
+
+`scripts/run_qhh_backend_smoke.sh` can run the whole GFS chain (basin discovery and package, registry
+import, download, canonical conversion, forcing, SHUD, output parse, result summary) against a
+PostgreSQL that lives inside the detached worktree. `scripts/local_pg.sh` starts that database from a
+runtime under `.conda-postgres-runtime/` and keeps its data, socket and logs under `.pgdata/`,
+`.pgsocket/` and `.pglogs/` of the worktree; it listens on `127.0.0.1`, port `PGPORT`.
+
+The helper's default port is 55432, which on node-27 is the production postmaster. `local_pg.sh url`
+only prints the URL for the configured port; it does not check which server answers there. So the
+block below sets another port and starts the smoke script only when `local_pg.sh start` succeeded.
+Never run this lane with `PGPORT=55432` on node-27.
+
+```bash
+export QHH_DIAGNOSTIC_CHECKOUT=/path/to/detached/qhh-diagnostic-worktree  # never /scratch/frd_muziyao/NWM
+QHH_DIAGNOSTIC_CHECKOUT="$(cd "$QHH_DIAGNOSTIC_CHECKOUT" && pwd -P)"
+[[ "$QHH_DIAGNOSTIC_CHECKOUT" != "/scratch/frd_muziyao/NWM" ]] || { echo "QHH_DIAGNOSTIC_CHECKOUT must be a detached worktree, not the active root" >&2; exit 2; }
+[[ -x "$QHH_DIAGNOSTIC_CHECKOUT/.venv/bin/python" ]] || { echo "missing $QHH_DIAGNOSTIC_CHECKOUT/.venv/bin/python (detached worktree has no virtualenv)" >&2; exit 2; }
+cd "$QHH_DIAGNOSTIC_CHECKOUT"
+
+export PGPORT=55440   # a free local port; never 55432 on node-27
+./scripts/local_pg.sh start &&
+  DATABASE_URL=$(./scripts/local_pg.sh url) \
+  QHH_CYCLE_TIME=2026052100 \
+  QHH_RESET_SMOKE_DB=1 \
+  SHUD_TIMEOUT_SECONDS=1800 \
+  ./scripts/run_qhh_backend_smoke.sh
+```
+
+Run every command of the block from the detached root, after its `cd`. `QHH_CYCLE_TIME` is the GFS
+cycle to run (`YYYYMMDDHH`); `QHH_RESET_SMOKE_DB=1` clears the QHH smoke rows first, so the run can be
+repeated. `./scripts/local_pg.sh status` and `./scripts/local_pg.sh stop` report on and stop the local
+server. The script checks the boundary again in its own header: it resolves its root with `pwd -P`,
+refuses `/scratch/frd_muziyao/NWM`, and exits 2 when the detached root has no `.venv/bin/python`.
+
+Without `DATABASE_URL` the script records a `blocked` database gate and skips the registry import and
+every stage after it; without `QHH_CYCLE_TIME` it skips download, canonical conversion, forcing and
+the SHUD run. `QHH_RESET_SMOKE_DB=1` runs `scripts/reset_qhh_smoke_db.py` before the registry import.
+
+Script defaults, each overridable through the environment:
+
+- `QHH_RUN_ROOT=$QHH_DIAGNOSTIC_CHECKOUT/.nhms-runs/qhh-smoke` (run products and the local object root)
+- `NHMS_BASINS_ROOT=data/Basins`, relative to the worktree. `data/` is not tracked, so a new worktree
+  has none: set the variable to the machine's Basins source, or link it there, before the run.
+- `QHH_PACKAGE_VERSION=v0.0.1-qhh-smoke-lake2`
+- `QHH_GFS_FORECAST_START_HOUR=3`
+- `QHH_GFS_FORECAST_END_HOUR=24`
+- `QHH_MODEL_OUTPUT_INTERVAL=180`
+- `QHH_SHUD_COMMAND_STYLE=shud_project`
+- `QHH_USE_SMOKE_MIGRATIONS=1` (`scripts/apply_smoke_migrations.py`, for a database without TimescaleDB)
+- `SHUD_EXECUTABLE=$QHH_DIAGNOSTIC_CHECKOUT/SHUD/shud`
+
+A completed run is diagnostic and reproduction evidence for the cycle it ran. It is not a production
+receipt and not proof of scheduler readiness.
+
 ## Production Replacement
 
 Use the generic production scheduler/orchestrator path for production automation.

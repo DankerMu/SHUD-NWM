@@ -681,26 +681,81 @@ def test_qhh_manifest_backend_smoke_entrypoint_semantics() -> None:
     assert "detached + exact-interpreter guard" in readme
 
 
-def _assert_backend_smoke_runbook(text: str) -> None:
-    """The runbook recipe must be explicitly detached (no active-root $PWD recipe)."""
-    runbook = text
-
-    assert "QHH_DIAGNOSTIC_CHECKOUT" in runbook
-    assert 'pwd -P' in runbook
-    assert "QHH_DIAGNOSTIC_CHECKOUT must be a detached worktree, not the active root" in runbook
-    assert "$QHH_DIAGNOSTIC_CHECKOUT/.venv/bin/python" in runbook
-    assert 'cd "$QHH_DIAGNOSTIC_CHECKOUT"' in runbook
-
-    cd_index = runbook.index('cd "$QHH_DIAGNOSTIC_CHECKOUT"')
-    assert runbook.index("scripts/local_pg.sh start") > cd_index
-    assert runbook.index("scripts/run_qhh_backend_smoke.sh") > cd_index
-    assert "$PWD/SHUD/shud" not in runbook
-    assert "SHUD_EXECUTABLE=$QHH_DIAGNOSTIC_CHECKOUT/SHUD/shud" in runbook
+_BACKEND_SMOKE_LOCAL_LANE_HEADING = "## Backend Smoke On A Local Database"
 
 
-def test_qhh_backend_smoke_runbook_recipe_is_detached_explicit_no_implicit_active_root() -> None:
-    runbook = Path("docs/runbooks/qhh-backend-smoke.md").read_text(encoding="utf-8")
-    _assert_backend_smoke_runbook(runbook)
+def _assert_backend_smoke_local_lane_section(text: str) -> None:
+    """The manifest's backend-smoke local-lane section must carry an explicitly
+    detached recipe (no active-root $PWD recipe). Scoped to that section, and the
+    ordering checks to its bash block, so the Run Boundary recipe and the prose
+    above the block cannot satisfy them."""
+    heading_line = f"\n{_BACKEND_SMOKE_LOCAL_LANE_HEADING}\n"
+    padded = f"\n{text}"
+    assert heading_line in padded, f"manifest has no {_BACKEND_SMOKE_LOCAL_LANE_HEADING!r} section"
+    after_heading = padded[padded.index(heading_line) + len(heading_line) - 1 :]
+    next_heading = after_heading.find("\n## ")
+    section = after_heading if next_heading == -1 else after_heading[:next_heading]
+
+    fence_open = "\n```bash\n"
+    assert fence_open in section, "backend-smoke local-lane section has no ```bash block"
+    block_body = section[section.index(fence_open) + len(fence_open) :]
+    fence_close = block_body.find("\n```")
+    assert fence_close != -1, "backend-smoke local-lane ```bash block is not closed"
+    block = "\n" + block_body[:fence_close] + "\n"
+
+    assert "QHH_DIAGNOSTIC_CHECKOUT" in block
+    assert "pwd -P" in block
+    assert "QHH_DIAGNOSTIC_CHECKOUT must be a detached worktree, not the active root" in block
+    assert "$QHH_DIAGNOSTIC_CHECKOUT/.venv/bin/python" in block
+    # A whole line: the guard's `$(cd "$QHH_DIAGNOSTIC_CHECKOUT" && pwd -P)` subshell
+    # must not stand in for the directory change.
+    cd_line = '\ncd "$QHH_DIAGNOSTIC_CHECKOUT"\n'
+    assert cd_line in block
+
+    cd_index = block.index(cd_line)
+    assert block.index("scripts/local_pg.sh start") > cd_index
+    assert block.index("scripts/run_qhh_backend_smoke.sh") > cd_index
+    assert "uv run" not in block
+
+    # The production postmaster listens on 55432 on node-27: no command of the
+    # recipe may name that port (comments may warn against it).
+    block_lines = block.splitlines()
+    commands = [line.split(" #", 1)[0] for line in block_lines if not line.lstrip().startswith("#")]
+    assert not [line for line in commands if "55432" in line], "recipe commands name the production port 55432"
+    pgport_lines = [line for line in block_lines if line.startswith("export PGPORT=")]
+    assert pgport_lines, "recipe does not export PGPORT"
+    assert block.index("\n" + pgport_lines[0]) < block.index("scripts/local_pg.sh start"), (
+        "export PGPORT= must come before scripts/local_pg.sh start"
+    )
+
+    # The smoke script must be reachable only when the local database started.
+    start_and = "./scripts/local_pg.sh start &&\n"
+    assert start_and in block, "smoke script is not chained after `./scripts/local_pg.sh start &&`"
+    assert block.index("scripts/run_qhh_backend_smoke.sh") > block.index(start_and), (
+        "smoke script must come after `./scripts/local_pg.sh start &&`"
+    )
+    assert not [
+        line
+        for line in block_lines
+        if line.startswith(("./scripts/run_qhh_backend_smoke.sh", "export DATABASE_URL="))
+    ], "a standalone smoke-script or DATABASE_URL line runs even when the start failed"
+    start_at = block_lines.index(start_and.rstrip("\n"))
+    script_at = next(
+        number
+        for number, line in enumerate(block_lines)
+        if number > start_at and "scripts/run_qhh_backend_smoke.sh" in line
+    )
+    assert all(line.endswith(" \\") for line in block_lines[start_at + 1 : script_at]), (
+        "lines between `start &&` and the smoke script must form one continued command (each ends with ` \\`)"
+    )
+
+    assert "$PWD/SHUD/shud" not in section
+    assert "SHUD_EXECUTABLE=$QHH_DIAGNOSTIC_CHECKOUT/SHUD/shud" in section
+
+
+def test_qhh_manifest_backend_smoke_local_lane_recipe_is_detached_explicit() -> None:
+    readme = Path("scripts/diagnostic/qhh/README.md").read_text(encoding="utf-8")
+    _assert_backend_smoke_local_lane_section(readme)
 
 
 def test_qhh_continuous_module_smoke_requires_detached_root_exact_interpreter() -> None:

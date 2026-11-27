@@ -149,7 +149,7 @@ def test_scoped_agent_context_reports_missing_glossary_linkage(tmp_path: Path) -
         Current references:
         - `{audit_repo_entropy.SCOPED_AGENT_CONTEXT_SPEC_PATH}`
         - `docs/governance/ROLE_BOUNDARY.md`
-        - `docs/runbooks/qhh-backend-smoke.md`
+        - `scripts/diagnostic/qhh/README.md`
 
         Verification:
         - `uv run pytest -q tests/test_entropy_audit_*.py tests/test_runtime_mode.py tests/test_api.py`
@@ -190,7 +190,7 @@ def test_scoped_agent_context_accepts_glossary_link_without_repeated_terms(
         Current references:
         - `{audit_repo_entropy.SCOPED_AGENT_CONTEXT_SPEC_PATH}`
         - `docs/governance/ROLE_BOUNDARY.md`
-        - `docs/runbooks/qhh-backend-smoke.md`
+        - `scripts/diagnostic/qhh/README.md`
 
         Verification:
         - `uv run pytest -q tests/test_entropy_audit_*.py tests/test_runtime_mode.py tests/test_api.py`
@@ -224,7 +224,7 @@ def test_scoped_agent_context_accepts_required_terms_without_glossary_link(
         Current references:
         - `{audit_repo_entropy.SCOPED_AGENT_CONTEXT_SPEC_PATH}`
         - `docs/governance/ROLE_BOUNDARY.md`
-        - `docs/runbooks/qhh-backend-smoke.md`
+        - `scripts/diagnostic/qhh/README.md`
 
         Verification:
         - `uv run pytest -q tests/test_entropy_audit_*.py tests/test_runtime_mode.py tests/test_api.py`
@@ -255,7 +255,7 @@ def test_scoped_agent_context_matches_wrapped_verification_command(tmp_path: Pat
         Current references:
         - `{audit_repo_entropy.SCOPED_AGENT_CONTEXT_SPEC_PATH}`
         - `docs/governance/ROLE_BOUNDARY.md`
-        - `docs/runbooks/qhh-backend-smoke.md`
+        - `scripts/diagnostic/qhh/README.md`
 
         Verification:
         - `uv run pytest -q tests/test_entropy_audit_*.py

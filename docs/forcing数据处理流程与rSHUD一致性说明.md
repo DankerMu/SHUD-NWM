@@ -48,7 +48,7 @@
 **本项目** 处理的是**另一个阶段**：在 rSHUD/AutoSHUD 或其它上游流程已经准备好的流域模型资产上生产业务化 forcing，并不在运行期重建 mesh、河网或率定参数。对 legacy `idw` 模式，它只为原固定站点刷新 forcing 时间序列；对 `direct_grid` 模式，它要求上游模型资产已经把 forcing 站点和 `.sp.att FORC` 迁移到 IFS/GFS 格点站点。
 
 - `openspec/changes/m23-qhh-22-production-automation/tasks.md`：记录 **"rSHUD/AutoSHUD 是静态契约参考（static contract reference），SHUD 才是运行时模型引擎"**；forcing 生成"遵循已处理流域的文件契约，但**不 import/调用 rSHUD/AutoSHUD** 作为运行时数据生成器"。
-- `docs/runbooks/qhh-backend-smoke.md`：**"forcing 采用原始 qhh / rSHUD 站点表 …… runtime 阶段转换为 `qhh.tsd.forc` 与 `forcing.csv`"**。
+- `scripts/diagnostic/qhh/README.md`（`scripts/seed_qhh_forcing_stations.py` 一行）：QHH 诊断链的 forcing 站点**直接取自原模型的 `qhh.tsd.forc` 站点表**，不重新布站。
 
 **关键不变量**：本项目运行期不自行发明三角元到 forcing 站点的覆盖关系。legacy `idw` 复用原模型 `.att` 的 `FORC` 覆盖；`direct_grid` 复用已迁移模型资产声明的 direct-grid station binding 和 `.sp.att` `FORC` 覆盖，并校验 binding checksum、grid signature、`.sp.att` checksum 与 `FORC` 引用范围。运行期只生产满足 SHUD 契约的站点时间序列。
 

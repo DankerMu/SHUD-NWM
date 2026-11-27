@@ -190,7 +190,7 @@ SCOPED_AGENT_CONTEXT_CONFIGS = (
         required_references=(
             SCOPED_AGENT_CONTEXT_SPEC_PATH,
             "docs/governance/ROLE_BOUNDARY.md",
-            "docs/runbooks/qhh-backend-smoke.md",
+            "scripts/diagnostic/qhh/README.md",
         ),
         required_verification_commands=(
             "uv run pytest -q tests/test_entropy_audit_*.py tests/test_runtime_mode.py tests/test_api.py",

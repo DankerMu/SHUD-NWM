@@ -140,7 +140,7 @@ Minimal mergeable slice: 5.1 - the family's followers are two test entries, one 
 
 ## 6. Historical runbooks with a residue
 
-- [ ] 6.1 `qhh-backend-smoke.md`: the local-lane lines move to `scripts/diagnostic/qhh/README.md`; the
+- [x] 6.1 `qhh-backend-smoke.md`: the local-lane lines move to `scripts/diagnostic/qhh/README.md`; the
   second recipe pin of `tests/test_qhh_scripts_static.py`, the governance schema's freshness anchor
   with the synthetic instruction files of `tests/test_entropy_audit_instruction_inventory.py` that
   mirror it, and `apps/api/AGENTS.md` follow; its citation in the forcing note; its rows in both
