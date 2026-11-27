@@ -9,8 +9,13 @@ that anchor on its authority heading).
 
 ## 1. Documents (orchestrator)
 
-- [ ] 1.1 `infra/env/README.md`: a section with the snippet, after the paragraph on local
-  secret-source files.
+- [ ] 1.1 `infra/env/README.md`: a section with the snippet, placed directly before the heading
+  "node-22 unit → EnvironmentFile authority (#1694)" (after the list of published-artifact
+  variables, so that list stays where it is). The section says where `EVIDENCE_ROOT` comes from
+  (a run directory under one of the approved evidence roots the page already names), that
+  `NHMS_READONLY_DB_VALIDATION_RUN_ID` is the business run and not the evidence bundle, and that
+  the four per-source exports are optional overrides. The snippet's check of the plan's shared
+  `RUN_ID` does not move: nothing in the block uses it.
 - [ ] 1.2 `git rm` the two runbooks.
 - [ ] 1.3 The five pointer sentences and links; the two inventory mentions.
 - [ ] 1.4 Spec delta: `evidence-boundary-hardening`, one requirement removed and added under a new
@@ -23,9 +28,14 @@ that anchor on its authority heading).
   README keeps its three prose assertions.
 - [ ] 2.2 `tests/test_role_boundary_static.py`: the cleanup-snippet test walks the receipt only; the
   runbook constant goes.
-- [ ] 2.3 Red runs against the README, each restored: the `source` line moved above the mode check;
-  the validator's `--evidence-root` given the doubled form
-  `"artifacts/two-node-e2e/$EVIDENCE_RUN_ID"`; the mode check replaced by one of the weak forms.
+- [ ] 2.3 Red runs against the README, each restored, each failing on the assertion named:
+  - the `source` line moved above the mode check: the order assertion (mode check < source);
+  - only the first validator call given the doubled form
+    `--evidence-root "artifacts/two-node-e2e/$EVIDENCE_RUN_ID"`, the other call left as it is:
+    the `not in` assertion on that form;
+  - the weak line `test "$(stat -c '%a' infra/env/display-readonly-secrets.env)" = "600"` added
+    next to the real guard, the guard left intact: the `not in` assertion on that line;
+  - the `BLOCKED:` message of the mode check removed: its positive assertion.
   Red run for 2.2: one fail-closed line removed from the receipt's cleanup snippet.
 
 ## 3. Evidence

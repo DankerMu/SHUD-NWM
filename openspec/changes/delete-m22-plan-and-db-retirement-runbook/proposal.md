@@ -26,7 +26,11 @@ The owner decided on 2026-11-27 that runbooks which are history only are deleted
 - **The snippet moves to `infra/env/README.md`**, next to the paragraph that already states the
   fail-closed rule for local secret-source files. The whole block moves: the evidence-root split,
   the secret-source guard, the per-source validator loop and the merge command. Its comments are
-  written in English like the page; no command changes.
+  written in English like the page; no command changes, except that the check of the plan's
+  shared `RUN_ID` (which nothing in the block uses) stays behind. The section sits before the
+  unit-authority heading and says what the plan said around the block: where `EVIDENCE_ROOT`
+  comes from, that the validation run id is the business run, and that the per-source exports
+  are optional overrides (#2484).
 - `tests/test_readonly_db_validation_routes.py`: the two tests that read the plan read the README.
   Every assertion stays (the evidence arguments and the absence of a doubled run-id directory; the
   order create < source, mode check < source, source < validator; the fail-closed forms and the
