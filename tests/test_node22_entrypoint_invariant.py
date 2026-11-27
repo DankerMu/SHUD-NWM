@@ -19,6 +19,7 @@ from tests.node22_entrypoint_helpers import (
     NODE27_PY,
     _read,
 )
+from tests.production_ops_runbook import INDEX_PATH as PRODUCTION_OPS_INDEX
 from tests.production_ops_runbook import combined_text as production_ops_text
 from tests.production_ops_runbook import surfaces as production_ops_surfaces
 
@@ -607,3 +608,145 @@ def test_historical_and_generic_surfaces_not_overreached() -> None:
     # Historical/generic surfaces may still contain bare uv; this scan does not.
     historical = _read("docs/runbooks/forcing-copyback-backfill.md")
     assert "historical" in historical or "归档" in historical
+
+
+# --- 9. retired compute host: no command to it; the index states the hosts --
+
+
+# #3414: the original node-22 host left NWM compute on 2026-11-23 and is a
+# rollback archive only. The address itself stays legal in prose (the index
+# page names it); what may not occur is a command addressed to it. Digits and
+# dots cannot extend the match, so `210.77.77.227` / `1210.77.77.22` are other
+# hosts, while a sentence-ending full stop does not hide a hit.
+_RETIRED_HOST_ADDR = r"(?<![\d.])210\.77\.77\.22(?!\d|\.\d)"
+_RETIRED_HOST_RE = re.compile(_RETIRED_HOST_ADDR)
+# ASCII boundaries: Python counts CJK characters as `\w`, so `\bssh\b` would
+# miss `经ssh登录`.
+_REMOTE_COMMAND_RE = re.compile(r"(?<![A-Za-z0-9_])(?:ssh|scp|rsync|sftp)(?![A-Za-z0-9_])")
+# `@` directly before the address: any user name, `${USER}` included.
+_RETIRED_HOST_LOGIN_RE = re.compile("@" + _RETIRED_HOST_ADDR)
+_NODE27_SSH = "ssh -p 32099 nwm@210.77.77.27"
+
+
+def _logical_lines(text: str) -> list[tuple[int, str]]:
+    """Every line of a surface, a ``\\`` continuation joined into one command.
+
+    Fenced or not: a command can sit outside a fence, so prose is classified
+    too, line by line. Each logical line carries the number of its first line.
+    """
+    lines = text.splitlines()
+    starts = [n for n in range(1, len(lines) + 1) if n == 1 or not lines[n - 2].rstrip().endswith("\\")]
+    # strict: the continuation join and its line numbers must agree.
+    return list(zip(starts, _fence_logical(lines), strict=True))
+
+
+def _is_retired_host_command(line: str) -> bool:
+    """A line that addresses the retired host with a remote command or a login."""
+    if not _RETIRED_HOST_RE.search(line):
+        return False
+    return bool(_REMOTE_COMMAND_RE.search(line) or _RETIRED_HOST_LOGIN_RE.search(line))
+
+
+def test_retired_host_command_classifier_reads_the_literal_examples() -> None:
+    bad = (
+        "ssh -p 32099 frd_muziyao@210.77.77.22",
+        "ssh -p 32099 frd_muziyao@210.77.77.22 \\",
+        "  'squeue' # on 210.77.77.22 via ssh",
+        "rsync -a x someone@210.77.77.22:/y",
+        "scp ${USER}@210.77.77.22:/x .",
+        "sftp 210.77.77.22",
+        "经ssh登录 210.77.77.22",
+        "ssh 210.77.77.22.",
+        # A login with no command word: the `@` rule alone must catch it.
+        "git clone frd_muziyao@210.77.77.22:/repo",
+    )
+    good = (
+        "原 node-22 主机 `210.77.77.22` 已退出 NWM 计算",
+        _NODE27_SSH,
+        "210.77.77.227",
+        "1210.77.77.22",
+        "ssh -p 32099 nwm@210.77.77.227",
+        "ssh 1210.77.77.22",
+        "ssh 210.77.77.22.5",
+        "sshd 配置留在 210.77.77.22",
+    )
+    assert [line for line in bad if not _is_retired_host_command(line)] == []
+    assert [line for line in good if _is_retired_host_command(line)] == []
+    # A command continued with `\` is one command, reported by its first line.
+    assert _logical_lines("x\nssh -p 32099 \\\n  210.77.77.22 'squeue'\ny\n") == [
+        (1, "x"), (2, "ssh -p 32099 210.77.77.22 'squeue'"), (4, "y"),
+    ]
+
+
+def test_production_ops_pages_hold_no_command_to_the_retired_host() -> None:
+    scanned = [
+        (relative, lineno, line)
+        for relative in production_ops_surfaces()
+        for lineno, line in _logical_lines(_read(relative))
+    ]
+    # Vacuity guards, from what the scan actually read: a scan that reads
+    # nothing, or a classifier that matches nothing, cannot pass silently.
+    assert len({relative for relative, _, _ in scanned}) > 1, "the scan read at most one surface"
+    assert any(_NODE27_SSH in line for _, _, line in scanned), f"no `{_NODE27_SSH}` on any surface"
+    bad = [f"{relative}:{lineno}: {line}" for relative, lineno, line in scanned if _is_retired_host_command(line)]
+    assert bad == [], "command addressed to the retired host 210.77.77.22:\n" + "\n".join(bad)
+
+
+def _paragraphs_outside_blockquotes(text: str) -> list[str]:
+    """Paragraphs (consecutive non-blank lines, joined) of the page's body.
+
+    Blockquote lines and fenced blocks are dropped as breaks, so the text on
+    either side of them never fuses into one paragraph.
+    """
+    paragraphs: list[str] = []
+    current: list[str] = []
+    in_fence = False
+    for line in [*text.splitlines(), ""]:
+        stripped = line.strip()
+        fence = stripped.startswith(("```", "~~~"))
+        in_fence = in_fence != fence
+        if fence or in_fence or not stripped or stripped.startswith(">"):
+            if current:
+                paragraphs.append("".join(current))
+            current = []
+            continue
+        current.append(stripped)
+    return paragraphs
+
+
+def _names_the_compute_hosts(paragraph: str) -> bool:
+    # With backticks: the file name `w2-w3-compute-topology.md` does not count.
+    return "计算角色" in paragraph and "`w3`" in paragraph and "`w2`" in paragraph
+
+
+def _names_the_retired_host(paragraph: str) -> bool:
+    return bool(_RETIRED_HOST_RE.search(paragraph) and re.search(r"rollback\s*archive", paragraph))
+
+
+def _says_no_command_runs_on_the_retired_host(paragraph: str) -> bool:
+    return re.search(_RETIRED_HOST_ADDR + r".*不得.*执行", paragraph) is not None
+
+
+def _links_the_compute_topology(paragraph: str) -> bool:
+    return re.search(r"\]\(w2-w3-compute-topology\.md[)#]", paragraph) is not None
+
+
+def test_index_page_states_the_compute_hosts_outside_a_blockquote() -> None:
+    paragraphs = _paragraphs_outside_blockquotes(_read(PRODUCTION_OPS_INDEX))
+    # One paragraph must carry all four clauses, so that the statement stays
+    # together: each clause narrows the candidates the previous one left.
+    statement = [paragraph for paragraph in paragraphs if _names_the_compute_hosts(paragraph)]
+    assert statement, (
+        f"{PRODUCTION_OPS_INDEX}: no body paragraph names 计算角色 with the hosts `w3` and `w2`"
+    )
+    statement = [paragraph for paragraph in statement if _names_the_retired_host(paragraph)]
+    assert statement, (
+        f"{PRODUCTION_OPS_INDEX}: the host statement does not name 210.77.77.22 as a rollback archive"
+    )
+    statement = [paragraph for paragraph in statement if _says_no_command_runs_on_the_retired_host(paragraph)]
+    assert statement, (
+        f"{PRODUCTION_OPS_INDEX}: the host statement does not say that no command (不得 ... 执行) "
+        "is run on 210.77.77.22"
+    )
+    statement = [paragraph for paragraph in statement if _links_the_compute_topology(paragraph)]
+    assert statement, f"{PRODUCTION_OPS_INDEX}: the host statement does not link w2-w3-compute-topology.md"
