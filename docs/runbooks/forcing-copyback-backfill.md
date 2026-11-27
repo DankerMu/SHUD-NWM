@@ -2,14 +2,17 @@
 
 > Status: historical, not current production runbook. This document is retained
 > for audit evidence from the pre-#837 copyback period. Do not run DB-backed
-> scan steps from node-22; current production DB reads must run on node-27
-> against its local `:55432` writer/readable operational DSN. Node-22 is now
+> scan steps on the compute hosts; current production DB reads must run on node-27
+> against its local `:55432` writer/readable operational DSN. The compute role is now
 > compute/artifact producer only and may only participate in file copyback work
 > from a node-27-produced manifest or a separately approved rollback drill.
+>
+> What is live: the CLI `services/tile_publisher/forcing_copyback_backfill.py` is code under test, and
+> the capability spec `forcing-copyback-backfill` requires this operator documentation.
 
 最后更新：2026-06-16
-适用范围：历史记录。pre-#837 时该流程在 node-22 计算控制面补拷历史已发布 q_down
-run 引用的 forcing package 到 shared object-store copy root；当前不得从 node-22
+适用范围：历史记录。pre-#837 时该流程由计算角色（当时在原 node-22 主机上）补拷历史已发布 q_down
+run 引用的 forcing package 到 shared object-store copy root；当前不得在计算主机上
 执行 DB-backed scan。
 
 ## 结论
@@ -17,13 +20,13 @@ run 引用的 forcing package 到 shared object-store copy root；当前不得�
 历史默认命令只做 dry-run，不写目标目录。只有显式加 `--apply` 才会把通过校验的
 `forcing/<source>/<cycle>/<basin_version_id>/<model_id>/` 包复制到
 `NHMS_OBJECT_STORE_COPYBACK_ROOT`。这些命令保留用于解释历史证据；当前如需
-copyback，应先在 node-27 生成候选 manifest，再让 node-22 只执行文件层复制。
+copyback，应先在 node-27 生成候选 manifest，再让计算角色只执行文件层复制。
 
 该工具不修改数据库、不推进 `hydro` 或 `met` 状态；审计证据来自 stdout JSON 报告。
 
 ## 环境变量
 
-历史 pre-#837 命令曾在 node-22 checkout root 执行并加载计算控制面环境：
+历史 pre-#837 命令曾在原 node-22 主机的 checkout root 执行并加载 `infra/env/compute.host.env`：
 
 ```bash
 cd /scratch/frd_muziyao/NWM
@@ -47,7 +50,7 @@ OBJECT_STORE_PREFIX=s3://nhms
 ```
 
 `OBJECT_STORE_ROOT` 是历史 forcing package 的 staging/source root；
-`NHMS_OBJECT_STORE_COPYBACK_ROOT` 是 22 写、27 只读消费的 shared object-store copy root。
+`NHMS_OBJECT_STORE_COPYBACK_ROOT` 是计算角色写、node-27 只读消费的 shared object-store copy root。
 两者不能互相嵌套，也不能配置成同一个目录。发布时的 exact-root skip 语义不适用于本工具；
 backfill 的目标是修复 shared mirror，same-root 属于配置错误。
 
@@ -72,8 +75,9 @@ $NHMS_OBJECT_STORE_COPYBACK_ROOT/.nhms-copyback-batch.lock
   「锁文件属主 == copyback root 属主」和「当前 euid == 锁文件属主」，现网所有写者恰好
   是同一个 uid、外来 uid 又在文件创建前就被拒，两者才重合。
 - 持有者被 kill 时**本机**内核释放 flock，所以「锁文件还在」不等于「锁还被持有」。
-  但生产 copyback root 是 NFS（node-22 的 `/ghdc/data/nwm/object-store` 是
-  `ghdc:/home/ghdc` 的 NFSv4.2 挂载，2026-09-10 实测）：**进程**死立刻释放，
+  但生产 copyback root 是 NFS（2026-09-10 在原 node-22 主机上实测 `/ghdc/data/nwm/object-store` 是
+  `ghdc:/home/ghdc` 的 NFSv4.2 挂载；2026-11-27 在 `w3` 上重读，仍是 node-27 同一导出的 NFSv4.2 挂载，
+  见 [`receipts/2026-11-27-w3-env-dir-and-copyback-root.md`](receipts/2026-11-27-w3-env-dir-and-copyback-root.md)）：**进程**死立刻释放，
   **整台主机**死不会——锁由服务端持有到租约过期。因此卡住的锁有三种形态，
   只有一种该动：
   - **有活持有者**（`lsof <lock>` / `fuser -v <lock>` 打得出 pid）→ **不要动它**：
@@ -86,10 +90,11 @@ $NHMS_OBJECT_STORE_COPYBACK_ROOT/.nhms-copyback-batch.lock
     `sudo chown "$(stat -c '%u:%g' <copyback-root>)" <lock>` 无条件可用；也可以直接
     `rm -f <lock>` 让下一个写者重建——**删除权限来自 copyback root 目录的写+执行位，
     不是锁文件的属主身份**（POSIX unlink 语义），前提是这条路径上没有 sticky bit。
-    2026-09-10 node-22 实测：`/ghdc` 755 root:root、`/ghdc/data` 777 root:root、
+    2026-09-10 在原 node-22 主机上实测：`/ghdc` 755 root:root、`/ghdc/data` 777 root:root、
     `/ghdc/data/nwm` 与 `/ghdc/data/nwm/object-store` 都是 775
     `frd_muziyao`(1103):`huser`(1078)，整条链上没有 sticky bit，所以 gid 1078 的
-    任何成员都能删。若 `ls -ld` 看到 `t`，退回 `sudo chown`。
+    任何成员都能删；2026-11-27 在 `w3` 上重读，四个目录的权限和属主相同（同一份 receipt）。
+    若 `ls -ld` 看到 `t`，退回 `sudo chown`。
 - 互斥**覆盖整个 batch**：plan → copy → 每次 promote → commit 或 rollback 返回之后才释放。
   本工具在 `--apply` 下每个 package 取一次锁，且（#2236 起）这一次持锁覆盖**目标端读取**：
   目标检查、`already_present` 判定、源端校验、复制、commit/rollback 都在同一次持锁内完成；
@@ -102,12 +107,12 @@ $NHMS_OBJECT_STORE_COPYBACK_ROOT/.nhms-copyback-batch.lock
   `RunTreeCopybackError`，q_down lane 是带 `OBJECT_STORE_COPYBACK_LOCK_TIMEOUT` code 的
   `PublishError`，canonical mirror 记 `failed` receipt 后本 cycle 继续），
   **绝不降级为无锁 promote**。空值取默认；非数字或非正数是硬性配置拒绝。
-- 所有 copyback 写者必须是同一个 uid（node-22 上是 `frd_muziyao`）。`0o600` + 属主断言让
+- 所有 copyback 写者必须是同一个 uid（生产用户 `frd_muziyao`）。`0o600` + 属主断言让
   跑在别的账号下的写者 fail closed，而不是静默地不加锁运行；属主同时比对当前 euid 与
   copyback root 的属主，且外来 uid 在 `O_CREAT` 之前就被拒，所以锁文件不会被别的账号毒化。
-  跨主机时互斥靠原语选择成立：node-22（NFS client）`flock` 与 node-27（NFS server 本地）
-  POSIX 记录锁双向互斥；node-27 本地 `flock` 与 node-22 `flock` **不**互斥（2026-09-14 实测，
-  ADR 0008）。
+  跨主机时互斥靠原语选择成立：NFS client 上的 `flock` 与 node-27（NFS server 本地）
+  POSIX 记录锁双向互斥；node-27 本地 `flock` 与 NFS client 的 `flock` **不**互斥
+  （2026-09-14 在原 node-22 主机与 node-27 之间实测，ADR 0008；`w3` / `w2` 作为 client 未重测）。
 - **`NHMS_OBJECT_STORE_COPYBACK_ROOT` 必须由那个唯一的写者 uid 属主持有。** 条件是
   **uid 相等**，不是「写者能写这个 root」：属主是别的账号、只靠组位开放写的 root
   （例如容器 uid 在补充组里）会被**拒绝，而不是共享**——锁文件的属主锚定在 root 的属主上。
@@ -122,6 +127,10 @@ $NHMS_OBJECT_STORE_COPYBACK_ROOT/.nhms-copyback-batch.lock
 
 ## Dry-Run
 
+下面两条 `uv run` 命令是 pre-#837 的原文，保留不改。今天计算主机的生产 checkout 共用一个 `.venv`，
+那里**禁止** `uv sync` 与裸 `uv run`（见 [`w2-w3-compute-topology.md`](w2-w3-compute-topology.md)）；
+这个 CLI 还要求进程里有 `DATABASE_URL`，而计算角色的环境不提供它。
+
 先运行 dry-run 并保存 JSON：
 
 ```bash
@@ -130,7 +139,7 @@ uv run python -m services.tile_publisher.forcing_copyback_backfill \
 ```
 
 历史 dry-run 会扫描数据库表；当前这类 DB scan 必须改在 node-27 对 `:55432`
-执行，node-22 不再提供 `DATABASE_URL`：
+执行，计算角色的环境不提供 `DATABASE_URL`：
 
 - `hydro.hydro_run.status IN ('succeeded', 'parsed', 'published')`（与 `services/tile_publisher/forcing_copyback_backfill.py` 的查询一致；已退役的 `frequency_done` 自 `000062` 起是仅为账本收敛保留的枚举成员，从不写入，不属于候选状态）
 - `hydro.river_timeseries.variable = 'q_down'`

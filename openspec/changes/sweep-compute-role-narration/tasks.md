@@ -111,7 +111,7 @@ Minimal mergeable slice: 3.1 - three pages with no pinned sentence, no command t
   `tests/test_role_boundary_static.py` stay; the overview stays skipped by the gate, and the PR shows
   the gate's skip decision for it before and after); spec delta in the slice's own change:
   `production-topology-contract` loses the banner scenario.
-- [ ] 4.6 `forcing-copyback-backfill.md`, the other page the gate skips (`design.md` §3): narration;
+- [x] 4.6 `forcing-copyback-backfill.md`, the other page the gate skips (`design.md` §3): narration;
   one sentence added to its header that the CLI and its spec are live; the status words stay. The PR
   shows the gate's skip decision for the path before and after, and
   `tests/test_node22_entrypoint_invariant.py` green on the "historical" requirement.
