@@ -112,8 +112,10 @@ dotted name and is not part of a hyphenated longer name, the ssh alias form
 a domain name, a longer word that contains the letters and a hyphenated
 identifier that contains them are not host names.
 An English role term SHALL be matched inside one line as a whole token with the
-same boundaries: inside an identifier, a dotted name or a path it is not a name
-of the role, and a term broken across a line end is not matched. A role term and
+same boundaries: inside an identifier, a dotted name or a hyphenated longer name
+it is not a name of the role, and a term broken across a line end is not matched.
+A path segment that is exactly a term is read as the term, as a path segment
+that is exactly a host name is. A role term and
 host names joined only by the separators that join host names are one name.
 
 #### Scenario: Active node-22 DB writer assumptions are flagged
@@ -176,7 +178,7 @@ host names joined only by the separators that join host names are one name.
 #### Scenario: A role term inside a longer name is not a name of the role
 
 - **WHEN** a line names a database writer and contains the words of a role term
-  only inside an identifier, a dotted name or a path
+  only inside an identifier, a dotted name or a hyphenated longer name
 - **THEN** the guard reports no compute-role finding for it
 
 #### Scenario: A table row about node-27 is not a claim about the compute role

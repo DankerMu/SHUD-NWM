@@ -25,6 +25,7 @@ In `tests/test_entropy_audit_topology_db_boundary.py`, with its existing helpers
   - `the <r> is up` and `<r>是主库` give the codename in place of the term.
   - `<r> <h>` and `<r> <h> / <h>` give one codename; `the <r> (<h> / <h>) is up` gives two.
   - A title-case and an upper-case spelling of each English term are rewritten.
+  - A path segment that is exactly a hyphenated English term (`docs/<r>/x.md`) is rewritten.
   - Unchanged: `compute_control`, `compute-role-x`, `non-compute host`, `x.compute-host.y`,
     `scripts/compute_node/db.py`, `compute_node_count`, `compute  role` (two spaces), `computing
     role`; the existing unchanged-lines test with its input "no compute host is named here"
@@ -73,6 +74,7 @@ In `tests/test_entropy_audit_topology_db_boundary.py`, with its existing helpers
     - `#### Scenario: A database-writer claim about a <r> is flagged`
     - `#### Scenario: A local PostgreSQL of a <r> is flagged unless denied`
     - `#### Scenario: A <c> database-writer claim is flagged`
+    - one title with "Flagged" and one with "FLAGGED"
   - Findings: each of those sentences without the `#### Scenario:` prefix; `#### Scenario: The <r> is
     the active database writer` (no "flagged"); a line `The <r> is the active database writer` (no
     full stop) directly above a flagged title is a finding on its own line.

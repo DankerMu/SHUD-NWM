@@ -24,7 +24,9 @@ Must add/change:
   `host(s)` | `node(s)` (inside "control host" also one space or one hyphen), any letter case, with
   the boundaries of the host names: not next to an ASCII letter, digit or underscore, not after a
   dot or hyphen, not before a dot or hyphen plus a letter or digit. So `non-compute host`,
-  `compute_control`, `compute-role-x` and a path are not names. Chinese terms are matched as
+  `compute_control` and `compute-role-x` are not names. `/` is a separator of names (D3), as it
+  is for the host names, so a path segment that is exactly a term is read as the term: the gate
+  errs toward a finding, and no such path exists in the repository today. Chinese terms are matched as
   written (Chinese has no token boundary; a longer word that starts with one, such as "计算节点数",
   matches). A term is matched inside one physical line: the gate reads lines, and a term broken
   across a line end is not a name. The umbrella change gains the rule that rewritten prose does not
@@ -83,7 +85,8 @@ Non-goals: see the proposal.
 Review focus:
 
 1. A term cannot be laundered: no wording that is a finding with the codename passes with a term.
-2. Token boundaries: `compute_control`, paths and identifiers are not names.
+2. Token boundaries: `compute_control` and other identifiers are not names; a path segment that
+   is exactly a term is one.
 3. D4 and D5 do not open a hole: a row whose first cell is the role, or is neither node-27 nor the
    role, still yields its finding; a claim next to a scenario title still yields its finding.
 4. The new spec text is true of the code, scenario by scenario.

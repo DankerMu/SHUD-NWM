@@ -25,8 +25,9 @@ for a role term and `<h>` for a host name.
   the leg of the local-database check that #3358 added for the two hosts). The terms: "compute
   role", "compute control host", "compute host", "compute node" (singular and plural, a space or a
   hyphen between the words, any letter case), and 计算角色, 计算控制主机, 计算主机, 计算节点.
-- An English term is a whole token: not inside a longer identifier, a dotted name or a path
-  (`compute_control`, `compute-role-x`, `compute_node_count`).
+- An English term is a whole token: not inside a longer identifier, a dotted name or a
+  hyphenated longer name (`compute_control`, `compute-role-x`, `compute_node_count`). A path
+  segment that is exactly a term is read as the term, as one that is exactly a host name is.
 - A term is matched inside one line. A term and host names joined only by the separators that join
   host names today are one name.
 - A table row about node-27 is not a claim about the role: in a row whose first cell names node-27,
