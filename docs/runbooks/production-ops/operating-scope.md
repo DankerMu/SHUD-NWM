@@ -298,6 +298,7 @@ basins_hys_* 后继」**，所以 #1701 原计划的「换 id + 状态延续」�
 **手工回退办法（#2738）：直接跑发布工具。** succession 工具用不了时（例如 hard stop 之后按 runbook 手工收尾），
 同一件事可以直接用发布工具做；机制、回执与失败结局见 `recalibration-and-archive.md` 的 5.7.1。这时 timer 要
 自己停、自己恢复：apply 期间调度器 timer 应处于停止状态，两份 manifest 不一致时 worker 会拒绝 submit。
+下面这段在计算控制主机上以生产用户执行；是哪台主机、怎么进入见 [`w2-w3-compute-topology.md`](../w2-w3-compute-topology.md#1-主机与角色) §1。
 
 ```bash
 # 计算控制主机，生产用户 frd_muziyao
