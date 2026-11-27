@@ -66,7 +66,9 @@ In `tests/test_entropy_audit_topology_db_boundary.py`, with its existing helpers
     is not a finding of that leg (and the same with `<h>`).
   - The boundary rows of 2.3 with `local PostgreSQL` in place of the writer wording.
   - The other legs: `The <r> rollback mirror keeps a copy.` is not a finding.
-- [ ] 2.6 D5, for a term, for `<h>` and for the codename where the check reads it:
+- [ ] 2.6 D5. The first two titles run for a term and for `<h>`; the codename runs only in the
+  third (the writer check). The second title with the codename is read by the retired host's leg,
+  which D5 does not cover: no row asserts on it.
   - Not findings, each a line of its own:
     - `#### Scenario: A database-writer claim about a <r> is flagged`
     - `#### Scenario: A local PostgreSQL of a <r> is flagged unless denied`
@@ -77,7 +79,8 @@ In `tests/test_entropy_audit_topology_db_boundary.py`, with its existing helpers
 - [ ] 2.7 Mutations, recorded in the PR, each restored: one term removed from the pattern (its rows
   of 2.1, 2.2 and 2.4 go red); the run rule off (the `<r> <h>` rewrite row goes red); D4 off (the
   instructions row of 2.5 goes red); D5 off (the titles of 2.6 go red); D4 made unconditional (the
-  first three D4 rows of 2.4 go red).
+  D4 rows of 2.4 whose first cell is the role, is neither, or names both go red; the row with both
+  in one cell stays a finding).
 - [ ] 2.8 Every pre-existing test of `tests/test_entropy_audit_topology_db_boundary.py` and
   `tests/test_entropy_audit_topology_authority.py` passes unedited, the one named input aside.
 
