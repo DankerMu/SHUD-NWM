@@ -7,8 +7,8 @@ Define the durable record of pipeline jobs and events in the file orchestration 
 
 ### Requirement: pipeline_job Record Creation
 
-The scheduler SHALL record every stage job it submits to Slurm in the node-22
-file orchestration journal, and that journal record SHALL be the authoritative
+The scheduler SHALL record every stage job it submits to Slurm in the
+file orchestration journal of the compute role, and that journal record SHALL be the authoritative
 job record at submission. DB-free is the scheduler's only mode: no scheduler
 path builds a PostgreSQL orchestration repository or writes `ops.pipeline_job`
 (`ProductionSchedulerConfig` pins `scheduler_db_free_required` to `true`;
@@ -40,9 +40,9 @@ collection.
 
 #### Scenario: DB-free orchestrator submits a stage job
 
-- **WHEN** the DB-free node-22 Orchestrator submits a stage job
+- **WHEN** the compute role's DB-free Orchestrator submits a stage job
 - **THEN** the authoritative job record SHALL be created in the file orchestration journal with the same identity and lifecycle fields
-- **AND** `ops.pipeline_job` SHALL not be populated by the node-22 journal lane
+- **AND** `ops.pipeline_job` SHALL not be populated by the journal lane of the compute role
 - **AND** a node-27 projection SHALL be created only from the validated published job-provenance record
 - **AND** forecast-scoped rows SHALL match source, cycle, run, model, and job identity
 - **AND** cycle-scoped rows SHALL keep null `model_id` and their original cycle `run_id` rather than inherit an enclosing forecast identity
@@ -1397,7 +1397,7 @@ A terminal failure SHALL continue to emit `action=identity_mismatch_blocked`, pr
 
 ### Requirement: Expired file-journal cycles SHALL be archived only as complete, inactive, recoverable authority slices
 
-The node-22 file-journal retention entrypoint SHALL derive age from a cycle's `%Y%m%d%H` identity and SHALL use a 90-day default hot-retention window. Its candidate set SHALL be the complete union discovered from exactly the hot `latest/`, `journal/`, and `pipeline-events/` roots under one aggregate existing journal file-count bound and the existing journal depth bound. A failed root walk or exhausted bound SHALL block the entire enforce invocation rather than return a partial candidate set. For one normalized `(source_id, cycle_time)` slice it SHALL consider only that cycle's recognized `latest` views, bounded `journal` segments, and bounded `pipeline-events` segments. It SHALL NOT scan for candidates in, remove, or rewrite `pipeline-jobs`, reconcile inventory, cycle lock files, archives, or the scheduler state index.
+The file-journal retention entrypoint of the compute role SHALL derive age from a cycle's `%Y%m%d%H` identity and SHALL use a 90-day default hot-retention window. Its candidate set SHALL be the complete union discovered from exactly the hot `latest/`, `journal/`, and `pipeline-events/` roots under one aggregate existing journal file-count bound and the existing journal depth bound. A failed root walk or exhausted bound SHALL block the entire enforce invocation rather than return a partial candidate set. For one normalized `(source_id, cycle_time)` slice it SHALL consider only that cycle's recognized `latest` views, bounded `journal` segments, and bounded `pipeline-events` segments. It SHALL NOT scan for candidates in, remove, or rewrite `pipeline-jobs`, reconcile inventory, cycle lock files, archives, or the scheduler state index.
 
 Before enforcement the entrypoint SHALL validate that the configured retention window exceeds scheduler lookback plus cycle lag plus twice the largest allowed-cycle gap. It SHALL require a fresh pipeline frontier and SHALL exempt every cycle at or after a non-null active lower bound. Missing, stale, malformed, or retention-disabled frontier evidence, and invalid or missing safety-window configuration, SHALL prevent all hot-file removal rather than degrade to wall-clock deletion.
 

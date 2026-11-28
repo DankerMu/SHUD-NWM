@@ -2,24 +2,25 @@
 
 ## Purpose
 
-A stalled compute lane must announce itself. This capability governs the node-22 side of
+A stalled compute lane must announce itself. This capability governs the compute role's side of
 that: a read-only, database-free health probe that grades the DB-free scheduler's systemd
 units, its governed pass artifacts and its no-progress tracker into one verdict per tick,
 and exits non-zero for anything but healthy — the journal and a failed unit being the only
-alerting channel that host has.
+alerting signals it gives (the generic unit-failure alert of the compute control host mails a
+failed unit).
 
-It is the node-22 counterpart of `frontier-stall-alerting`, which watches node-27's
-published frontier. The two differ where their hosts differ: node-27 has a database and a
-mail lane, node-22 has neither, so this capability carries no persistent state and no
-outbound channel. Its detection-only boundary is load-bearing — the probe never starts,
+It is the compute role's counterpart of `frontier-stall-alerting`, which watches node-27's
+published frontier. The two differ where their sides differ: node-27 has a database and a
+mail lane of its own; the compute role has no database and the probe sends nothing itself, so
+this capability carries no persistent state and no outbound channel. Its detection-only boundary is load-bearing — the probe never starts,
 stops or reconfigures the lane it watches.
 
 ## Requirements
 
 ### Requirement: A stalled DB-free scheduler SHALL become a non-zero unit without anyone reading an artifact
 
-The system SHALL provide a read-only, database-free health probe for the node-22
-DB-free scheduler lane that reads the scheduler timer and service state, the
+The system SHALL provide a read-only, database-free health probe for the
+DB-free scheduler lane of the compute role that reads the scheduler timer and service state, the
 governed pass artifacts under the configured evidence root, and the no-progress
 tracker, grades them into exactly one verdict, writes a bounded receipt, and
 exits non-zero for every verdict other than healthy. The probe SHALL be
@@ -45,8 +46,8 @@ healthy verdict SHALL be reachable only when no other condition matches, and
 SHALL NOT be produced as a fallback for evidence the probe could not obtain.
 
 Each non-healthy verdict SHALL name a runbook section, both in the receipt and
-on the probe's error output, because the failed unit is what the host's
-`OnFailure=` alert lane forwards (`nhms-node22-unit-failure-alert@.service`,
+on the probe's error output, because the failed unit is what
+the compute control host's `OnFailure=` alert lane forwards (`nhms-node22-unit-failure-alert@.service`,
 with the unit's last journal lines). The receipt SHALL record every graded signal's observed
 value beside the threshold it was compared against, so the verdict can be
 re-derived from the receipt alone, and the receipt SHALL be written outside the
@@ -385,7 +386,7 @@ the coverage of the file-provider refresh units — rather than claim equivalenc
 
 ### Requirement: In-flight-held passes do not clear the stall streak
 
-The node-22 stall probe SHALL classify a pass with `submitted_count == 0`, `blocked_candidate_count == 0` and at least one skipped candidate that is not a permanent exclusion (`status` `excluded`) and whose reason is outside the scheduler's terminal skip-reason set as in-flight-held. Such a pass SHALL NOT count as progress and SHALL NOT clear the streak. When every non-neutral pass since the last progress pass is blocked or in-flight-held and that span is at least `NHMS_SCHEDULER_STALL_IN_FLIGHT_MINUTES`, the verdict SHALL be non-`ok`. The probe's terminal skip-reason set SHALL be pinned equal to the scheduler's by an automated parity test. An unknown reason, or a non-zero skipped count with a missing or malformed skipped list, SHALL be treated as in-flight. When the last progress pass lies outside the scan window the span SHALL be measured from the oldest scanned pass of the run and reported as a lower bound. The receipt SHALL carry the in-flight-held count.
+The stall probe of the compute role SHALL classify a pass with `submitted_count == 0`, `blocked_candidate_count == 0` and at least one skipped candidate that is not a permanent exclusion (`status` `excluded`) and whose reason is outside the scheduler's terminal skip-reason set as in-flight-held. Such a pass SHALL NOT count as progress and SHALL NOT clear the streak. When every non-neutral pass since the last progress pass is blocked or in-flight-held and that span is at least `NHMS_SCHEDULER_STALL_IN_FLIGHT_MINUTES`, the verdict SHALL be non-`ok`. The probe's terminal skip-reason set SHALL be pinned equal to the scheduler's by an automated parity test. An unknown reason, or a non-zero skipped count with a missing or malformed skipped list, SHALL be treated as in-flight. When the last progress pass lies outside the scan window the span SHALL be measured from the oldest scanned pass of the run and reported as a lower bound. The receipt SHALL carry the in-flight-held count.
 
 #### Scenario: All candidates skipped as active duplicates for longer than the gate
 - **WHEN** the newest passes all have zero submissions, zero blocked candidates and candidates skipped as `active_duplicate_pipeline`, and the last progress pass is older than the gate

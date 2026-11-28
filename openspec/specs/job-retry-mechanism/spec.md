@@ -2,7 +2,7 @@
 
 ## Purpose
 Define how failed pipeline jobs are retried: orchestrator-driven automatic retry with backoff, retry scope and
-guards, permanent-failure marking, audit evidence, and the node-22 manual-repair marker lane that lets the scheduler
+guards, permanent-failure marking, audit evidence, and the manual-repair marker lane of the compute role that lets the scheduler
 mint a retry.
 
 ## Requirements
@@ -2569,7 +2569,7 @@ The file journal's query entrypoints synthesise one row for a refused read, mark
 
 Two retry-lane consumers SHALL identify that row by the `file_journal.status == "blocked"` marker — never by comparing `job_id`, and never by the status literal where the marker is available — and SHALL refuse with the lane's stable classified error carrying the journal's `reason` and `field`. Neither of them SHALL translate the row into a claim about the run or the job — neither "this run has nothing to retry", nor a retry/permanent-failure classification, nor an identity fault.
 
-The two are: the manual-retry source selector (shared by the node-22 manual-repair marker lane `FileJournalRetryService.record_manual_repair`) and the chain stage-result retry classifier, the latter refusing with a classified `FILE_JOURNAL_READ_BLOCKED` error rather than by returning no decision. Downstream consumers reached only through those entries keep their existing indirect fail-closed behaviour and are out of scope. A consumer reading a mapping that carries no `file_journal` marker SHALL treat it as a normal row. Operator entrypoints built on the manual-retry source selector SHALL report the refusal as a decidable receipt outcome rather than an uncaught error.
+The two are: the manual-retry source selector (shared by the manual-repair marker lane of the compute role, `FileJournalRetryService.record_manual_repair`) and the chain stage-result retry classifier, the latter refusing with a classified `FILE_JOURNAL_READ_BLOCKED` error rather than by returning no decision. Downstream consumers reached only through those entries keep their existing indirect fail-closed behaviour and are out of scope. A consumer reading a mapping that carries no `file_journal` marker SHALL treat it as a normal row. Operator entrypoints built on the manual-retry source selector SHALL report the refusal as a decidable receipt outcome rather than an uncaught error.
 
 #### Scenario: Manual-retry source selection on an unreadable by-run read
 
@@ -2598,7 +2598,7 @@ The two are: the manual-retry source selector (shared by the node-22 manual-repa
 
 #### Scenario: The operator CLI reports the refusal as a receipt outcome
 
-- **WHEN** the node-22 manual-retry operator entrypoint previews a run whose by-run read is refused
+- **WHEN** the manual-retry operator entrypoint of the compute role previews a run whose by-run read is refused
 - **THEN** it SHALL emit a refused decision naming the journal read as the reason, with the journal `reason` and `field`, and SHALL NOT terminate with an uncaught error or a "no retryable failed job" verdict
 
 #### Scenario: The blocked row keeps its load-bearing guards
@@ -2693,7 +2693,7 @@ evidence renderer: secrets become `[redacted]`, absolute local paths `[local-pat
 
 ### Requirement: DB-free scheduler retry manifests preserve runtime mode
 
-Scheduler retry submissions for node-22 DB-free scheduler operation SHALL preserve the
+Scheduler retry submissions for the compute role's DB-free scheduler operation SHALL preserve the
 same runtime repository and backend selectors as initial scheduler submissions.
 
 #### Scenario: automatic forecast retry runs without database url
@@ -2722,7 +2722,7 @@ same runtime repository and backend selectors as initial scheduler submissions.
 #### Scenario: operator repairs one exact cycle from verified raw input
 
 - **GIVEN** the default missing-forcing policy remains fail-closed
-- **AND** node-22 production requires direct-grid forcing
+- **AND** the compute role's production requires direct-grid forcing
 - **AND** the node-27 NFS raw manifest and all referenced raw files are present,
   ready, and match the requested source and exact cycle
 - **AND** the manifest payload URI exactly equals the configured canonical
@@ -2792,7 +2792,7 @@ same runtime repository and backend selectors as initial scheduler submissions.
 
 #### Scenario: DB-free deployment supplies trusted raw authority
 
-- **WHEN** an operator provisions node-22 from
+- **WHEN** an operator provisions the compute control host from
   `infra/env/compute.scheduler-dbfree.env.example` and the documented exact-cycle
   wrapper
 - **THEN** the runtime SHALL receive the explicit trusted raw root
@@ -2802,7 +2802,7 @@ same runtime repository and backend selectors as initial scheduler submissions.
 - **AND** the root SHALL be allow-listed and use the existing canonical shared-
   NFS copyback mount rather than a duplicate mount declaration
 - **AND** runtime preflight SHALL bind both the resolved trusted raw root and
-  resolved copyback authority to the fixed node-22 topology identity
+  resolved copyback authority to the fixed topology identity of the compute hosts
   `/ghdc/data/nwm/object-store`, as well as require them to equal each other, so
   rebinding both mutable values to an arbitrary readable allow-listed staging
   root cannot authorize repair

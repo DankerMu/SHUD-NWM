@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The node-22 file-provider refresh lane republishes, database-free, the scheduler registry, its worker mirror, the readiness index and the state index. This spec is the contract for that lane:
+The file-provider refresh lane of the compute role republishes, database-free, the scheduler registry, its worker mirror, the readiness index and the state index. This spec is the contract for that lane:
 
 - the refresh runner's provider transactions and rollbacks, and the receipts it writes (primary, emergency and history), including what their `after_*` evidence may claim;
 - the cutover-gate audit and the classification modes;
@@ -505,8 +505,8 @@ privileges nor timestamp granularity.
 
 ### Requirement: The refresh timer's liveness is observable from independent signals before the freshness bound expires
 
-The system SHALL provide a read-only, database-free health probe for the node-22
-file-provider refresh lane that records the timer's unit-file state, active
+The system SHALL provide a read-only, database-free health probe for the
+file-provider refresh lane of the compute role that records the timer's unit-file state, active
 state, next-elapse time, and the published manifest's age as four independent
 signals, grades them into exactly one verdict, writes a bounded receipt, and
 exits non-zero for every verdict other than healthy. The verdicts SHALL be
@@ -678,14 +678,14 @@ write any file under the provider store.
 
 ### Requirement: The tracked DB-free scheduler env template carries every key the documentation declares mandatory
 
-The tracked template for the node-22 database-free scheduler environment SHALL
+The tracked template for the compute role's database-free scheduler environment SHALL
 contain every environment key that the environment documentation declares
 mandatory for that lane, including the orchestrator terminal stage that stops
 the chain before the database-dependent publish stage.
 
 #### Scenario: A node rebuilt from the template stops at the documented terminal stage
 
-- **WHEN** the node-22 database-free scheduler environment is rebuilt from its
+- **WHEN** the compute role's database-free scheduler environment is rebuilt from its
   single tracked template
 - **THEN** the template sets the orchestrator terminal stage to
   `forecast_state_save_qc` and requires forecast warm start
@@ -733,7 +733,7 @@ gate SHALL retain its own failure reason.
 
 ### Requirement: The refresh installer backs out every failure once, reads the result back, and never rewrites its restore baseline
 
-The node-22 file-provider refresh installer SHALL run under `errtrace`. Every
+The file-provider refresh installer of the compute role SHALL run under `errtrace`. Every
 failure after its first mutation SHALL run exactly one restore handler, and
 only in the installer's main shell. That handler SHALL attempt every restore
 step whatever the earlier steps did, SHALL always finish with read-back
@@ -974,8 +974,8 @@ state index without a database fallback or timestamp-only edit.
 
 ### Requirement: Refresh execution is bounded database-free and auditable
 
-The service SHALL use only trusted node-22 repository/Basins/object-store/file-
-provider paths and SHALL emit a bounded receipt without secrets.
+The service SHALL use only trusted repository/Basins/object-store/file-
+provider paths of the compute hosts and SHALL emit a bounded receipt without secrets.
 
 #### Scenario: Effective service environment is database-free
 
@@ -1037,7 +1037,7 @@ whose cadence plus jitter is strictly below 168 hours.
 #### Scenario: Static unit contract is valid
 
 - **WHEN** unit/env static tests run
-- **THEN** the service uses absolute node-22 repo/interpreter paths, the mode-
+- **THEN** the service uses absolute repo/interpreter paths of the compute hosts, the mode-
   0600 DB-free env, private lock/work/receipt locations, journal output and a
   bounded timeout
 - **AND** it rejects/unsets the complete libpq connection environment surface,
@@ -1228,7 +1228,7 @@ previous canonical registry and the prospective registry.
 
 ### Requirement: Every scheduler file-provider writer participates in one fail-safe transaction
 
-The system SHALL refresh every node-22 provider before its 168-hour consumer
+The system SHALL refresh every provider of the compute role before its 168-hour consumer
 limit and SHALL serialize canonical destination replacement on the
 destination-derived lock across refresh, manual, readiness, and state
 writers, with an expected-preimage check populated only by the refresh

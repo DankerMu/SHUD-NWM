@@ -20,8 +20,8 @@ the shared NFS object-store.
 - **THEN** it validates writer `DATABASE_URL`, `OBJECT_STORE_ROOT`,
   `WORKSPACE_ROOT`, GRIB toolchain availability, source cycle-hour config,
   bbox config, lock path, and log/evidence roots before downloading
-- **AND** it rejects display_readonly-like credentials and node-22 historical
-  PostgreSQL endpoints such as `:55433`
+- **AND** it rejects display_readonly-like credentials and historical PostgreSQL
+  endpoints of the retired node-22 host such as `:55433`
 - **AND** failure output redacts credentials and exits before partial DB or
   object-store mutation.
 
@@ -39,8 +39,8 @@ the shared NFS object-store.
 - **WHEN** a GFS or IFS source cycle is downloaded in production
 - **THEN** raw source-cycle state and manifest identity are written to node-27
   active PostgreSQL
-- **AND** node-22 historical PostgreSQL is not read or written for source-cycle
-  truth
+- **AND** the historical PostgreSQL of the retired node-22 host is not read or
+  written for source-cycle truth
 - **AND** re-running the same cycle is idempotent and does not corrupt existing
   raw manifest identity.
 
@@ -51,12 +51,12 @@ the shared NFS object-store.
   corresponding to `raw/<source>/<cycle>/manifest.json`
 - **AND** every referenced local raw file exists, is regular, and is non-empty
 - **AND** the manifest source, cycle, and URI suffix match the cycle that
-  node-22 scheduler will evaluate.
+  the compute role's scheduler will evaluate.
 
 ### Requirement: Node-27 production pass drives allowed cycles
 
 The system SHALL provide a bounded production pass that selects allowed GFS/IFS
-business cycles on node-27 and hands completed raw cycles to node-22 scheduler
+business cycles on node-27 and hands completed raw cycles to the compute role's scheduler
 through the shared NFS manifest contract.
 
 #### Scenario: Allowed-cycle selection remains explicit
@@ -69,11 +69,11 @@ through the shared NFS manifest contract.
 #### Scenario: Public display advances from node-27-downloaded raw cycles
 
 - **WHEN** a new production GFS or IFS cycle is downloaded by node-27
-- **THEN** node-22 scheduler observes the raw manifest on NFS before starting
+- **THEN** the compute role's scheduler observes the raw manifest on NFS before starting
   downstream compute
 - **AND** subsequent compute/ingest/display evidence uses the same
   source/cycle/run identity
-- **AND** public latest-product endpoints can advance without node-22 performing
+- **AND** public latest-product endpoints can advance without the compute role performing
   a production download for that cycle.
 
 ### Requirement: Automatic cycle selection re-drives incomplete cycles and serves the latest allowed cycle first

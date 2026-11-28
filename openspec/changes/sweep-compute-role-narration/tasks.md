@@ -226,12 +226,13 @@ the titles `appendix-titles.md` assigns to it, edits Purpose lines directly at a
   touched, and the specs named after the codename (`node22-db-retirement-cutover`,
   `node22-dbfree-runtime`, `node22-env-hygiene`, `node22-unit-failure-alert`,
   `slurm-gateway-node22-deployment`): statements about the retired host get the retired-host phrase.
-- [ ] 10.3 The scheduler and pipeline specs with several mentions (`production-scheduler-orchestration`,
+- [x] 10.3 The scheduler and pipeline specs with several mentions (`production-scheduler-orchestration`,
   `compute-scheduler-operationalization`, `scheduler-registry-refresh`, `job-retry-mechanism`,
   `node27-download-orchestration`, `scheduler-stall-alerting`, `variant-activation-cutover`,
   `canonical-precip-copyback`, `basin-retirement`, `forcing-domain-handoff`,
-  `pipeline-job-persistence`). **Stop: needs the owner's decision on the active change
-  `fix-node22-keliya-forecast-output-recompute`** (`design.md` §6).
+  `pipeline-job-persistence`). The owner's decision on the active change
+  `fix-node22-keliya-forecast-output-recompute` (`design.md` §6) was given on 2026-11-28: it is
+  removed in this slice.
 
 Suggested fixture level: none - spec text; no code, no test expectation changes.
 Minimal mergeable slice: 10.1 - one or two sentences per spec, and no spec in it is owned by another task; 10.2 depends on 3.6 and 4.5 (the same two contract specs); 10.3 is independent of both.
