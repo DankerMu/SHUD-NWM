@@ -3,7 +3,7 @@
 ## Purpose
 Specify how a model variant becomes the active model for its basin:
 - activation reuses the single-transaction lifecycle and runs no pre-activation hook (retired by #3189);
-- a lifecycle transition publishes nothing to the scheduler file plane; the node-22 file-provider refresh lane republishes it (post-commit publishers retired by #3204);
+- a lifecycle transition publishes nothing to the scheduler file plane; the file-provider refresh lane of the compute role republishes it (post-commit publishers retired by #3204);
 - a superseded model permanently leaves the dispatch candidate set.
 
 ## Requirements
@@ -54,18 +54,18 @@ The system SHALL exclude a `superseded` model from the scheduler dispatch candid
 
 ### Requirement: A model lifecycle transition SHALL NOT publish the scheduler file plane
 
-The DB model lifecycle operation SHALL publish nothing to the node-22 scheduler file plane: neither the registry manifest
-nor the state index, on any outcome. A committed transition alone therefore does not change node-22's dispatch set.
+The DB model lifecycle operation SHALL publish nothing to the compute role's scheduler file plane: neither the registry manifest
+nor the state index, on any outcome. A committed transition alone therefore does not change the compute role's dispatch set.
 
-node-22's registry manifest, and so its dispatch set, changes only through the operator procedure in
+The compute role's registry manifest, and so its dispatch set, changes only through the operator procedure in
 `docs/runbooks/production-ops/recalibration-and-archive.md`:
 - node-27 `scripts/provision_direct_grid_scheduler_registry.py` writes the DB rows and a staging registry, never the
   canonical manifest;
-- node-22 `scripts/node22_model_succession.py` runs the steps of its `--kind`: `recalibration`, `cold_start`,
+- on the compute control host, `scripts/node22_model_succession.py` runs the steps of its `--kind`: `recalibration`, `cold_start`,
   `add_basin` or `remove_basin` (runbook §5.7–§5.7.4);
 - the merged publish goes through `scripts/node22_publish_merged_scheduler_registry.py`.
 
-The node-22 scheduler and its refresh timer keep maintaining the state index themselves; that is unrelated to the
+The compute role's scheduler and its refresh timer keep maintaining the state index themselves; that is unrelated to the
 lifecycle operation.
 
 #### Scenario: A committed activation publishes nothing

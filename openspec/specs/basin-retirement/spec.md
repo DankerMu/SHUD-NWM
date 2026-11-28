@@ -1,7 +1,7 @@
 # basin-retirement Specification
 
 ## Purpose
-The node-27 tool that retires a basin version after its models were removed from the scheduler on node-22:
+The node-27 tool that retires a basin version after its models were removed from the compute role's scheduler:
 it adds the basin to the autopipe exclusion list, marks the basin version's displayable runs superseded,
 deactivates its model rows and verifies that an autopipe round did not revert any of it, each step gated on
 the receipt of the one before.
@@ -13,13 +13,13 @@ the receipt of the one before.
 The node-27 basin retirement tool SHALL run the steps `exclude`, `supersede`, `deactivate`, `verify` in that
 order for one basin version per run, SHALL write one receipt per completed step into a directory of that
 basin version under the succession, and MUST refuse a step whose preceding step has no receipt. It MUST
-refuse to run any step unless the node-22 succession of the same id has finished with kind `remove_basin`,
+refuse to run any step unless the compute role's succession of the same id has finished with kind `remove_basin`,
 the plan removed at least one model of the basin version, and the canonical scheduler manifest holds no row
 of the basin: neither of the basin version nor of any other version of the same basin.
 
 #### Scenario: Full retirement
 
-- **WHEN** the tool is applied for a basin version whose node-22 removal has finished
+- **WHEN** the tool is applied for a basin version whose removal from the compute role's scheduler has finished
 - **THEN** the four step receipts are written in order
 - **AND** the basin key is in `AUTOPIPE_EXCLUDE_BASINS`, the runs of the basin version in `succeeded`,
   `parsed` or `published` are `superseded`, and no `core.model_instance` row of it is active

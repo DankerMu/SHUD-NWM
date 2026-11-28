@@ -1,9 +1,9 @@
 # compute-scheduler-operationalization Specification
 
 ## Purpose
-Specify how the node-22 compute scheduler is run in production: the runtime environment defaults it honors, the
+Specify how the compute role's scheduler is run in production: the runtime environment defaults it honors, the
 business-runnable scheduler commands, the end-to-end automation evidence it must produce, which environment files
-and tracked templates are authoritative for each node-22 unit (including the Slurm private-lane keys a rebuilt env
+and tracked templates are authoritative for each unit of the compute role (including the Slurm private-lane keys a rebuilt env
 must carry), and how the exact-cycle wrapper serializes with the scheduler timer.
 
 ## Requirements
@@ -42,8 +42,8 @@ The production scheduler CLI SHALL use configured runtime roots and evidence pat
 - **WHEN** workspace, object-store, published, lock, or evidence roots are missing or unwritable
 - **THEN** scheduler preflight reports a blocker before download, Slurm, SHUD, hydro, or publish mutation.
 
-### Requirement: Node-22 end-to-end automation evidence
-The system SHALL provide automated tests or commands that prove node-22 QHH business flow from fresh forecast to published results.
+### Requirement: End-to-end automation evidence of the compute role
+The system SHALL provide automated tests or commands that prove the compute role's QHH business flow from fresh forecast to published results.
 
 #### Scenario: Live E2E pass
 - **WHEN** live forecast source, QHH bootstrap, real SHUD, Slurm, DB, workspace, and published root are all available
@@ -58,9 +58,9 @@ The system SHALL provide automated tests or commands that prove node-22 QHH busi
 #### Scenario: Deterministic tests cannot claim live readiness
 - **WHEN** deterministic fixtures or mocked gateways are used in CI
 - **THEN** tests can validate contracts and state transitions
-- **AND** final node-22 business automation readiness remains false until accepted live receipts exist.
+- **AND** final business automation readiness of the compute role remains false until accepted live receipts exist.
 
-### Requirement: Node-22 exact-cycle wrapper serializes with the scheduler timer
+### Requirement: The exact-cycle wrapper serializes with the scheduler timer
 
 `scripts/ops/node22-run-cycle-once.sh` SHALL run with the same environment the `nhms-compute-scheduler.service` unit loads: the scheduler env file, the Slurm gateway secret env file (default path identical to the tracked drop-in), and `NHMS_PYTHON_VENV_BIN`.
 
@@ -110,7 +110,7 @@ SHALL say so.
 
 ### Requirement: The compute units' environment-file authority is documented
 
-`infra/env/README.md` SHALL carry a table mapping every node-22 user systemd unit (`nhms-compute-scheduler`,
+`infra/env/README.md` SHALL carry a table mapping every user systemd unit of the compute role (`nhms-compute-scheduler`,
 `nhms-scheduler-evidence-retention`, `nhms-scheduler-file-provider-refresh`, `nhms-slurm-gateway`)
 to the EnvironmentFile(s) it loads and to the tracked template for each, marking `compute.host.env` as untracked with
 no template, and SHALL state that an `infra/env/compute.env` still present on the host is a leftover of the retired

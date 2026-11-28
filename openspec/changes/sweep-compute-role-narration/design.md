@@ -21,7 +21,7 @@
   ones are reported per PR).
 - `openspec/changes/fix-node22-keliya-forecast-output-recompute/`: an active change that its own
   tasks call superseded. It is not a runbook and is outside the deletion decision; whether it is
-  removed is the owner's call, asked separately.
+  removed is the owner's call, asked separately. (Decided on 2026-11-28: removed in slice 10.3.)
 - `docs/runbooks/feat-reach-geom-oq-findings.md`, `docs/runbooks/reach-geom-rollout-receipt.md` and
   `docs/governance/GOVERNANCE_8_FINAL_EVIDENCE_MAP.md`: historical with no inbound reference, and
   they do not concern the compute role. Reported to the owner, not deleted here.
@@ -292,7 +292,7 @@ file:
 | 7.2 | 6.2 | the script header comments |
 | 8.3 | 8.1, 8.2 | deploys both |
 | 10.2 | 3.6, 4.5 | `production-topology-contract`, `production-ops-readiness` |
-| 10.3 | the owner's decision on `fix-node22-keliya-forecast-output-recompute` | that change holds a MODIFIED block of "Backend scheduler entrypoint", which 10.3 rewrites; archived later, it would put the old text back |
+| 10.3 | the owner's decision on `fix-node22-keliya-forecast-output-recompute` (given on 2026-11-28: removed in 10.3) | that change holds a MODIFIED block of "Backend scheduler entrypoint", which 10.3 rewrites; archived later, it would put the old text back |
 | 11.1 | every other task | leftover literals |
 
 Tasks not named in the left column (3.1, 3.2, 3.3, 4.1, 4.6, 5.1, 7.1, 8.1, 8.2, 9.1, 9.2, 10.1)
@@ -318,7 +318,8 @@ the exclusions), so no two slices generate a block for the same requirement from
   change is not archived before that receipt and the receipt of 9.2 exist.
 - Until this change is archived, the 13 bare lines of the other active change
   (`fix-node22-keliya-forecast-output-recompute`) are that change's own text. They are reported in
-  the final residue with the owner's decision on it.
+  the final residue with the owner's decision on it. (Removed in slice 10.3 on the owner's decision
+  of 2026-11-28; the lines went with it.)
 
 ## Sketch seams under test
 

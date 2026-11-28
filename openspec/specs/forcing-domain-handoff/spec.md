@@ -9,7 +9,7 @@ TBD - created by archiving change stabilize-data-compute-plane-handoff. Update P
 
 The system SHALL define an object-store forcing-domain handoff that contains
 enough identity and payload metadata for node-27 ingest to reconstruct display
-forcing readiness without querying an active node-22 database. The handoff MUST
+forcing readiness without querying the database of the retired node-22 host. The handoff MUST
 include or reference `source_id`, `cycle_time`, `start_time`, `end_time`,
 `run_id`, `model_id`, `basin_id`, `basin_version_id`, `forcing_version_id`,
 package directory URI, canonical forcing package manifest URI/checksum,
@@ -95,12 +95,12 @@ evidence.
   readiness receipts
 - **AND** each receipt identifies the evidence path, basin/model/run identity,
   source/cycle, forcing handoff mode, and row-count summary without secrets
-- **AND** the receipt proves readiness did not depend on implicit node-22 DB
-  access or `infra/env/display.env` mirror fallback
+- **AND** the receipt proves readiness did not depend on implicit access to the DB of
+  the retired node-22 host or on `infra/env/display.env` mirror fallback
 
 ### Requirement: Archived/stopped compatibility-only node-22 rollback mirror is explicit-DSN, allow-flagged, and sunset/removal-bound
 
-The system SHALL keep any archived node-22 rollback forcing mirror path
+The system SHALL keep any archived rollback forcing mirror path of the retired node-22 host
 explicit-DSN through `N22_DSN` or owner-only file indirection, archived-rollback
 allow-flagged, audited, compatibility-only, archived/stopped, sunset-bound, and
 limited to operator-controlled compatibility runs until removal.
