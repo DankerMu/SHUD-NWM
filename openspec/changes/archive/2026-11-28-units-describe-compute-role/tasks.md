@@ -12,32 +12,32 @@
 
 ## 1. Repository
 
-- [ ] 1.1 `Description=` of the 16 units and the nine comment lines (`design.md` D1).
-- [ ] 1.2 The example unit `infra/systemd/nhms-slurm-gateway.service` (D1).
-- [ ] 1.3 `infra/systemd/node22/MANIFEST.json`: 17 sha256 values (D2).
-- [ ] 1.4 `tests/test_node22_unit_tracking.py`: the third receipt and the rule of D3 as module-level
+- [x] 1.1 `Description=` of the 16 units and the nine comment lines (`design.md` D1).
+- [x] 1.2 The example unit `infra/systemd/nhms-slurm-gateway.service` (D1).
+- [x] 1.3 `infra/systemd/node22/MANIFEST.json`: 17 sha256 values (D2).
+- [x] 1.4 `tests/test_node22_unit_tracking.py`: the third receipt and the rule of D3 as module-level
   functions with synthetic cases; the module docstring (it says "the two receipts (which do not
   overlap)"); the test `test_the_two_receipts_record_disjoint_sets_…` renamed to what it now
   asserts; the `test_node22_*` names kept; the red runs R1 to R7.
-- [ ] 1.5 The spec delta of `node22-unit-tracking` (D6).
-- [ ] 1.6 `infra/env/README.md`: the sentence that names the receipts (D7).
+- [x] 1.5 The spec delta of `node22-unit-tracking` (D6).
+- [x] 1.6 `infra/env/README.md`: the sentence that names the receipts (D7).
 
 ## 2. Host step and receipt
 
-- [ ] 2.1 Before the host step, on the commit that holds the 17 files (D4): the hard-gate
+- [x] 2.1 Before the host step, on the commit that holds the 17 files (D4): the hard-gate
   comparison; the tests of the Evidence Floor green locally and on node-27; the review; CI green
   on the PR.
-- [ ] 2.2 The host step of D4, at a scheduler pass boundary.
-- [ ] 2.3 `docs/runbooks/receipts/2026-11-28-w3-scheduler-and-gateway-units-snapshot.md` with the
+- [x] 2.2 The host step of D4, at a scheduler pass boundary.
+- [x] 2.3 `docs/runbooks/receipts/2026-11-28-w3-scheduler-and-gateway-units-snapshot.md` with the
   values read on the host (exactly two rows of the parsed shape).
-- [ ] 2.4 `docs/runbooks/receipts/2026-11-28-issue-3427-unit-descriptions-redeployed.md`: the
+- [x] 2.4 `docs/runbooks/receipts/2026-11-28-issue-3427-unit-descriptions-redeployed.md`: the
   operator receipt of the host step (D8).
 
 ## 3. Archive
 
-- [ ] 3.1 The change archived in the PR's last push; the Purpose line edited; the main spec compared
+- [x] 3.1 The change archived in the PR's last push; the Purpose line edited; the main spec compared
   with its expectation.
-- [ ] 3.2 Task 9.2 ticked in `openspec/changes/sweep-compute-role-narration/tasks.md`.
+- [x] 3.2 Task 9.2 ticked in `openspec/changes/sweep-compute-role-narration/tasks.md`.
 
 ## Evidence Floor
 

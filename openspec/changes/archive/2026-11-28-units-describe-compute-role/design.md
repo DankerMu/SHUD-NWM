@@ -124,7 +124,8 @@ removed from the new receipt: the rule on what the latest receipt records fails.
    activating (the refresh oneshot can wait for a pass for hours), re-checked right before the
    install. The gateway service stays running throughout.
    1. drift probe with the production checkout's manifest: every entry `same`, nothing untracked,
-      exit 0. Anything else stops the step. (Read before the slice, 2026-11-28: the 24 installed
+      exit 0. Anything else stops the step. The user units in the failed state are read as the
+      baseline of 2.7 and recorded. (Read before the slice, 2026-11-28: the 24 installed
       files equal master's manifest, and `infra/systemd` does not differ between the production
       checkout's commit and master. The install so carries the text of this slice and nothing
       else.)
@@ -144,8 +145,9 @@ removed from the new receipt: the rule on what the latest receipt records fails.
    5. drift probe with the PR's manifest (run from the export): every entry `same`, nothing
       untracked, exit 0;
    6. the two units of `node22/` are read back (sha256, size, mode, mtime) for the receipt;
-   7. the timers that were active before are active, the gateway answers its health request, no
-      user unit is in the failed state, and `systemctl --user show -p Description` gives the new
+   7. the timers that were active before are active, the gateway answers its health request and
+      is the same process as before, no user unit is in the failed state that was not in it
+      before the step (a unit that had failed earlier is recorded, not a reason to roll back), and `systemctl --user show -p Description` gives the new
       text for a sample of units.
 3. The draft receipt is completed with the values read in 2.6. If a value differs from the tracked
    file, the slice stops: the installed copy is not what the repository tracks.
@@ -205,8 +207,8 @@ expectation after the archive, as in slice 10.1.
 No `name` token of the counter moves: the unit names, script names and the manifest path are
 untouched; the test keeps its `test_node22_*` names and its new code uses no additional occurrence
 of a name that carries the codename; the receipts lie under `docs/runbooks/receipts/`, which the
-counter treats as history. In the plain table the `bare` column of `infra/` and of
-`openspec/specs/` falls, and the `name` and `quoted` columns rise by the lines that keep a name
+counter treats as history. In the plain table the `bare` column of `infra/`, of `tests/` (one
+docstring line of the tracking test) and of `openspec/specs/` falls, and the `name` and `quoted` columns rise by the lines that keep a name
 next to the rewritten words (the alert template's opening comment keeps
 `node22-config-hygiene`; the tracking requirement keeps `infra/systemd/node22/`). The sentences
 that now say "the retired node-22 host" stay bare: one in each of the three namespace comments and
