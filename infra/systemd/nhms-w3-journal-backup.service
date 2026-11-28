@@ -1,6 +1,7 @@
 [Unit]
 Description=w3: mirror the scheduler journal to NFS operator-archives (disaster-recovery copy)
-# a failed copy mails the operator, like the other node-22 oneshots (#3359)
+# a failed copy mails the operator, like the other oneshots of
+# the compute role (#3359)
 OnFailure=nhms-node22-unit-failure-alert@%n.service
 [Service]
 Type=oneshot

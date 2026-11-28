@@ -1,5 +1,5 @@
 [Unit]
-Description=NHMS production scheduler one bounded continuous pass (node 22 user)
+Description=NHMS production scheduler one bounded continuous pass (compute role user)
 After=nhms-slurm-gateway.service
 Wants=nhms-slurm-gateway.service
 

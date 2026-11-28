@@ -1,5 +1,5 @@
 [Unit]
-Description=Hourly health probe for the NHMS node-22 file-provider refresh lane
+Description=Hourly health probe for the NHMS compute file-provider refresh lane
 
 [Timer]
 OnCalendar=hourly

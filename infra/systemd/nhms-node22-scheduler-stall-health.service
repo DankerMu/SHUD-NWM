@@ -1,5 +1,5 @@
 [Unit]
-Description=NHMS node-22 DB-free scheduler stall health probe (read-only)
+Description=NHMS compute DB-free scheduler stall health probe (read-only)
 # This unit deliberately declares NO relationship to
 # nhms-compute-scheduler.timer / nhms-compute-scheduler.service: no Wants=,
 # After=, Requires=, Before=, BindsTo= or PartOf=. The watcher queries the
@@ -12,12 +12,12 @@ Type=oneshot
 WorkingDirectory=/scratch/frd_muziyao/NWM
 Environment=PATH=/scratch/frd_muziyao/NWM/.venv/bin:/usr/local/bin:/usr/bin:/bin
 UnsetEnvironment=DATABASE_URL PIPELINE_DATABASE_URL PGAPPNAME PGCHANNELBINDING PGCLIENTENCODING PGCONNECT_TIMEOUT PGDATABASE PGDATESTYLE PGGEQO PGGSSDELEGATION PGGSSENCMODE PGGSSLIB PGHOST PGHOSTADDR PGKRBSRVNAME PGLOADBALANCEHOSTS PGLOCALEDIR PGMAXPROTOCOLVERSION PGMINPROTOCOLVERSION PGOPTIONS PGPASSFILE PGPASSWORD PGPORT PGREQUIREAUTH PGREQUIREPEER PGREQUIRESSL PGSERVICE PGSERVICEFILE PGSSLCERT PGSSLCERTMODE PGSSLCOMPRESSION PGSSLCRL PGSSLCRLDIR PGSSLKEY PGSSLMAXPROTOCOLVERSION PGSSLMINPROTOCOLVERSION PGSSLMODE PGSSLNEGOTIATION PGSSLROOTCERT PGSSLSNI PGSSL_CERT_FILE PGSSL_KEY_FILE PGSSL_ROOT_CERT_FILE PGSYSCONFDIR PGTARGETSESSIONATTRS PGTZ PGUSER
-# node-22 reaches no live database and this probe requires none; the libpq
-# selector set above is cleared as defence in depth, same list as the
+# The compute role reaches no live database and this probe requires none; the
+# libpq selector set above is cleared as defence in depth, same list as the
 # file-provider refresh probe unit.
 #
 # Every threshold, unit name and path is env-overridable, but this unit ships
-# NO EnvironmentFile on purpose: the shipped defaults ARE the node-22
+# NO EnvironmentFile on purpose: the shipped defaults ARE the compute role's
 # production values, and an env file would be one more untracked surface that
 # can silently relax an alert threshold. To retune, drop in
 #   ~/.config/systemd/user/nhms-node22-scheduler-stall-health.service.d/10-thresholds.conf
@@ -27,11 +27,11 @@ UnsetEnvironment=DATABASE_URL PIPELINE_DATABASE_URL PGAPPNAME PGCHANNELBINDING P
 ExecStart=/scratch/frd_muziyao/NWM/.venv/bin/python /scratch/frd_muziyao/NWM/scripts/node22_scheduler_stall_health.py
 StandardOutput=journal
 StandardError=journal
-# The same node-22 namespace constraint the refresh units document:
-# user-systemd makes the filesystem root inaccessible inside a PrivateTmp
-# mount namespace, and this probe's no-follow reads open absolute paths under
-# /scratch. So no PrivateTmp here either; privacy is carried by UMask plus the
-# mode-0700 receipt root the probe creates for itself.
+# For the reason the refresh units record (on the retired node-22 host,
+# user-systemd made the filesystem root inaccessible inside a PrivateTmp mount
+# namespace), and because this probe's no-follow reads open absolute paths
+# under /scratch, this unit does not use PrivateTmp either; privacy is carried
+# by UMask plus the mode-0700 receipt root the probe creates for itself.
 UMask=0077
 # A wedged watchdog must become visible rather than hang: the probe issues two
 # bounded read-only systemctl queries, one bounded directory enumeration and

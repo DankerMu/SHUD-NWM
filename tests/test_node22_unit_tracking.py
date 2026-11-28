@@ -5,15 +5,22 @@ recorded in the read-only receipt
 `docs/runbooks/receipts/2026-10-16-node22-live-units-snapshot.md` and, since
 #3359, the gateway's `20-runtime-path.conf` drop-in recorded in
 `docs/runbooks/receipts/2026-11-26-w3-gateway-runtime-path-dropin-snapshot.md`.
+Since #3427, `nhms-compute-scheduler.service` and `nhms-slurm-gateway.service`,
+redeployed with a new `Description=`, are recorded again in
+`docs/runbooks/receipts/2026-11-28-w3-scheduler-and-gateway-units-snapshot.md`.
 The 2026-10-16 receipt also records `nhms-compute-api.service`, retired by
-#3394: receipts are history and keep their rows, so the two receipts (which do
-not overlap) record exactly the seven tracked files plus that one retired name,
-and the retired name is neither a file under `node22/` nor a manifest entry.
-`infra/systemd/node22/MANIFEST.json` lists every file deployed on node-22
-(`{deployed_relative_path, tracked_path, sha256}`), including the fourteen
-top-level oneshot units tracked at `infra/systemd/<name>` (twelve until #3121)
-and, since #3345, the two journal-backup units that exist only on w3, the
-compute role's control host.
+#3394: receipts are history and keep their rows, so the three receipts record
+exactly the seven tracked files plus that one retired name, and the retired
+name is neither a file under `node22/` nor a manifest entry. The receipts are
+read in the order of the dates their file names start with, and where two
+receipts record a path the later one holds the tracked bytes: the only paths
+recorded twice are the two redeployed units, the latest receipt records
+exactly those two, and each of its rows differs from the earlier row.
+`infra/systemd/node22/MANIFEST.json` lists every user unit file deployed on the
+compute control host (`{deployed_relative_path, tracked_path, sha256}`),
+including the fourteen top-level oneshot units tracked at
+`infra/systemd/<name>` (twelve until #3121) and, since #3345, the two
+journal-backup units that exist only on w3, the compute role's control host.
 
 The rule logic lives in small module-level functions so the synthetic line
 cases at the bottom exercise exactly the code the real scan uses. Stdlib only,
@@ -25,6 +32,8 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Sequence
+from datetime import date
 from pathlib import Path, PurePosixPath
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -33,7 +42,13 @@ MANIFEST_PATH = NODE22_DIR / "MANIFEST.json"
 RECEIPT_PATH = REPO_ROOT / "docs/runbooks/receipts/2026-10-16-node22-live-units-snapshot.md"
 # #3359: the gateway runtime-path drop-in the 2026-10-16 snapshot did not record.
 GATEWAY_DROPIN_RECEIPT_PATH = REPO_ROOT / "docs/runbooks/receipts/2026-11-26-w3-gateway-runtime-path-dropin-snapshot.md"
-RECEIPT_PATHS = (RECEIPT_PATH, GATEWAY_DROPIN_RECEIPT_PATH)
+# #3427: the two units redeployed with a new `Description=`; this later receipt holds their tracked bytes.
+REDEPLOYED_UNITS_RECEIPT_PATH = (
+    REPO_ROOT / "docs/runbooks/receipts/2026-11-28-w3-scheduler-and-gateway-units-snapshot.md"
+)
+# Read in this order, which is the order of the dates the file names start with.
+RECEIPT_PATHS = (RECEIPT_PATH, GATEWAY_DROPIN_RECEIPT_PATH, REDEPLOYED_UNITS_RECEIPT_PATH)
+REDEPLOYED_UNITS = frozenset({"nhms-compute-scheduler.service", "nhms-slurm-gateway.service"})
 ENV_README_PATH = REPO_ROOT / "infra/env/README.md"
 
 MANIFEST_SCHEMA_VERSION = "nhms.node22.unit_manifest.v1"
@@ -78,6 +93,7 @@ EXPECTED_ENTRIES = frozenset(
 _ENVIRONMENT_TOKEN = re.compile(r"""(?:[^\s"']+|"[^"]*"|'[^']*')+""")
 _RECEIPT_ROW = re.compile(r"^\|\s*`([^`]+)`\s*\|\s*`([0-9a-f]{64})`\s*\|")
 _BACKTICK_TOKEN = re.compile(r"`([^`]*)`")
+_RECEIPT_DATE = re.compile(r"(\d{4}-\d{2}-\d{2})-")
 
 
 def sha256_hex(path: Path) -> str:
@@ -204,6 +220,77 @@ def union_of_receipt_tables(tables: list[dict[str, str]]) -> tuple[dict[str, str
     return union, overlap
 
 
+def receipt_tables(paths: Sequence[Path] = RECEIPT_PATHS) -> list[dict[str, str]]:
+    """The receipt tables of ``paths``, in the order given."""
+    return [receipt_sha256_table(path.read_text(encoding="utf-8")) for path in paths]
+
+
+def receipt_date_order_violations(names: Sequence[str | Path]) -> list[str]:
+    """Receipt names that break "each starts with ``YYYY-MM-DD-`` and the dates strictly increase".
+
+    A name without a valid date is reported and does not move the date the
+    next name is compared with; a name whose date is not after the last valid
+    date before it (equal or earlier) is reported.
+    """
+    violations = []
+    previous: date | None = None
+    for name in names:
+        match = _RECEIPT_DATE.match(PurePosixPath(name).name)
+        try:
+            current = date.fromisoformat(match.group(1)) if match else None
+        except ValueError:
+            current = None
+        if current is None:
+            violations.append(str(name))
+            continue
+        if previous is not None and current <= previous:
+            violations.append(str(name))
+        previous = current
+    return violations
+
+
+def redeploy_overlap_violations(tables: list[dict[str, str]], redeployed: frozenset[str]) -> dict[str, list[str]]:
+    """How the receipts fail "only ``redeployed`` is recorded twice, and the latest receipt records exactly it".
+
+    ``unexpected_overlap`` are paths more than one receipt records that are not
+    in ``redeployed``; ``missing_overlap`` are paths of ``redeployed`` that no
+    two receipts record; ``latest_extra`` and ``latest_missing`` compare the
+    last table of ``tables`` with ``redeployed``.  Every list is empty when the
+    receipts overlap in exactly ``redeployed`` and the latest one records
+    nothing else.
+    """
+    _, overlap = union_of_receipt_tables(tables)
+    latest = set(tables[-1]) if tables else set()
+    return {
+        "unexpected_overlap": sorted(overlap - redeployed),
+        "missing_overlap": sorted(redeployed - overlap),
+        "latest_extra": sorted(latest - redeployed),
+        "latest_missing": sorted(redeployed - latest),
+    }
+
+
+NO_REDEPLOY_OVERLAP_VIOLATIONS = {
+    "unexpected_overlap": [],
+    "missing_overlap": [],
+    "latest_extra": [],
+    "latest_missing": [],
+}
+
+
+def unchanged_redeployed_rows(tables: list[dict[str, str]]) -> list[str]:
+    """Paths a later receipt records with the sha256 an earlier receipt already holds for them.
+
+    A redeploy that records the old bytes is not a redeploy: it would let the
+    old bytes pass as the latest receipt's.
+    """
+    earlier: dict[str, str] = {}
+    unchanged = set()
+    for table in tables:
+        unchanged |= {path for path, sha in table.items() if earlier.get(path) == sha}
+        earlier.update(table)
+    return sorted(unchanged)
+
+
 def receipt_name_violations(recorded: set[str], tracked: set[str]) -> dict[str, list[str]]:
     """How the receipts' names fail "the tracked files plus the retired names".
 
@@ -283,9 +370,14 @@ def test_every_node22_file_is_listed_in_the_manifest() -> None:
 # --- (c) node22/ copies equal the receipt --------------------------------------
 
 
-def test_the_two_receipts_record_disjoint_sets_that_together_equal_the_seven_and_the_retired_unit() -> None:
-    snapshot, gateway_dropin = (receipt_sha256_table(path.read_text(encoding="utf-8")) for path in RECEIPT_PATHS)
-    union, overlap = union_of_receipt_tables([snapshot, gateway_dropin])
+def test_the_receipts_are_listed_in_the_order_of_their_dates() -> None:
+    assert receipt_date_order_violations(RECEIPT_PATHS) == []
+
+
+def test_the_receipts_overlap_only_in_the_redeployed_units_and_together_equal_the_seven_and_the_retired_unit() -> None:
+    tables = receipt_tables()
+    snapshot, gateway_dropin = tables[:2]
+    union, _ = union_of_receipt_tables(tables)
 
     assert len(NODE22_DEPLOYED_FILES) == 7
     assert (
@@ -293,7 +385,8 @@ def test_the_two_receipts_record_disjoint_sets_that_together_equal_the_seven_and
         == (set(NODE22_DEPLOYED_FILES) - {"nhms-slurm-gateway.service.d/20-runtime-path.conf"}) | RETIRED_DEPLOYED_FILES
     )
     assert set(gateway_dropin) == {"nhms-slurm-gateway.service.d/20-runtime-path.conf"}
-    assert overlap == set()
+    assert redeploy_overlap_violations(tables, REDEPLOYED_UNITS) == NO_REDEPLOY_OVERLAP_VIOLATIONS
+    assert unchanged_redeployed_rows(tables) == []
     assert receipt_name_violations(set(union), set(NODE22_DEPLOYED_FILES)) == NO_RECEIPT_NAME_VIOLATIONS
 
 
@@ -312,10 +405,10 @@ def test_the_retired_unit_is_neither_a_node22_file_nor_a_manifest_entry() -> Non
 
 
 def test_node22_copies_match_the_receipt_table() -> None:
-    receipt, overlap = union_of_receipt_tables(
-        [receipt_sha256_table(path.read_text(encoding="utf-8")) for path in RECEIPT_PATHS]
-    )
-    assert overlap == set()
+    tables = receipt_tables()
+    # Later rows replace earlier ones: each path maps to the sha256 of the latest receipt that records it.
+    receipt, _ = union_of_receipt_tables(tables)
+    assert redeploy_overlap_violations(tables, REDEPLOYED_UNITS) == NO_REDEPLOY_OVERLAP_VIOLATIONS
     assert receipt_name_violations(set(receipt), set(NODE22_DEPLOYED_FILES)) == NO_RECEIPT_NAME_VIOLATIONS
 
     node22_entries = [
@@ -326,6 +419,7 @@ def test_node22_copies_match_the_receipt_table() -> None:
         rel = entry["deployed_relative_path"]
         assert entry["tracked_path"] == NODE22_TRACKED_PREFIX + rel
         assert sha256_hex(REPO_ROOT / entry["tracked_path"]) == receipt[rel], rel
+        assert entry["sha256"] == receipt[rel], rel
 
 
 # --- (d) no secret value, (e) EnvironmentFile authority ------------------------
@@ -466,6 +560,63 @@ def test_receipt_union_reports_a_path_recorded_twice() -> None:
 
     assert union_of_receipt_tables([first, {}]) == (first, set())
     assert union_of_receipt_tables([first, second]) == ({"a.service": "0" * 64, "b.service": "2" * 64}, {"b.service"})
+
+
+def test_receipt_dates_must_lead_the_names_and_strictly_increase() -> None:
+    assert receipt_date_order_violations(["2026-10-16-a.md", "2026-11-26-b.md", "2026-11-28-c.md"]) == []
+    assert receipt_date_order_violations([Path("x/2026-10-16-a.md"), Path("x/2026-11-28-b.md")]) == []
+    # Equal dates, descending dates.
+    assert receipt_date_order_violations(["2026-11-28-a.md", "2026-11-28-b.md"]) == ["2026-11-28-b.md"]
+    assert receipt_date_order_violations([Path("x/2026-11-28-a.md"), Path("x/2026-10-16-b.md")]) == [
+        "x/2026-10-16-b.md"
+    ]
+    # A name without a date, or with a date that is no calendar day, or with the date not leading the name.
+    assert receipt_date_order_violations(["2026-10-16-a.md", "snapshot.md", "2026-11-28-b.md"]) == ["snapshot.md"]
+    assert receipt_date_order_violations(["2026-13-01-a.md"]) == ["2026-13-01-a.md"]
+    assert receipt_date_order_violations(["a-2026-10-16-b.md"]) == ["a-2026-10-16-b.md"]
+
+
+def test_the_receipts_may_overlap_only_in_the_redeployed_paths() -> None:
+    redeployed = frozenset({"a.service", "b.service"})
+    old = {"a.service": "0" * 64, "b.service": "1" * 64, "c.service": "2" * 64}
+    new = {"a.service": "3" * 64, "b.service": "4" * 64}
+
+    assert redeploy_overlap_violations([old, new], redeployed) == NO_REDEPLOY_OVERLAP_VIOLATIONS
+    # The overlap holds a path that was not redeployed.
+    assert redeploy_overlap_violations([old, {"c.service": "5" * 64}, new], redeployed) == {
+        **NO_REDEPLOY_OVERLAP_VIOLATIONS,
+        "unexpected_overlap": ["c.service"],
+    }
+    # The overlap lacks a redeployed path: no earlier receipt records it.
+    assert redeploy_overlap_violations([{"a.service": "0" * 64}, new], redeployed) == {
+        **NO_REDEPLOY_OVERLAP_VIOLATIONS,
+        "missing_overlap": ["b.service"],
+    }
+    # The latest receipt has a third row: a path recorded before, or a new one.
+    assert redeploy_overlap_violations([old, {**new, "c.service": "5" * 64}], redeployed) == {
+        **NO_REDEPLOY_OVERLAP_VIOLATIONS,
+        "unexpected_overlap": ["c.service"],
+        "latest_extra": ["c.service"],
+    }
+    assert redeploy_overlap_violations([old, {**new, "d.service": "5" * 64}], redeployed) == {
+        **NO_REDEPLOY_OVERLAP_VIOLATIONS,
+        "latest_extra": ["d.service"],
+    }
+    # The latest receipt has one row.
+    assert redeploy_overlap_violations([old, {"a.service": "3" * 64}], redeployed) == {
+        **NO_REDEPLOY_OVERLAP_VIOLATIONS,
+        "missing_overlap": ["b.service"],
+        "latest_missing": ["b.service"],
+    }
+
+
+def test_a_redeployed_row_must_differ_from_the_earlier_row() -> None:
+    old = {"a.service": "0" * 64, "b.service": "1" * 64}
+
+    assert unchanged_redeployed_rows([old, {"a.service": "3" * 64, "b.service": "4" * 64}]) == []
+    assert unchanged_redeployed_rows([old, {"a.service": "0" * 64, "b.service": "4" * 64}]) == ["a.service"]
+    # A path recorded once, even with a sha256 another path has, is not a redeploy.
+    assert unchanged_redeployed_rows([old, {"c.service": "1" * 64}]) == []
 
 
 def test_receipt_name_comparison_refuses_every_other_untracked_or_unrecorded_name() -> None:

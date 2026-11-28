@@ -1,5 +1,5 @@
 [Unit]
-Description=Run NHMS node-22 state-index capacity watch daily
+Description=Run NHMS compute state-index capacity watch daily
 
 [Timer]
 OnCalendar=*-*-* 05:30:00 UTC
