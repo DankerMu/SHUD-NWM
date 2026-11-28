@@ -236,7 +236,7 @@ describe('JobsTable RBAC action boundary', () => {
       />,
     )
 
-    expect(screen.getByTestId('ops-manual-recovery-guidance')).toHaveTextContent('22 compute-control')
+    expect(screen.getByTestId('ops-manual-recovery-guidance')).toHaveTextContent('计算控制主机')
     expect(screen.getByTestId('ops-manual-recovery-guidance')).not.toHaveTextContent(/display_readonly|27/)
 
     rerender(
@@ -247,7 +247,8 @@ describe('JobsTable RBAC action boundary', () => {
       />,
     )
 
-    expect(screen.getByTestId('ops-manual-recovery-guidance')).toHaveTextContent('27 display_readonly')
+    expect(screen.getByTestId('ops-manual-recovery-guidance')).toHaveTextContent('node-27 display_readonly')
+    expect(screen.getByTestId('ops-manual-recovery-guidance')).toHaveTextContent('计算控制主机')
   })
 
   it('copies only safe diagnostic fields and keeps notified state local', async () => {
@@ -273,7 +274,7 @@ describe('JobsTable RBAC action boundary', () => {
       />,
     )
 
-    expect(screen.getByTestId('ops-manual-recovery-guidance')).toHaveTextContent('22 compute-control')
+    expect(screen.getByTestId('ops-manual-recovery-guidance')).toHaveTextContent('计算控制主机')
     expect(screen.getByTestId('ops-manual-recovery-guidance')).not.toHaveTextContent(/display_readonly|27/)
     await userEvent.click(screen.getByRole('button', { name: /复制诊断/ }))
 

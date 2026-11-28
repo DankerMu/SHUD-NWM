@@ -307,7 +307,7 @@ function controlledRetryJob() {
 }
 
 /**
- * `/ops` 受控失败 fixture。#3179 起页面没有重试控件：恢复走 node-22 manual-repair marker 车道
+ * `/ops` 受控失败 fixture。#3179 起页面没有重试控件：恢复走计算角色的 manual-repair marker 车道
  * （`scripts/node22_manual_retry_failed_runs.py`），由 scheduler 铸出并跑完 retry job。
  * `recoverViaMarkerLane()` 把 mock 翻到该车道跑完后的后端状态；页面要刷新才会看到。
  */

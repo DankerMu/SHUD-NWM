@@ -29,8 +29,8 @@ export function BasinFailures({
   )
   const canCopyDiagnostics = diagnosticsEnabled && Boolean(diagnosticContext)
   const manualRecoveryGuidance = diagnosticsDisplayReadonly
-    ? '阶段失败诊断用于交给 22 compute-control 节点处理；27 display_readonly 页面只复制只读证据，不写入数据库或审计 API。'
-    : '阶段失败诊断用于交给 22 compute-control 节点处理；当前运维页面复制诊断不写入数据库或审计 API。'
+    ? '阶段失败诊断用于交给计算控制主机处理；node-27 display_readonly 页面只复制只读证据，不写入数据库或审计 API。'
+    : '阶段失败诊断用于交给计算控制主机处理；当前运维页面复制诊断不写入数据库或审计 API。'
 
   const copyStageDiagnostic = async () => {
     if (!diagnosticContext) return

@@ -123,7 +123,39 @@ describe('StageCard', () => {
 
     await user.click(screen.getByRole('button', { name: /预报.*forecast.*failed/ }))
 
-    expect(screen.getByTestId('ops-stage-manual-recovery-guidance')).toHaveTextContent('22 compute-control')
+    expect(screen.getByTestId('ops-stage-manual-recovery-guidance')).toHaveTextContent('计算控制主机')
     expect(screen.getByTestId('ops-stage-manual-recovery-guidance')).not.toHaveTextContent(/display_readonly|27/)
+  })
+
+  it('shows the display_readonly recovery guidance of a failed stage', async () => {
+    const user = userEvent.setup()
+
+    render(
+      <StageList
+        diagnosticContext={{
+          sourceId: 'GFS',
+          cycleTime: '2026-05-18T00:00:00.000Z',
+          runId: 'run-stage',
+          modelId: 'model-stage',
+        }}
+        diagnosticsDisplayReadonly
+        diagnosticsEnabled
+        showPendingPlaceholders={false}
+        stages={[
+          makeStage({
+            stage: 'forecast',
+            display_status: 'failed',
+            status: 'failed',
+            duration_seconds: 120,
+            basin_progress: { completed: 0, total: 1, failed: 1 },
+          }),
+        ]}
+      />,
+    )
+
+    await user.click(screen.getByRole('button', { name: /预报.*forecast.*failed/ }))
+
+    expect(screen.getByTestId('ops-stage-manual-recovery-guidance')).toHaveTextContent('计算控制主机')
+    expect(screen.getByTestId('ops-stage-manual-recovery-guidance')).toHaveTextContent('node-27 display_readonly')
   })
 })

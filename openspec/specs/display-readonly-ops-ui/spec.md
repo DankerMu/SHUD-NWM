@@ -88,7 +88,7 @@ The current `/` single-map display frontend, including the `/hydro-met` legacy r
 
 ### Requirement: Ops diagnostic copy
 
-The display readonly `/ops` page SHALL provide a diagnostic payload that an operator can copy for manual 22-node recovery.
+The display readonly `/ops` page SHALL provide a diagnostic payload that an operator can copy for manual recovery on the compute control host.
 
 #### Scenario: Failed job diagnostic
 - **WHEN** a selected job or stage is failed, submission failed, partially failed, or permanently failed
@@ -97,8 +97,8 @@ The display readonly `/ops` page SHALL provide a diagnostic payload that an oper
 
 #### Scenario: Manual recovery guidance
 - **WHEN** the diagnostic payload is shown
-- **THEN** the page includes guidance to follow the 22 compute-control recovery runbook
-- **AND** any suggested commands are clearly tied to 22-node execution, not 27.
+- **THEN** the page includes guidance to follow the recovery runbook on the compute control host
+- **AND** any suggested commands are clearly tied to execution on the compute control host, not on node-27.
 
 #### Scenario: Local notified state
 - **WHEN** an operator marks a failure as notified in display readonly mode
@@ -112,7 +112,7 @@ The display readonly `/ops` page SHALL view logs through the backend job logs en
 #### Scenario: Log modal success
 - **WHEN** a job has a readable published log
 - **THEN** the log modal displays bounded log content
-- **AND** it does not expose instructions to open 22 private filesystem paths from the 27 browser.
+- **AND** it does not expose instructions to open private filesystem paths of the compute hosts from a browser viewing the node-27 page.
 
 #### Scenario: Log modal unavailable
 - **WHEN** a job log is missing, unsupported, or access denied

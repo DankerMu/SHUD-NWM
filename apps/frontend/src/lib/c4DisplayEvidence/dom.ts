@@ -55,7 +55,7 @@ export function inspectC4OpsInPage(): C4OpsDomObservation {
   const queueReadonlyVisible = statuses.some((el) => textOf(el).includes('display_readonly 只读展示节点不读取 Slurm 队列深度'))
     || Array.from(document.querySelectorAll('h3, [class]')).some((el) => textOf(el).includes('队列深度不可用'))
   const operatorRecoveryVisible = Boolean(document.querySelector('[data-testid="ops-manual-recovery-guidance"]'))
-    || statuses.some((el) => textOf(el).includes('需要恢复时在 22 compute-control'))
+    || statuses.some((el) => textOf(el).includes('需要恢复时在计算控制主机'))
   return {
     headingObserved,
     permissionDenied,
