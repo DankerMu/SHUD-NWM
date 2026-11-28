@@ -184,7 +184,7 @@ reproduce its systemd branch by hand and record the deviation.
 - **WHEN** the wrapper of checkout A is run with the working directory inside a different git repository B
 - **THEN** the printed `repo_root`, the sourced `display.env`, the installed unit source and the uvicorn sweep pattern SHALL all refer to checkout A, and no process of B SHALL be signalled
 
-### Requirement: The node-22 refresh timer health installer restores exactly once on an enable failure
+### Requirement: The refresh timer health installer restores exactly once on an enable failure
 
 The installer's ERR handlers SHALL run only in the main shell, and a probe timer that is not active after `enable --now` SHALL produce exactly one restore sequence.
 
@@ -273,7 +273,7 @@ that exists in the repository.
 
 `docs/runbooks/current-production-ops.md` SHALL describe the current physical
 production deployment as node-27-centric after live verification, not as the
-historical node-22 writer topology.
+historical writer topology of the retired node-22 host.
 
 #### Scenario: stale warning is removed after rewrite
 
@@ -306,10 +306,10 @@ historical node-22 writer topology.
 - **AND** it SHALL NOT instruct operators to use the PostgreSQL `:55433` of the
   retired node-22 host as a current NHMS production database.
 - **AND** it SHALL NOT present the scheduler, orchestrator, ingest, or DB
-  writer commands of the historical node-22 writer topology as current
-  operational actions.
-- **AND** any retained historical node-22 writer material SHALL be explicitly
-  labeled historical or do-not-connect, not an action path.
+  writer commands of the historical writer topology of the retired node-22 host
+  as current operational actions.
+- **AND** any retained material of that historical writer topology SHALL be
+  explicitly labeled historical or do-not-connect, not an action path.
 
 #### Scenario: the runbook says which hosts carry the compute role
 

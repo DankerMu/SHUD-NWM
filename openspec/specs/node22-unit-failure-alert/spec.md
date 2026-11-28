@@ -1,12 +1,12 @@
 # node22-unit-failure-alert Specification
 
 ## Purpose
-A failed node-22 oneshot unit becomes a mail alert through a generic `OnFailure=` template with node-22 absolute paths, so timer-driven probes and retention lanes cannot fail silently and a broken mail channel is itself visible.
+A failed oneshot unit of the compute role becomes a mail alert through a generic `OnFailure=` template with the compute hosts' absolute paths, so timer-driven probes and retention lanes cannot fail silently and a broken mail channel is itself visible.
 
 ## Requirements
 
-### Requirement: A generic node-22 unit-failure alert template SHALL exist with absolute paths
-The repository SHALL track `infra/systemd/nhms-node22-unit-failure-alert@.service` (user scope, `Type=oneshot`, `WorkingDirectory=/scratch/frd_muziyao/NWM`, `EnvironmentFile=-/scratch/frd_muziyao/NWM/infra/env/node22-unit-failure-alert.env`, `ExecStart=/scratch/frd_muziyao/NWM/scripts/node22_unit_failure_alert_once.sh %i`, `TimeoutStartSec=120`) and the handler `scripts/node22_unit_failure_alert_once.sh`, which reads at most 30 journal lines of the failed unit named by `%i`, composes one message and hands it to `$NHMS_FRONTIER_SENDMAIL`. With no `NHMS_ALERT_EMAIL_TO` the handler SHALL log `SKIPPED` and exit 0; when the transport is configured and returns non-zero the handler SHALL exit non-zero. The tracked example `infra/env/node22-unit-failure-alert.example` SHALL define exactly `NHMS_ALERT_EMAIL_TO`, `NHMS_ALERT_EMAIL_FROM`, `NHMS_FRONTIER_SENDMAIL` (example value `/usr/sbin/sendmail`), `NHMS_SMTP_HOST`, `NHMS_SMTP_PORT`, `NHMS_SMTP_USER`, `NHMS_SMTP_PASS` and no other key; `infra/env/README.md` authority table SHALL gain a row for it, and `infra/systemd/node22/MANIFEST.json` SHALL gain the template's entry so the drift probe does not report it as `untracked`. No node-22 unit or template SHALL contain the literal `%h/NWM`.
+### Requirement: A generic unit-failure alert template of the compute control host SHALL exist with absolute paths
+The repository SHALL track `infra/systemd/nhms-node22-unit-failure-alert@.service` (user scope, `Type=oneshot`, `WorkingDirectory=/scratch/frd_muziyao/NWM`, `EnvironmentFile=-/scratch/frd_muziyao/NWM/infra/env/node22-unit-failure-alert.env`, `ExecStart=/scratch/frd_muziyao/NWM/scripts/node22_unit_failure_alert_once.sh %i`, `TimeoutStartSec=120`) and the handler `scripts/node22_unit_failure_alert_once.sh`, which reads at most 30 journal lines of the failed unit named by `%i`, composes one message and hands it to `$NHMS_FRONTIER_SENDMAIL`. With no `NHMS_ALERT_EMAIL_TO` the handler SHALL log `SKIPPED` and exit 0; when the transport is configured and returns non-zero the handler SHALL exit non-zero. The tracked example `infra/env/node22-unit-failure-alert.example` SHALL define exactly `NHMS_ALERT_EMAIL_TO`, `NHMS_ALERT_EMAIL_FROM`, `NHMS_FRONTIER_SENDMAIL` (example value `/usr/sbin/sendmail`), `NHMS_SMTP_HOST`, `NHMS_SMTP_PORT`, `NHMS_SMTP_USER`, `NHMS_SMTP_PASS` and no other key; `infra/env/README.md` authority table SHALL gain a row for it, and `infra/systemd/node22/MANIFEST.json` SHALL gain the template's entry so the drift probe does not report it as `untracked`. No unit or template of the compute role SHALL contain the literal `%h/NWM`.
 
 #### Scenario: Failed unit produces one mail
 - **WHEN** the handler runs with `%i` set to a failed unit name, `NHMS_ALERT_EMAIL_TO` set and a fake transport that exits 0
@@ -24,7 +24,7 @@ The repository SHALL track `infra/systemd/nhms-node22-unit-failure-alert@.servic
 - **WHEN** the test reads `infra/env/node22-unit-failure-alert.example`
 - **THEN** the set of defined keys equals the seven named keys, `DATABASE_URL` is absent, and the manifest lists the template with its sha256
 
-### Requirement: Tracked node-22 oneshot units SHALL be wired to the alert
+### Requirement: Tracked oneshot units of the compute role SHALL be wired to the alert
 Each of `nhms-node22-refresh-timer-health.service`, `nhms-node22-scheduler-stall-health.service`, `nhms-scheduler-evidence-retention.service`, `nhms-scheduler-file-provider-refresh.service`, `nhms-scheduler-journal-retention.service`, `nhms-scheduler-state-index-capacity.service`, `nhms-scheduler-state-index-prune.service` and `nhms-w3-journal-backup.service` under `infra/systemd/` SHALL carry exactly one `OnFailure=nhms-node22-unit-failure-alert@%n.service` line in `[Unit]`. A test SHALL assert all of the following:
 
 - the line occurs exactly once in each of these eight files;
@@ -37,7 +37,7 @@ Each of `nhms-node22-refresh-timer-health.service`, `nhms-node22-scheduler-stall
 - **AND** the gateway unit and `node22/**` contain none
 - **AND** the manifest sha256 of the eight matches their new content
 
-### Requirement: node-22 SHALL reach the SMTPS shim only through the exact-interpreter wrapper
+### Requirement: The compute role SHALL reach the SMTPS shim only through the exact-interpreter wrapper
 The repository SHALL track `scripts/node22_smtp_sendmail.sh`, an executable sendmail-compatible transport that execs `/scratch/frd_muziyao/NWM/.venv/bin/python /scratch/frd_muziyao/NWM/scripts/node27_frontier_smtp_sendmail.py` with its own arguments, standard input and exit status passed through unchanged. When the interpreter is missing or not executable, or the shim file is missing, the wrapper SHALL write one `node22-smtp-sendmail:` line to standard error and exit 64 without invoking any other interpreter. The wrapper SHALL NOT invoke `python3`, `uv`, or read or print any `NHMS_SMTP_*` value.
 
 #### Scenario: Message is forwarded to the shim

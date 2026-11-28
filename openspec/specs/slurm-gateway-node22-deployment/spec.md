@@ -2,14 +2,16 @@
 
 ## Purpose
 
-Define the standalone Slurm gateway deployed on node-22: the service itself, stale-job reconcile from a durable job-id source, defence in depth for Slurm mutations, and rollout or rollback that refuses while a scheduler pass is running.
+Define the standalone Slurm gateway deployed on the compute control host: the service itself, stale-job reconcile from a durable job-id source, defence in depth for Slurm mutations, and rollout or rollback that refuses while a scheduler pass is running.
 
 ## Requirements
 
-### Requirement: A standalone Slurm gateway service is deployed on node-22
-A standalone HTTP Slurm gateway (app + systemd unit + listen URL) SHALL be deployed on node-22,
-because the generic chain submits only via the gateway and no such service is proven there today
-(`NHMS_SERVICE_ROLE=slurm_gateway` is currently reserved/fail-fast). Its submission contract is
+### Requirement: A standalone Slurm gateway service is deployed on the compute control host
+A standalone HTTP Slurm gateway (app + systemd unit + listen URL) SHALL be deployed on
+the compute control host, because the generic chain submits only via the gateway. When this was
+written, no such service was proven on the retired node-22 host, and
+`NHMS_SERVICE_ROLE=slurm_gateway` was reserved/fail-fast (recorded no later than 2026-07-25). Its
+submission contract is
 m20 `slurm-array-runner-integration` and m23 `real-shud-slurm-execution`; m24 adds deployment and
 live receipts only.
 
@@ -49,7 +51,7 @@ On restart, reconcile SHALL recover job identity from durable storage, not gatew
   `candidate_id/run_id/model_id/basin_id/basin_version_id/river_network_version_id`
 - **AND** no duplicate is resubmitted for a still-running or already-terminal candidate.
 
-### Requirement: Node-22 Slurm mutation defense in depth
+### Requirement: Slurm mutation defense in depth of the compute role
 The production Slurm gateway SHALL combine application-layer service authentication with an entrypoint-enforced loopback-only bind. The service SHALL reject every non-loopback bind before uvicorn starts; a root-managed host packet-filter or ACL is an optional stronger control, not a claim made without an installed live mechanism.
 
 #### Scenario: Standalone entrypoint starts with a deterministic HTTP protocol implementation
@@ -57,22 +59,22 @@ The production Slurm gateway SHALL combine application-layer service authenticat
 - **THEN** it passes `http="h11"` explicitly to programmatic `uvicorn.run`
 - **AND** the resolved host/port (from `SLURM_GATEWAY_URL` or `--url` plus any `--host`/`--port` override) are forwarded unchanged
 - **AND** the loopback-only bind guard still runs before uvicorn is imported or started
-- **AND** no fallback, try/except, or dependency change is introduced: an optional native httptools runtime breakage in the node-22 maintained active Python environment must not turn the gateway into an unbound exit-1 process, and this pin is not an authorization to rebuild that environment.
+- **AND** no fallback, try/except, or dependency change is introduced: an optional native httptools runtime breakage in the maintained active Python environment of the compute hosts must not turn the gateway into an unbound exit-1 process, and this pin is not an authorization to rebuild that environment.
 
 #### Scenario: Gateway and scheduler share an owner-only credential
-- **WHEN** the node-22 gateway and DB-free scheduler are deployed
+- **WHEN** the gateway and the DB-free scheduler of the compute role are deployed
 - **THEN** both consume the same `SLURM_GATEWAY_SERVICE_TOKEN` from one untracked owner-mode-0600 environment source
 - **AND** the checked-in unit/examples contain only variable names or placeholders, never the credential value.
 
 #### Scenario: Gateway is not remotely reachable
-- **WHEN** the node-22 deployment receipt is captured at the configured live gateway port (currently measured as 8090)
+- **WHEN** the deployment receipt is captured on the compute control host at the configured live gateway port (currently measured as 8090)
 - **THEN** `ss -ltnp` shows the gateway bound only to a loopback address such as `127.0.0.1:8090`
 - **AND** starting the checked-in entrypoint with `0.0.0.0`, `::`, a hostname, or any non-loopback IP fails before uvicorn opens a socket
-- **AND** a probe from another host cannot connect to node-22 at the configured gateway port
+- **AND** a probe from another host cannot connect to the compute control host at the configured gateway port
 - **AND** any packet-filter/ACL receipt is included only if an operator-managed rule is actually installed.
 
 #### Scenario: Live auth boundary is proven without creating a job
-- **WHEN** local node-22 probes send an invalid submission body with no token, a wrong token, and the configured token
+- **WHEN** probes local to the compute control host send an invalid submission body with no token, a wrong token, and the configured token
 - **THEN** missing/wrong credentials return `401` before body validation while the configured token passes auth and reaches the existing validation error
 - **AND** the receipt proves no `sbatch`, `scancel`, or reset side effect was created by these probes.
 
