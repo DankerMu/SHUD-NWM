@@ -17,7 +17,8 @@ its tasks here in its final push.
   sentence follows it in the same PR with a red run on the old sentence. A test that pins a dated
   observation stays as it is, with its sentence.
 - A `name` token count of the counter moves only for a deleted file or a removed pointer to one, and
-  the PR lists it.
+  the PR lists it. One exception (9.1): a test whose name states a value that `design.md` §5 changes
+  is renamed with the value (`test_hostname_failure_falls_back_to_compute`).
 - Commands that remain in a live runbook are the ones the page had, minus the literal `ssh` to the
   retired host; `uv` discipline lines for the compute hosts stay as they are.
 - A renamed heading takes every inbound link with it, and a deleted file every reference to it. The

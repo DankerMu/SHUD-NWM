@@ -116,7 +116,7 @@ bare 22 shorthand: 41 lines
 
 Every PR quotes the table before and after, and `--tokens` (the histogram of `name` tokens) before
 and after. A `name` token count moves only when a file is deleted or a pointer to a deleted file is
-removed; each such move is listed in the PR. The counter measures; it does not decide.
+removed (one exception: the renamed test of §5); each such move is listed in the PR. The counter measures; it does not decide.
 
 The 44 `ssh` lines are 31 commands in seven production-ops pages, 7 banner pointers, 3 banners, 1
 line of the bring-up runbook and 2 lines of spec scenarios. The count does not end at zero: the
@@ -243,6 +243,10 @@ live or is read by a spec).
 | alert mail subject `[NHMS node-22] unit failed: …` and the `HOST` fallback `node-22` | `[NHMS compute] unit failed: …`; fallback `compute` | next sync of the production checkout (the script runs from it; it is not an installed file); a mail filter on the old subject stops matching (the owner chose to change it) |
 
 - The alert test's sender string is the test's own input and stays.
+- The test of the `HOST` fallback carried the old value in its name
+  (`test_hostname_failure_falls_back_to_node22`). It is renamed with the value: the name would
+  otherwise state a fallback the script no longer has, and nothing refers to a test by name. This is
+  the one `name` token the sweep moves without deleting a file (§3).
 - The two units under `infra/systemd/node22/` are pinned byte-exactly to the read-only receipt of
   2026-10-16 by `tests/test_node22_unit_tracking.py`, and `node22-unit-tracking` says which receipt
   records which file. Receipts are history. The redeploy therefore writes a new receipt for the two
