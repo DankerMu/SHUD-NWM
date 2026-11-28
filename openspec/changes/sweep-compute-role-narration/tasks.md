@@ -194,7 +194,7 @@ Minimal mergeable slice: 8.1 - backend text and its generated chain, verified by
 
 - [x] 9.1 Alert mail subject and host fallback with their tests; the script's comments. No spec text
   states the subject, and no installed file changes: the script runs from the production checkout.
-- [ ] 9.2 `Description=` of the 16 manifest units (`design.md` §5) and the unit comments (17 manifest
+- [x] 9.2 `Description=` of the 16 manifest units (`design.md` §5) and the unit comments (17 manifest
   files change: the 16, and `nhms-w3-journal-backup.service` by one comment);
   `MANIFEST.json` shas; the example unit `infra/systemd/nhms-slurm-gateway.service`. For the two units
   under `infra/systemd/node22/`: a new read-only receipt, the receipt rule of

@@ -1,5 +1,5 @@
 [Unit]
-Description=NHMS node-22 state-index capacity watch (prune-retention dry-run only)
+Description=NHMS compute state-index capacity watch (prune-retention dry-run only)
 OnFailure=nhms-node22-unit-failure-alert@%n.service
 
 [Service]

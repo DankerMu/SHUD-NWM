@@ -1,5 +1,5 @@
 [Unit]
-Description=Run NHMS node-22 state-index auto-prune daily
+Description=Run NHMS compute state-index auto-prune daily
 
 [Timer]
 OnCalendar=*-*-* 06:30:00 UTC

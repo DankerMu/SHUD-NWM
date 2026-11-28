@@ -1,5 +1,5 @@
 [Unit]
-Description=Quarter-hourly health probe for the NHMS node-22 DB-free scheduler lane
+Description=Quarter-hourly health probe for the NHMS compute DB-free scheduler lane
 # As with the service unit: no Wants=, After=, Requires=, Before=, BindsTo= or
 # PartOf= naming nhms-compute-scheduler.timer or nhms-compute-scheduler.service.
 # The watched lane never enters the watcher's dependency graph.

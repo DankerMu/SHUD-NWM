@@ -1,5 +1,5 @@
 [Unit]
-Description=NHMS node-22 DB-free scheduler file-provider refresh
+Description=NHMS compute DB-free scheduler file-provider refresh
 Before=nhms-compute-scheduler.service
 OnFailure=nhms-node22-unit-failure-alert@%n.service
 
@@ -15,9 +15,11 @@ UnsetEnvironment=DATABASE_URL PIPELINE_DATABASE_URL PGAPPNAME PGCHANNELBINDING P
 ExecStart=/scratch/frd_muziyao/NWM/scripts/scheduler_file_provider_refresh_once.sh
 StandardOutput=journal
 StandardError=journal
-# node-22 user-systemd makes the filesystem root inaccessible inside a
-# PrivateTmp mount namespace. The provider's no-follow verifier must open the
-# root and walk each absolute path component, so this unit cannot use PrivateTmp.
+# On the retired node-22 host, user-systemd made the filesystem root
+# inaccessible inside a PrivateTmp mount namespace (recorded no later than
+# 2026-07-25; not re-tested on the compute control host). The provider's
+# no-follow verifier must open the root and walk each absolute path component,
+# so this unit does not use PrivateTmp.
 UMask=0077
 # The wrapper's wait for a running scheduler pass (at most 14400 s) plus the
 # 7200 s the refresh itself had before the wait existed.

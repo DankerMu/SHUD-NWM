@@ -1,5 +1,5 @@
 [Unit]
-Description=NHMS node-22 scheduler journal-cycle cold retention
+Description=NHMS compute scheduler journal-cycle cold retention
 OnFailure=nhms-node22-unit-failure-alert@%n.service
 
 [Service]

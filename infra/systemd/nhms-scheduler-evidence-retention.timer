@@ -1,5 +1,5 @@
 [Unit]
-Description=Run NHMS node-22 scheduler evidence retention daily
+Description=Run NHMS compute scheduler evidence retention daily
 
 [Timer]
 OnCalendar=*-*-* 04:15:00 UTC

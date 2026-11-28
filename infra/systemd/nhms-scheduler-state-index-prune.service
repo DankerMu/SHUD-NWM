@@ -1,5 +1,5 @@
 [Unit]
-Description=NHMS node-22 state-index prune-retention auto-enforce at the scheduler pass boundary
+Description=NHMS compute state-index prune-retention auto-enforce at the scheduler pass boundary
 OnFailure=nhms-node22-unit-failure-alert@%n.service
 
 [Service]
