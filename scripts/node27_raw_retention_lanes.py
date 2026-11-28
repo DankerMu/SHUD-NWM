@@ -31,7 +31,7 @@ FORCING_LANE_REASON = "forcing_cycle_aged_out"
 # prefixes above. Unset selects DEFAULT_LANES, the pre-#3087 run byte for byte.
 ALL_LANES = frozenset({RAW_LANE_KEY, CANONICAL_LANE_KEY, PRECIP_CACHE_LANE_KEY, FORCING_LANE_KEY})
 DEFAULT_LANES = frozenset({RAW_LANE_KEY, CANONICAL_LANE_KEY, PRECIP_CACHE_LANE_KEY})
-# Reasons whose removal holds the copyback batch mutex: node-22 copyback writers
+# Reasons whose removal holds the copyback batch mutex: copyback writers of the compute role
 # promote `canonical/` and `forcing/` trees under that lock.
 COPYBACK_LOCKED_REASONS = frozenset({CANONICAL_LANE_REASON, FORCING_LANE_REASON})
 # The forcing lane's own retention period (#3087, owner decision: 30 days).

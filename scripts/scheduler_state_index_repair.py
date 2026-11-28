@@ -20,7 +20,7 @@ over the other; each lane keeps its own unrelated entries and order. Default
 mode is a mutation-free dry-run. ``--enforce`` archives every required exact
 pre-image before the first CAS.
 
-It must run as the provider owner (``frd_muziyao`` on node-22): the provider
+It must run as the provider owner (``frd_muziyao`` on the compute control host): the provider
 lock requires the lock parent directory to be owned by the effective uid and
 the compare-and-swap requires a matching preimage owner.
 

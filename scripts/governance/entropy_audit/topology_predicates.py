@@ -1,4 +1,4 @@
-"""Line-level predicates of the node-22 database-writer topology family.
+"""Line-level predicates of the database-writer topology family of the compute role.
 
 Split out of ``scripts/governance/audit_repo_entropy.py`` by #1842. Pure text
 predicates over a single line or clause: normalization, node-22 / database /

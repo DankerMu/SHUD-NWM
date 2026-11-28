@@ -22,7 +22,7 @@ binding identity.
 This tool refuses to run when the bindings actually moved: a real re-binding is
 not a backfill and must go through normal provisioning.
 
-Execution host: node-22 (the forcing artifacts and raw/canonical inputs live on
+Execution host: the compute control host (the forcing artifacts and raw/canonical inputs live on
 its ``/scratch`` object store; the tool is DB-free).
 """
 

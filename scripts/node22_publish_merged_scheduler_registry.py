@@ -4,7 +4,7 @@
 On direct-grid production the model set only changes by publishing a merged
 registry manifest: the current canonical rows, minus the rows being retired,
 plus rows produced by ``scripts/provision_direct_grid_scheduler_registry.py``.
-This tool does that merge on node-22 and publishes it to the canonical manifest
+This tool does that merge on the compute control host and publishes it to the canonical manifest
 and to the worker mirror.  It is DB-free: it refuses when a database variable
 is set and never opens a connection.
 
@@ -20,7 +20,7 @@ both back; if the run does not end with both published and equal (also when it
 is interrupted or sent SIGTERM / SIGHUP), every manifest this run committed is
 put back.  It never stops or starts a timer and never runs the provider refresh.
 
-Run it on node-22 as the owner of both manifests:
+Run it on the compute control host as the owner of both manifests:
 ``cd /scratch/frd_muziyao/NWM && .venv/bin/python -m scripts.node22_publish_merged_scheduler_registry``.
 """
 

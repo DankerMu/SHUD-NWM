@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Read-only drift probe for the node-22 user-scope systemd units (#2911).
+"""Read-only drift probe for the user-scope systemd units of the compute control host (#2911).
 
 ``infra/systemd/node22/MANIFEST.json`` lists every unit file deployed under
-node-22's ``~/.config/systemd/user/`` as ``{deployed_relative_path,
+the compute control host's ``~/.config/systemd/user/`` as ``{deployed_relative_path,
 tracked_path, sha256}``.  This probe compares each deployed file with its
 tracked copy byte for byte, classifies it ``same`` / ``differs`` / ``missing``
 (``differs`` prints a unified diff to stdout), then lists every deployed
@@ -22,7 +22,7 @@ Read-only guarantees, load-bearing for running it on the live host:
   systemd directory or below it, or when its fully resolved path is.
 * It never calls ``systemctl`` or any other program: standard library only,
   no ``subprocess``, no import of ``nhms`` or any repo package, so it runs
-  under node-22's 3.12.7 ``.venv`` and the repo's 3.11 pin alike.
+  under the repo's 3.11 pin and under the 3.12.7 ``.venv`` left on the retired node-22 host alike.
 * The receipt never carries file content -- only paths, statuses and the
   manifest's sha256 -- so a secret pasted into a drop-in reaches stdout (the
   diff) but never the receipt.
@@ -370,7 +370,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog=PROGRAM,
         description=(
-            "Read-only drift probe for the node-22 user systemd units. It compares every "
+            "Read-only drift probe for the user systemd units of the compute control host. It compares every "
             "MANIFEST.json entry's deployed file with its tracked copy and lists untracked "
             "nhms-* units and drop-ins; it never calls systemctl and never writes under the "
             "systemd directory."

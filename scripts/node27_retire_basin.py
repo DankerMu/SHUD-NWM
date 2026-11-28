@@ -1,7 +1,7 @@
 #!/usr/bin/env python
-"""Retire one basin version on node-27 after its node-22 removal, in a fixed, receipt-gated order.
+"""Retire one basin version on node-27 after its removal by the compute role, in a fixed, receipt-gated order.
 
-The node-22 half of a retirement (``scripts/node22_model_succession.py --kind
+The compute role's half of a retirement (``scripts/node22_model_succession.py --kind
 remove_basin``) takes the models of a basin out of the scheduler.  This command
 is the node-27 half, with the same ``--succession-id``, for one basin version
 per run:
@@ -30,7 +30,7 @@ Refused before anything is read from the database or written, in both modes:
 ``NHMS_AUTH_MODE`` or ``AUTH_BACKEND`` set; ``DATABASE_URL`` of the process not
 the one in the env file (one plain unquoted line); another instance running
 (an exclusive lock on ``<env file>.retire-lock``).  Refused before any step:
-the succession has no node-22 finish receipt of kind ``remove_basin``; the
+the compute role's half of the succession left no finish receipt of kind ``remove_basin``; the
 basin version is not in ``core.basin_version``; the plan removed no model of
 it; the canonical manifest still holds a row of the basin, under this version
 or any other.
@@ -100,7 +100,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--succession-id",
         required=True,
-        help="The succession whose node-22 remove_basin run took the basin out of the scheduler "
+        help="The succession whose remove_basin run on the compute control host took the basin out of the scheduler "
         "([A-Za-z0-9._-]{1,80}).",
     )
     parser.add_argument(

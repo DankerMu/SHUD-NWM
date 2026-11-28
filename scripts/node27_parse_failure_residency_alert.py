@@ -19,7 +19,7 @@ Criterion — RESIDENCY, not a tick's rc:
   ``MODEL_RIVER_FILE_MALFORMED`` — the deterministic, never-healing #1781 shape
   this lane exists for). The other writer that can set ``failed``
   (``workers/shud_runtime/runtime.py``; the SQL orchestration repository was a
-  second one until R3, #3260, deleted it) is the node-22 compute plane, which
+  second one until R3, #3260, deleted it) is the compute role, which
   connects to no live DB; the register
   upsert preserves status, the forcing stage does not write ``hydro_run``,
   publish only writes ``published``. So no code filter is needed, and a prefix

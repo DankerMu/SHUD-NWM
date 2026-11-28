@@ -44,7 +44,7 @@ FAILURE_SCHEMA_VERSION = "nhms.basin_retirement.failure_receipt.v1"
 RUN_BACKUP_NAME = "hydro-run-backup.csv"
 FAILURE_RECEIPT_PREFIX = "retire-failed"
 
-# What the node-22 half of the succession leaves, and what this tool requires of it.
+# What the compute role's half of the succession leaves, and what this tool requires of it.
 NODE22_PLAN_NAME = "plan.json"
 NODE22_FINISH_NAME = "step-finish.json"
 NODE22_KIND = "remove_basin"
@@ -90,7 +90,7 @@ class Settings:
 
     @property
     def succession_directory(self) -> Path:
-        """Where the node-22 half left its plan and its step receipts."""
+        """Where the compute role's half left its plan and its step receipts."""
 
         return self.receipt_root / self.succession_id
 

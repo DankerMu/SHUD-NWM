@@ -101,8 +101,8 @@ env_file_value() {
 
 check_copyback_lock() {
   local lock="$1"
-  # Never created here: a missing lock file is a node-22 / copyback-root
-  # problem, not something this installer may paper over.
+  # Never created here: a missing lock file is a problem of the compute role or of the
+  # copyback root, not something this installer may paper over.
   if [ ! -f "$lock" ] || [ -L "$lock" ]; then
     refuse "copyback lock $lock is missing or not a regular file"
   fi

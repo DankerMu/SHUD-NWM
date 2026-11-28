@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Retention cleanup for node-22 scheduler evidence artefacts.
+"""Retention cleanup for the scheduler evidence artefacts of the compute role.
 
 Scoped to `NHMS_SCHEDULER_EVIDENCE_ROOT` (top-level plus its `retention/`
 subdirectory). Applies an age-then-size policy against three explicit

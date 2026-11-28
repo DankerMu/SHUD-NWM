@@ -10,7 +10,7 @@ using the same ``merge_state_snapshot_index_copyback`` code path, so the
 scoping, locking, compare-and-swap and checksum semantics are identical to
 production.
 
-It must run as the provider owner (``frd_muziyao`` on node-22): the provider
+It must run as the provider owner (``frd_muziyao`` on the compute control host): the provider
 lock requires the lock parent directory to be owned by the effective uid and
 the compare-and-swap requires a matching preimage owner.
 

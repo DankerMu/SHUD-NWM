@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Refresh all expiring node-22 scheduler file providers without a database."""
+"""Refresh all expiring scheduler file providers of the compute role without a database."""
 
 from __future__ import annotations
 

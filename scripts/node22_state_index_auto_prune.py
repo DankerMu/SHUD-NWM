@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Daily node-22 state-index ``prune-retention`` auto-enforce at the scheduler pass boundary (#3121).
+"""Daily state-index ``prune-retention`` auto-enforce of the compute role at the scheduler pass boundary (#3121).
 
 Flow (one run, no retries):
 

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Read-only health probe for the node-22 DB-free scheduler lane.
+"""Read-only health probe for the DB-free scheduler lane of the compute role.
 
-Issue #2570 (group C).  When the DB-free scheduler on node-22 quits making
+Issue #2570 (group C).  When the DB-free scheduler of the compute role quits making
 progress, nothing rings.  ``services/orchestrator/monitoring.py`` refuses to
-construct without ``DATABASE_URL`` and node-22 by design reaches no live
+construct without ``DATABASE_URL`` and the compute role by design reaches no live
 database, so that module cannot run here; node-27 can run it but cannot see
-node-22's ``/scratch`` evidence root.  The no-progress circuit writes one
+the ``/scratch`` evidence root of the compute hosts.  The no-progress circuit writes one
 stderr line into a journal nobody reads, and the resource-limit fallback lands
 only in an artifact.  The 2026-09-22T21:13 incident was found by a human
 reading 279 artifacts by hand, with zero alerts in the meantime.
@@ -15,7 +15,7 @@ scheduler timer and service, the governed terminal pass artifacts under the
 evidence root, and the no-progress tracker --- into exactly one verdict by a
 fixed precedence, writes a bounded receipt, and exits non-zero for every
 verdict other than ``ok``.  The failed unit is the alert: the probe's unit and
-the other five node-22 oneshots carry ``OnFailure=`` wired to
+the other five oneshots of the compute control host carry ``OnFailure=`` wired to
 ``nhms-node22-unit-failure-alert@.service``, which mails the unit's last 30
 journal lines (mail lane configured via
 ``infra/env/node22-unit-failure-alert.example``, authority row in
@@ -167,8 +167,8 @@ DEFAULT_EVIDENCE_ROOT = "/scratch/frd_muziyao/nhms-prod/workspace/scheduler/evid
 # that puts it there is refused (`load_config`).
 DEFAULT_RECEIPT_ROOT = "/scratch/frd_muziyao/nhms-prod/workspace/scheduler-stall-health/receipts"
 
-# Every default below is the node-22 production value and every one is derived
-# from measurement (2026-09-23, 276 terminal pass artifacts), not from the
+# Every default below is the production value of the compute role, and every one is derived from
+# measurement on the retired node-22 host (2026-09-23, 276 terminal pass artifacts), not from the
 # timer's nominal cadence.  See the OpenSpec change's design document.
 #
 # Adjacent `started_at` intervals measured med/p90/p99/max = 8.3 / 13.4 /
@@ -260,7 +260,7 @@ DEFAULT_SCAN_LIMIT = 96
 # catch-up pass density (~150-245 entries/day vs ~15-25/day steady), so the
 # 90-day worst is ~245 x 90 = ~22k; the old 4096 left the probe `probe_failed`
 # on every tick.  A full listing stays cheap (`ls -f` of 6185 entries on the
-# node-22 NFS mount: 11 ms).  Reaching this bound is still a REPORTED FACT,
+# NFS mount of the retired node-22 host: 11 ms).  Reaching this bound is still a REPORTED FACT,
 # never a silent truncation: `os.scandir` returns filesystem order, so a
 # truncated listing makes "the lexically greatest names are the highest hour
 # buckets" false, and the margin argument above collapses without a trace.
@@ -322,7 +322,7 @@ MAX_RECEIPT_LIST_ENTRIES = 20
 # systemd prints one of these for a timestamp it does not have.
 EMPTY_TIMESTAMPS = frozenset({"", "-", "n/a", "0"})
 
-# The service is `Type=oneshot`.  MEASURED on node-22 across a full pass:
+# The service is `Type=oneshot`.  MEASURED on the retired node-22 host across a full pass (recorded 2026-09-23):
 # in flight it reports `ActiveState=activating` with a non-dead sub-state, on
 # completion `inactive`/`dead`.  It is NEVER `active`.  Grading a verdict on
 # `ActiveState == "active"` would make every guard below fail open during a
@@ -334,7 +334,7 @@ SERVICE_RUNNING_ACTIVE_STATES = frozenset({"active", "activating"})
 # "running is equivalent to SubState != dead" is NOT true: a oneshot whose run
 # exited non-zero reports `failed`/`failed`, and reading that as running would
 # gate off the stopped-timer verdict and report the lower-precedence
-# service-failure verdict instead.  This value was not observed on node-22 --
+# service-failure verdict instead.  This value was not observed on the retired node-22 host --
 # only `success` ever was -- so it is handled by construction rather than by
 # measurement, which is exactly why it is named rather than left to a
 # not-equal test.
@@ -701,7 +701,7 @@ def parse_systemd_timestamp(raw: str) -> datetime | None:
     """Parse a ``systemctl show`` timestamp such as ``Tue 2026-09-23 06:11:18 CST``.
 
     ``%Z`` in ``strptime`` only accepts the running machine's own zone
-    abbreviations, so it parses on node-22 and fails anywhere else.  The zone
+    abbreviations, so it parses on a host in that zone and fails anywhere else.  The zone
     token is therefore handled explicitly: ``UTC``/``GMT``/``Z`` are read as
     UTC and anything else is read as the local zone, which is what systemd
     emitted.
@@ -2118,7 +2118,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="node22_scheduler_stall_health.py",
         description=(
-            "Read-only health probe for the node-22 DB-free scheduler lane. "
+            "Read-only health probe for the DB-free scheduler lane of the compute role. "
             "It observes and reports; it never modifies a systemd unit, never "
             "writes under the evidence root, and never clears a lock."
         ),

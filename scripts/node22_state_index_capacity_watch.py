@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Daily node-22 state-index capacity watch (#2653): ``prune-retention`` dry-run only.
+"""Daily state-index capacity watch of the compute role (#2653): ``prune-retention`` dry-run only.
 
 Calls ``scripts.scheduler_state_index_repair.repair_state_index`` in-process
 with ``operation="prune-retention"`` and a literal ``enforce=False``; there is

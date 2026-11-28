@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Publish a DB-free scheduler registry manifest from the Basins source tree.
 
-The node-22 production scheduler reads a file registry, not node-27's live
+The production scheduler of the compute role reads a file registry, not node-27's live
 database. This script bridges that gap: discover every publishable SHUD model
 under NHMS_BASINS_ROOT, publish immutable model packages when needed, derive
 the scheduler-ready rows from the same package/source validation path used by
@@ -27,7 +27,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any, Callable, Protocol
 
-# `python scripts/publish_scheduler_file_registry.py` (the node-22 bringup
+# `python scripts/publish_scheduler_file_registry.py` (the service bringup
 # runbook invokes it that way) puts `scripts/` on sys.path, not the repository
 # root, so the owner package below is not importable without this. The guard
 # compares the resolved absolute path, so it is a no-op whenever the root is

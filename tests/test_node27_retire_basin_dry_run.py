@@ -110,7 +110,7 @@ def test_a_dry_run_lists_every_failed_precondition_and_goes_on_with_the_read_onl
     assert status == 1
     refused = report["would_be_refused"]
     assert len(refused) == 2 and all(entry.startswith("precondition: ") for entry in refused)
-    assert "has not finished on node-22" in refused[0]
+    assert "has not finished on the compute control host" in refused[0]
     assert f"still holds rows of basin version {HUAI}: ['dg_huai_gfs']" in refused[1]
     assert report["preconditions"]["manifest"]["rows_of_this_basin_version"] == ["dg_huai_gfs"]
     assert report["preconditions"]["model_row_count"] == 4

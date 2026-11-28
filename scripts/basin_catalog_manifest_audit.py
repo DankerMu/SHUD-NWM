@@ -1,4 +1,4 @@
-"""Audit the public basin catalog against the node-22 scheduler manifest (#2621).
+"""Audit the public basin catalog against the scheduler manifest of the compute role (#2621).
 
 The default ``GET /api/v1/basins`` is the raw ``core.basin`` directory (minus
 ``evidence-only``), retired basins included; ``has_display_product=true`` is
@@ -181,7 +181,7 @@ def _print(receipt: dict[str, Any]) -> None:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--manifest", type=Path, required=True, help="node-22 scheduler manifest-last.json")
+    parser.add_argument("--manifest", type=Path, required=True, help="scheduler manifest-last.json (compute role)")
     parser.add_argument("--database-url", default=None, help="default: $DATABASE_URL")
     parser.add_argument("--page-size", type=int, default=DEFAULT_PAGE_SIZE)
     args = parser.parse_args(argv)

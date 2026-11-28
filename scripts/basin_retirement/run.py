@@ -57,39 +57,41 @@ def refuse_auth_environment() -> None:
 
 
 def _node22_removes(settings: Settings, refusals: list[str]) -> list[str] | None:
-    """The model ids the node-22 half removed, or None when that half is not a finished ``remove_basin``."""
+    """The model ids the compute role's half removed, or None when that half is not a finished ``remove_basin``."""
 
     finish = settings.succession_directory / NODE22_FINISH_NAME
     plan = settings.succession_directory / NODE22_PLAN_NAME
     by_hand = (
-        "A removal that was finished by hand after a node-22 hard stop has no such receipt: the node-27 steps "
-        f"are then manual too ({RUNBOOK})."
+        "A removal that was finished by hand after a hard stop of the compute role's half has no such receipt: "
+        f"the node-27 steps are then manual too ({RUNBOOK})."
     )
     try:
         outcome = read_json(finish).get("outcome")
     except (OSError, ValueError) as error:
         refusals.append(
-            f"the node-22 finish receipt {finish} cannot be read ({error}): succession {settings.succession_id!r} "
-            f"has not finished on node-22. {by_hand}"
+            f"the compute role's finish receipt {finish} cannot be read ({error}): "
+            f"succession {settings.succession_id!r} has not finished on the compute control host. {by_hand}"
         )
         return None
     if outcome != "completed":
-        refusals.append(f"the node-22 finish receipt {finish} has outcome {outcome!r}, not 'completed'. {by_hand}")
+        refusals.append(
+            f"the compute role's finish receipt {finish} has outcome {outcome!r}, not 'completed'. {by_hand}"
+        )
         return None
     try:
         recorded = read_json(plan)
     except (OSError, ValueError) as error:
-        refusals.append(f"the node-22 plan {plan} cannot be read ({error}).")
+        refusals.append(f"the compute role's plan {plan} cannot be read ({error}).")
         return None
     if recorded.get("kind") != NODE22_KIND:
         refusals.append(
-            f"the node-22 plan {plan} has kind {recorded.get('kind')!r}, not {NODE22_KIND!r}: succession "
-            f"{settings.succession_id!r} did not remove a basin."
+            f"the compute role's plan {plan} has kind {recorded.get('kind')!r}, not {NODE22_KIND!r}: "
+            f"succession {settings.succession_id!r} did not remove a basin."
         )
         return None
     removes = recorded.get("removes")
     if not isinstance(removes, list) or not removes or not all(isinstance(item, str) for item in removes):
-        refusals.append(f"the node-22 plan {plan} names no removed model ids.")
+        refusals.append(f"the compute role's plan {plan} names no removed model ids.")
         return None
     return list(removes)
 
@@ -163,8 +165,8 @@ def preconditions(settings: Settings) -> tuple[Basin | None, dict[str, Any], lis
             facts.update(basin_id=basin_id, model_row_count=len(rows), removed_model_rows=removed_rows)
             if removes is not None and not removed_rows:
                 refusals.append(
-                    f"no model id the node-22 plan removed ({removes}) is a core.model_instance row of basin "
-                    f"version {settings.basin_version_id}: this succession did not remove this basin."
+                    f"no model id the compute role's plan removed ({removes}) is a core.model_instance row of "
+                    f"basin version {settings.basin_version_id}: this succession did not remove this basin."
                 )
     except StepFailure as error:
         refusals.append(f"the database could not be read: {error}")

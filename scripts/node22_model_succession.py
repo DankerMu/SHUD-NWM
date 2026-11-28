@@ -1,8 +1,8 @@
 #!/usr/bin/env python
-"""Run the compute-side steps of a model succession on node-22, in their fixed order.
+"""Run the compute-side steps of a model succession on the compute control host, in their fixed order.
 
 After the provision step on node-27, a recalibration succession needs, on
-node-22: the new packages copied from the shared store to the compute store,
+the compute control host: the new packages copied from the shared store to the compute store,
 the state rows cloned from the old models to the new ones, the merged registry
 manifest published, one provider refresh, and the scheduler timer stopped
 around the last three.  This command runs them as the seven steps of
@@ -63,7 +63,7 @@ The tool is DB-free: it refuses when a database variable is set and never
 opens a connection.  It never stops or kills the scheduler service, never
 enables, disables or masks a unit and writes nothing under a systemd directory.
 
-Run it on node-22 as the owner of both manifests, with the provider-refresh
+Run it on the compute control host as the owner of both manifests, with the provider-refresh
 environment loaded:
 ``cd /scratch/frd_muziyao/NWM && .venv/bin/python -m scripts.node22_model_succession``.
 """
@@ -216,9 +216,9 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--operator-id", required=True)
     parser.add_argument(
         "--new-rows-registry",
-        help="Registry file written by the provision --apply, as node-22 sees it. Optional when the provision "
-        f"apply receipt records an object_store_key for it (resolved under {PROVIDER_STORE_ROOT_ENV}). Refused "
-        f"with {KIND_REMOVE_BASIN}, which introduces no row.",
+        help="Registry file written by the provision --apply, as the compute control host sees it. Optional when "
+        f"the provision apply receipt records an object_store_key for it (resolved under {PROVIDER_STORE_ROOT_ENV}). "
+        f"Refused with {KIND_REMOVE_BASIN}, which introduces no row.",
     )
     parser.add_argument(
         "--receipt-root",

@@ -22,7 +22,7 @@ the model (``cohort_candidates``), with a warning that marking one re-runs the w
 cohort: from the failed stage when the scheduler can reuse the durable upstream output
 (#2600), otherwise from convert.  The tool never substitutes the id itself (#2584).
 
-Execution host: node-22 (the DB-free file journal lives on its ``/scratch``).
+Execution host: the compute control host (the DB-free file journal lives on its ``/scratch``).
 """
 
 from __future__ import annotations

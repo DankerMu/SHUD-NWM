@@ -200,7 +200,7 @@ def _database_preflight(database_url: str | None, env: dict[str, str]) -> tuple[
             _preflight_blocker(
                 "DATABASE_URL_NODE22_HISTORICAL_ENDPOINT",
                 "DATABASE_URL",
-                "node-27 source download must not use node-22 historical PostgreSQL.",
+                "node-27 source download must not use the retired node-22 host's PostgreSQL.",
             )
         )
     allowed = _parse_allowed_endpoints(env.get("NODE27_DOWNLOAD_ALLOWED_DATABASE_ENDPOINTS"))

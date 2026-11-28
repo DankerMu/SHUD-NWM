@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install / arm / roll back the node-22 file-provider refresh lane
+# Install / arm / roll back the file-provider refresh lane on the compute control host
 # (nhms-scheduler-file-provider-refresh.{timer,service}).
 #
 # Failure-path contract (#2294):

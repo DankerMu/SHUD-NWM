@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Cold-archive expired node-22 file-journal cycles.
+"""Cold-archive expired file-journal cycles of the compute role.
 
 The checked-in executable path is retained for the systemd unit.  Archive,
 restore, configuration, retention orchestration, and receipt ownership live in
