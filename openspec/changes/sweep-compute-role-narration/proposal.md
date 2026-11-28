@@ -84,7 +84,7 @@ its deltas from the main spec text of that day, and archives it in its PR's last
   (`services/tile_publisher/forcing_copyback_backfill.py`) is live code under test and
   `forcing-copyback-backfill` requires the operator documentation. Retiring that lane (CLI, spec,
   runbook) is a separate decision; here its narration is rewritten and its header corrected.
-- Renaming anything that carries `node22` in its name.
+- Renaming anything that carries `node22` in its name (the one renamed test is in `design.md` §5).
 - A guard against narration coming back (see `design.md`, "Not yet specified").
 
 ## Impact
