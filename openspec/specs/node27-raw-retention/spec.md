@@ -101,7 +101,7 @@ The canonical precipitation mirror SHALL be prunable by the node-27 retention
 account without root: `canonical/<storage_source>/`, every
 `canonical/<storage_source>/<cycle>/` and its `prcp_rate_or_amount/` SHALL be
 mode `2775` with a group the retention account belongs to (production: gid
-1107, `nwmuser`, shared by node-22 and node-27). The producers set the mode
+1107, `nwmuser`, shared by the compute hosts and node-27). The producers set the mode
 explicitly on every directory they own — `<cycle>/` before the copied tree is
 created, so the tree inherits the parent's group — and the existing tree
 obtains group and mode from the documented owner-side sweep. `canonical/`

@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Align repository Python defaults, node-22 environment safety, diagnostic checkout identity, validation routing, and historical topology authority without narrowing supported Python versions or forcing an active environment cutover.
+Align repository Python defaults, environment safety of the compute hosts, diagnostic checkout identity, validation routing, and historical topology authority without narrowing supported Python versions or forcing an active environment cutover.
 
 ## Requirements
 
@@ -23,7 +23,7 @@ version runs.
 - **WHEN** default Python invokes `Path.rglob(..., recurse_symlinks=True)`
 - **THEN** Python 3.11 raises `TypeError`
 
-### Requirement: Active node-22 entrypoints preserve the deferred environment
+### Requirement: Active entrypoints of the compute role preserve the deferred environment
 
 Every tracked automatic or required operator operation SHALL preserve the
 active environment of the compute role's checkout, which Slurm jobs and

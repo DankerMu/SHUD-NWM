@@ -7,7 +7,7 @@ TBD - created by archiving change node22-db-free-scheduler-state. Update Purpose
 
 ### Requirement: Scheduler model discovery can use a file-backed registry
 
-The system SHALL support node-22 scheduler model discovery from a versioned
+The system SHALL support the compute role's scheduler model discovery from a versioned
 file/object-store registry manifest instead of `PsycopgModelRegistryStore`.
 
 #### Scenario: File registry loads production models
@@ -84,7 +84,7 @@ file/object-store index instead of `PsycopgMetStore`.
 
 #### Scenario: Raw handoff boundary remains enforced
 
-- **WHEN** node-22 DB-free scheduler evaluates a node-27 raw source cycle
+- **WHEN** the compute role's DB-free scheduler evaluates a node-27 raw source cycle
 - **THEN** it still validates the node-27 NFS raw manifest source/cycle
   identity, URI suffix, entry list, referenced raw files, and compute-visible
   staging evidence

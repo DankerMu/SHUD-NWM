@@ -80,7 +80,7 @@ The system SHALL poll pipeline status, stages, and jobs every 10 seconds, pausin
 - **THEN** all monitoring data MUST be re-fetched immediately regardless of the polling timer
 
 ### Requirement: The jobs table SHALL render no run-action control
-The system SHALL NOT render a retry button (#3179) or a cancel button (#3394) for any job, in any role and any service role, and SHALL NOT send a retry or cancel request. The action column keeps the log modal and the diagnostics actions. Failed-run recovery is the node-22 manual-repair marker lane.
+The system SHALL NOT render a retry button (#3179) or a cancel button (#3394) for any job, in any role and any service role, and SHALL NOT send a retry or cancel request. The action column keeps the log modal and the diagnostics actions. Failed-run recovery is the manual-repair marker lane of the compute role.
 
 #### Scenario: Operator sees no run action
 - **WHEN** a user with role "operator" views a failed job and an active job on a `compute_control` or `dev_monolith` API

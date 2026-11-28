@@ -51,7 +51,7 @@ is the only orchestration repository.
 
 #### Scenario: Read-side journal schemas are explicit
 
-- **WHEN** node-22 scheduler reads orchestration state in DB-free mode
+- **WHEN** the compute role's scheduler reads orchestration state in DB-free mode
 - **THEN** append-only records use schema
   `nhms.scheduler.file_orchestration_journal.v1`
 - **AND** materialized latest views use schema
@@ -118,7 +118,7 @@ is the only orchestration repository.
 #### Scenario: Historical scheduler state migrates into append-only journal
 
 - **WHEN** operators export scheduler-relevant rows from historical
-  do-not-connect node-22 PostgreSQL `:55433` for the archived/stopped rollback
+  do-not-connect PostgreSQL `:55433` of the retired node-22 host for the archived/stopped rollback
   state
 - **THEN** the importer writes active/completed/candidate/job/event/retry and
   permanent-failure rows into the file journal

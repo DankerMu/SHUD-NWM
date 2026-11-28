@@ -695,7 +695,7 @@ mutex semantics, budget semantics, and deletion selection SHALL be unchanged.
 
 ### Requirement: Refresh-timer and cutover-flip corpora SHALL partition without drift
 
-The repository SHALL partition the node-22 refresh-timer health suite into collectible
+The repository SHALL partition the refresh-timer health suite of the compute role into collectible
 modules below 1,000 lines with shared definitions in non-collectible helpers.
 The direct-grid display cutover-flip corpus that this requirement
 also partitioned was deleted together with the station-flag flip hook by #3164, so its

@@ -183,7 +183,7 @@ Minimal mergeable slice: 7.1 - about 65 lines in packages no script imports text
 - [x] 8.2 Monitoring hint (both components, both variants), the fake page, the probe's fallback text,
   three tests, the frontend comment lines; `display-readonly-ops-ui` (the guidance scenario and the
   two "22-node" lines) in the slice's own change.
-- [ ] 8.3 node-27, after 8.1 and 8.2 are merged. **Stop: needs the owner's go-ahead for the production
+- [x] 8.3 node-27, after 8.1 and 8.2 are merged. **Stop: needs the owner's go-ahead for the production
   action.** Display API restart, frontend rebuild and swap, C1 receipt, C4 live receipt; receipt
   posted on the issue.
 
@@ -219,7 +219,7 @@ the titles `appendix-titles.md` assigns to it, edits Purpose lines directly at a
 `ops-monitoring-api` (8.1), `display-readonly-ops-ui` (8.2), `node22-unit-tracking` (9.2),
 `evidence-boundary-hardening` (5.1, 5.2).
 
-- [ ] 10.1 The specs with one to three mentions that 10.2 and 10.3 do not name (about 30), with
+- [x] 10.1 The specs with one to three mentions that 10.2 and 10.3 do not name (about 30), with
   `hydro-result-ingest-and-publish` and `multibasin-product-discovery`, which Appendix B misses.
 - [ ] 10.2 The remaining narration of the contract specs (`production-topology-contract`,
   `production-ops-readiness`), including the other sentences of the requirements 1.4, 3.6 and 4.5

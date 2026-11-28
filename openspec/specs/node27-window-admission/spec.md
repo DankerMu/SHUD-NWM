@@ -12,6 +12,7 @@ Archive status:
 - retained_for: record of the I8 expand-window admission contract; its tools survive only under openspec/changes/archive/2026-09-15-node27-post-d12-reforward/tools/, and 000060 dropped hydro.river_timeseries_legacy and hydro.hydro_run.timeseries_store on 2026-09-19
 
 ## Requirements
+
 ### Requirement: Exact pending migration admission preserves historical ledger
 
 Window preparation and its migration worker SHALL admit the migration step only when sorted current SQL filenames absent
@@ -99,7 +100,7 @@ reload, successful completion SHALL require a fresh ordinary-runtime audit befor
 ### Requirement: Child qualification does not claim parent rollout completion
 
 The two child deliveries SHALL preserve the original f24 five-round and final-review lineage and SHALL NOT reset or
-disguise that review counter. Their qualification SHALL NOT execute node-22 operations, retention, manual ledger/state
+disguise that review counter. Their qualification SHALL NOT execute operations of the compute role, retention, manual ledger/state
 repair or production pin removal, or claim T0 and parent completion.
 
 #### Scenario: Child evidence is ready for parent execution
@@ -225,4 +226,3 @@ OIDs, all facts in both tables, the ledger, and write a fresh route snapshot usa
 - **THEN** recovery (repeated twice) restores OLD canonical and the retained narrow table with unchanged OIDs, retained
   and newly parsed narrow facts, OLD facts and ledger, restores only authorized timers, and a later fresh re-admission
   from the new state succeeds read-only
-

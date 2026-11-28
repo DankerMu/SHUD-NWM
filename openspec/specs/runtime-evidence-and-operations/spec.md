@@ -542,9 +542,9 @@ An explicitly authorized scheduler recovery SHALL deploy only reviewed changes w
 
 #### Scenario: Controlled pinned-runtime recovery
 
-- **WHEN** the reviewed phase-boundary fix is deployed to a quiescent node-22 runtime
+- **WHEN** the reviewed phase-boundary fix is deployed to a quiescent runtime on the retired node-22 host
 - **THEN** deployed SHA and reviewed-patch equivalence are recorded, existing interpreter/environment and safety guards are preserved, and normal scheduler execution produces real forcing, successful forecast, successor state and copied outputs
-- **AND** no tracker reset, forged witness, DB connection from node-22 or forced stage marker is used
+- **AND** no tracker reset, forged witness, DB connection from the retired node-22 host or forced stage marker is used
 
 #### Scenario: Dual-source downstream advancement
 

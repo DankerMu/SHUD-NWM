@@ -150,7 +150,7 @@ The monitoring page SHALL display a job list table in the center area with colum
 
 - **WHEN** an authorized operator views a `failed`, `submission_failed`, `partially_failed` or `permanently_failed` job row
 - **THEN** the table SHALL NOT render a "Retry" button and SHALL NOT issue `POST /api/v1/runs/{run_id}/retry`
-- **AND** failed-run recovery is the node-22 manual-repair marker lane (`scripts/node22_manual_retry_failed_runs.py`, runbook `node22-control-plane-manual-recovery`), not a page action
+- **AND** failed-run recovery is the manual-repair marker lane of the compute role (`scripts/node22_manual_retry_failed_runs.py`, runbook `node22-control-plane-manual-recovery`), not a page action
 
 #### Scenario: View Logs action from table
 

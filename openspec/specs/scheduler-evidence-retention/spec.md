@@ -1,13 +1,13 @@
 # scheduler-evidence-retention Specification
 
 ## Purpose
-Bounded retention of `NHMS_SCHEDULER_EVIDENCE_ROOT` artefacts on node-22 via a systemd user timer, so the scheduler evidence directory does not grow without limit as timing instrumentation increases per-pass artefact size.
+Bounded retention of `NHMS_SCHEDULER_EVIDENCE_ROOT` artefacts of the compute role via a systemd user timer, so the scheduler evidence directory does not grow without limit as timing instrumentation increases per-pass artefact size.
 
 ## Requirements
 
 ### Requirement: A systemd user timer drives retention
 
-A `nhms-scheduler-evidence-retention.timer` and matching `nhms-scheduler-evidence-retention.service` unit SHALL exist at `infra/systemd/nhms-scheduler-evidence-retention.{service,timer}` on git master (sibling of the existing `infra/systemd/nhms-node27-raw-retention.{service,timer}` template) and SHALL be deployed to `~/.config/systemd/user/` on node-22 and SHALL be enabled by the node-22 scheduler deployment procedure.
+A `nhms-scheduler-evidence-retention.timer` and matching `nhms-scheduler-evidence-retention.service` unit SHALL exist at `infra/systemd/nhms-scheduler-evidence-retention.{service,timer}` on git master (sibling of the existing `infra/systemd/nhms-node27-raw-retention.{service,timer}` template) and SHALL be deployed to `~/.config/systemd/user/` on the compute control host and SHALL be enabled by the scheduler deployment procedure of the compute role.
 
 The timer SHALL fire at most once per 24 hours (default cadence), with an initial delay avoiding overlap with `nhms-compute-scheduler.timer` peak activity.
 
@@ -87,7 +87,7 @@ The script SHALL skip any file that has a sibling `.tmp` or `.lock` file (indica
 
 Every retention timer fire SHALL produce a receipt JSON at `NHMS_SCHEDULER_EVIDENCE_ROOT/retention/retention-<utc-iso>.json` containing: `started_at`, `finished_at`, `total_before_bytes`, `total_after_bytes`, `deleted_count`, `deleted_paths` (list with pre-deletion mtime), `receipt_pass` (list of retention-receipt files deleted this run under the 180-day rule, empty on most runs), `skipped_count`, `skipped_paths_by_reason` (grouped by reason including `in-flight`, `safety-window`, `unrecognised`), `policy` (the resolved `retention_days`, `max_mb`, `receipt_retention_days`, and whitelist glob values).
 
-If no deletions occurred, an empty-diff receipt SHALL still be written so operators can verify the timer ran. The retention script SHALL create the `retention/` subdirectory if it does not exist before writing the receipt so the very first fire on a fresh node-22 succeeds.
+If no deletions occurred, an empty-diff receipt SHALL still be written so operators can verify the timer ran. The retention script SHALL create the `retention/` subdirectory if it does not exist before writing the receipt so the very first fire on a fresh compute control host succeeds.
 
 #### Scenario: Empty pass still emits receipt
 

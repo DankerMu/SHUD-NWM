@@ -8,7 +8,7 @@ boundary.
 
 ### Requirement: Ops MVP entry
 
-The frontend SHALL expose an operations MVP entry focused on QHH pipeline status, jobs, and logs. It has no retry control and no cancel control, and neither has `/monitoring` (#3179, #3394); failed-run recovery is the node-22 manual-repair marker lane (#3179).
+The frontend SHALL expose an operations MVP entry focused on QHH pipeline status, jobs, and logs. It has no retry control and no cancel control, and neither has `/monitoring` (#3179, #3394); failed-run recovery is the manual-repair marker lane of the compute role (#3179).
 
 #### Scenario: Ops navigation entry
 - **WHEN** the app shell renders for an authorized operator
@@ -42,7 +42,7 @@ The operations MVP SHALL read stage, job, log, and retry state from formal backe
 #### Scenario: Retry failed run
 - **WHEN** a job or run is in `failed`, `submission_failed`, `partially_failed`, or `permanently_failed` state and the operator is authorized
 - **THEN** the page shows no restart action and does not call `POST /api/v1/runs/{run_id}/retry`
-- **AND** recovery runs through the node-22 manual-repair marker lane (`scripts/node22_manual_retry_failed_runs.py`).
+- **AND** recovery runs through the manual-repair marker lane of the compute role (`scripts/node22_manual_retry_failed_runs.py`).
 
 #### Scenario: Authorization gate
 - **WHEN** a non-operator opens `/ops`
