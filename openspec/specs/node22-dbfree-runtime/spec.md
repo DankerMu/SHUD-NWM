@@ -5,9 +5,9 @@ The compute-role scheduler runs only in the DB-free mode: it has no PostgreSQL d
 
 ## Requirements
 
-### Requirement: Node-22 scheduler has an explicit DB-free runtime mode
+### Requirement: The compute role's scheduler has an explicit DB-free runtime mode
 
-The system SHALL run the node-22 scheduler only in the DB-free runtime mode:
+The system SHALL run the compute role's scheduler only in the DB-free runtime mode:
 there is no DB-backed scheduler mode to select. The scheduler SHALL run without
 any PostgreSQL dependency and SHALL fail closed when DB-backed settings are
 still present. `NHMS_SCHEDULER_DB_FREE_REQUIRED` SHALL no longer select the
@@ -30,7 +30,7 @@ process env.
 
 #### Scenario: DB-free mode rejects DATABASE_URL
 
-- **WHEN** the node-22 scheduler starts with
+- **WHEN** the compute role's scheduler starts with
   `NHMS_SCHEDULER_STATE_BACKEND=file`
 - **AND** scheduler runtime env still contains `DATABASE_URL`
 - **THEN** scheduler preflight fails before acquiring a lock or submitting jobs
@@ -66,7 +66,7 @@ process env.
 
 #### Scenario: DB-free mode uses file lock
 
-- **WHEN** the node-22 scheduler starts
+- **WHEN** the compute role's scheduler starts
 - **THEN** it uses `NHMS_SCHEDULER_LOCK_BACKEND=file`
 - **AND** live scheduler evidence records `lock_type=file`, lock path,
   contention status, owner, and pass ID
@@ -74,7 +74,7 @@ process env.
 
 #### Scenario: Concurrent file-lock passes do not both mutate
 
-- **WHEN** two node-22 scheduler passes start against the same file lock root
+- **WHEN** two scheduler passes of the compute role start against the same file lock root
 - **THEN** at most one pass may acquire the mutation lock
 - **AND** the other pass records lock contention without submitting jobs.
 
@@ -88,7 +88,7 @@ process env.
 ### Requirement: DB-free runtime evidence proves absence of PostgreSQL use
 
 The system SHALL write bounded evidence that proves the scheduler pass did not
-depend on node-22 PostgreSQL.
+depend on PostgreSQL.
 
 #### Scenario: No database dependency appears in scheduler evidence
 

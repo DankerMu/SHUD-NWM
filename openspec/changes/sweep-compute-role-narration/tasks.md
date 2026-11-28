@@ -221,7 +221,7 @@ the titles `appendix-titles.md` assigns to it, edits Purpose lines directly at a
 
 - [x] 10.1 The specs with one to three mentions that 10.2 and 10.3 do not name (about 30), with
   `hydro-result-ingest-and-publish` and `multibasin-product-discovery`, which Appendix B misses.
-- [ ] 10.2 The remaining narration of the contract specs (`production-topology-contract`,
+- [x] 10.2 The remaining narration of the contract specs (`production-topology-contract`,
   `production-ops-readiness`), including the other sentences of the requirements 1.4, 3.6 and 4.5
   touched, and the specs named after the codename (`node22-db-retirement-cutover`,
   `node22-dbfree-runtime`, `node22-env-hygiene`, `node22-unit-failure-alert`,
