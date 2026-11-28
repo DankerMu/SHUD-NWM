@@ -650,7 +650,7 @@ def _census_command_result(
     ``emit`` publishes the receipt to stdout and is called BEFORE the optional
     ``--output`` write, so a receipt path that turns out to be unwritable costs
     the file and not the census: an unguarded write here would leak an
-    ``OSError`` traceback and throw away a run that takes minutes on a production tree.
+    ``OSError`` traceback and throw away a run that took minutes on the retired node-22 host.
     The in-root refusal is unaffected -- it raises before the census runs, so
     nothing has been emitted when it fires.
     """

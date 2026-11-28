@@ -160,8 +160,8 @@ Minimal mergeable slice: 6.2 - its followers are its own except one inventory ro
   the schema description: messages, help, docstrings, comments. The SQL comments of the two applied
   migrations stay (7.3): `tests/test_migrations.py` pins every applied migration file byte for byte
   (#2634). The "Measured on node-22" sentence of `config/calibration_overrides.yaml` is not a
-  comment: it is the `reason` value of an entry, which the registry publisher copies into every
-  package manifest, and the entry carries its own `date`. It stays (7.3).
+  comment: it is the `reason` value of an entry, which the registry publisher copies into the
+  package manifests of that basin, and the entry carries its own `date`. It stays (7.3).
 - [ ] 7.2 Scripts: comments, docstrings, CLI help, messages, the gate's finding texts; the message
   asserted by the two basin-retirement tests follows; no `file.py:NNN` token is added to a Python
   comment. The alert script is group 9's.

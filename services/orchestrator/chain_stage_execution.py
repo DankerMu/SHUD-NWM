@@ -897,8 +897,8 @@ def run_local_publish_stage(
     """Publish display artifacts on the control node.
 
     Compute nodes can write the shared object-store, but the display mount
-    under ``NHMS_PUBLISHED_ARTIFACT_ROOT`` was local to the control node of the retired node-22 host. Keep all heavy
-    SHUD work on Slurm, then mirror publish artifacts from object-store to
+    under ``NHMS_PUBLISHED_ARTIFACT_ROOT`` was local to the retired node-22 host, the control node at the time.
+    Keep all heavy SHUD work on Slurm, then mirror publish artifacts from object-store to
     the display root here where the mount is writable.
     """
 

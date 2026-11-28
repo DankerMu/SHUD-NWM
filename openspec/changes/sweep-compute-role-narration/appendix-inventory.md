@@ -27,7 +27,7 @@ Corrections found in review, 2026-11-27 (the snapshot text below is left as take
   `current-production-ops.md`.
 - Hyphenated compounds are narration, not names: `node-22-local` (6 lines), `node-22-operator` (2),
   `node-22-only` (1), `node-22/operator` (1).
-- Other unlisted lines: `config/calibration_overrides.yaml` ("Measured on node-22", undated);
+- Other unlisted lines: `config/calibration_overrides.yaml` ("Measured on node-22": the `reason` value of an entry, a persisted value that slice 7.1 found is copied into the package manifests of that basin; the entry has its own `date`; unchanged, task 7.3);
   `docs/VALIDATION.md` (host alias of the retired host).
 
 Scope: `git grep -iE 'node-?22'` minus the six history paths = 390 files / 2507 lines (matches the baseline).
@@ -151,7 +151,7 @@ No test pins the OpenSpec specs' prose (only `job-retry-mechanism` scenario head
 | apps/api/routes/pipeline.py:205 `message="Control-plane retry is a manual node-22 action;..."` | no test or snapshot pins it (searched tests, openapi, frontend) |
 | scripts/node27_autopipeline.py:454,2635; scripts/node27_download_cycles.py:203; services/orchestrator/scheduler_preflight.py:138 | no pin found by verbatim-fragment search |
 | scripts/governance/entropy_audit/check_topology.py finding titles | no test pins them |
-| db/migrations/000035_qhh_display_coverage_materialization.sql:45 `COMMENT ON ... 'optional and node-27-local (node-22 keeps the CTE path).'` | no test; the text is persisted into `pg_description` on fresh databases (applied databases keep the old text). The migration runner has no content checksum (`packages/common/migrate.py` records only the version table) |
+| db/migrations/000035_qhh_display_coverage_materialization.sql:45 `COMMENT ON ... 'optional and node-27-local (node-22 keeps the CTE path).'` | the text is persisted into `pg_description` on fresh databases (applied databases keep the old text). The migration runner has no content checksum (`packages/common/migrate.py` records only the version table), but `tests/test_migrations.py` pins every applied migration file byte for byte (#2634; found by slice 7.1), so the `--` comments of applied migrations stay too |
 
 ## 4. Docs triage
 

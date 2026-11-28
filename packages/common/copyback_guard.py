@@ -21,7 +21,7 @@ caller, so it lives here rather than in ``safe_fs``.
 
 Standard library plus ``packages.common.safe_fs`` only, deliberately:
 ``scripts/canonical_precip_copyback_backfill.py`` must import the mutex from the
-production checkout of the compute hosts, whose shared `.venv` is not synced in daily
+production checkout of the compute hosts, whose shared ``.venv`` is not synced in daily
 operation, so nothing on this module's import closure may pull in a third-party package.
 """
 
@@ -308,7 +308,7 @@ def acquire_copyback_batch_lock(
 
     That release guarantee is the *local* kernel's, and the production copyback
     root is not local: ``/ghdc/data/nwm/object-store`` was an NFSv4.2 mount of ``ghdc:/home/ghdc`` on
-    the retired node-22 host (measured 2026-09-10) and is one of the same node-27 export on ``w3``
+    the retired node-22 host (measured 2026-09-10) and is a mount of the same node-27 export on ``w3``
     (read 2026-11-27). A process death there still releases at exit, but a **host** death does not -- the server holds
     the lock open until the client's lease expires, so on that root there is a
     third state beyond "held" and "orphaned": correctly owned, no local holder,
