@@ -140,7 +140,7 @@ def _check_production_topology_drift(root: Path) -> list[FindingSpec]:
                         ),
                         recommendation=(
                             "State that the compute role (node-22 / w3 / w2) uses no local PostgreSQL: w3 / w2 "
-                            "run none, and the local PostgreSQL of the retired node-22 host is historical and "
+                            "run none, and the local PostgreSQL of the retired node-22 host (:55433) is historical and "
                             "do-not-connect; keep any rollback mirror explicit-DSN, archived-rollback-flagged, "
                             "compatibility-only, and sunset-bound."
                         ),

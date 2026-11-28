@@ -167,8 +167,8 @@ DEFAULT_EVIDENCE_ROOT = "/scratch/frd_muziyao/nhms-prod/workspace/scheduler/evid
 # that puts it there is refused (`load_config`).
 DEFAULT_RECEIPT_ROOT = "/scratch/frd_muziyao/nhms-prod/workspace/scheduler-stall-health/receipts"
 
-# Every default below is the production value as set on the retired node-22 host, and every one is derived
-# from measurement (2026-09-23, 276 terminal pass artifacts), not from the
+# Every default below is the production value of the compute role, and every one is derived from
+# measurement on the retired node-22 host (2026-09-23, 276 terminal pass artifacts), not from the
 # timer's nominal cadence.  See the OpenSpec change's design document.
 #
 # Adjacent `started_at` intervals measured med/p90/p99/max = 8.3 / 13.4 /
@@ -260,7 +260,7 @@ DEFAULT_SCAN_LIMIT = 96
 # catch-up pass density (~150-245 entries/day vs ~15-25/day steady), so the
 # 90-day worst is ~245 x 90 = ~22k; the old 4096 left the probe `probe_failed`
 # on every tick.  A full listing stays cheap (`ls -f` of 6185 entries on the
-# NFS mount of the retired node-22 host: 11 ms, recorded 2026-11-12).  Reaching this bound is still a REPORTED FACT,
+# NFS mount of the retired node-22 host: 11 ms).  Reaching this bound is still a REPORTED FACT,
 # never a silent truncation: `os.scandir` returns filesystem order, so a
 # truncated listing makes "the lexically greatest names are the highest hour
 # buckets" false, and the margin argument above collapses without a trace.
