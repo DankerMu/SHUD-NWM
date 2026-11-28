@@ -2,7 +2,9 @@
 
 ## Purpose
 TBD - created by archiving change issue-497-adapter-cycle-hours-runbook. Update Purpose after archive.
+
 ## Requirements
+
 ### Requirement: Adapter Cycle Hours Are Configurable
 
 GFS and IFS adapters SHALL support environment-configured UTC cycle hours while
@@ -75,7 +77,7 @@ run outputs, state snapshots, scheduler evidence, and display artifacts.
 #### Scenario: Forcing package is checked in shared object-store
 
 - **GIVEN** a published business run references a forcing package
-- **WHEN** an operator follows the runbook on node-22 or node-27
+- **WHEN** an operator follows the runbook on the compute control host or node-27
 - **THEN** the runbook normalizes the package URI to a shared object-store
   `forcing/...` key
 - **AND** it accepts both relative keys and configured-prefix URIs such as
@@ -105,4 +107,3 @@ run outputs, state snapshots, scheduler evidence, and display artifacts.
   previous-cycle `cycle_id`
 - **AND** it does not instruct cold-starting the next forecast as the default
   production remedy
-

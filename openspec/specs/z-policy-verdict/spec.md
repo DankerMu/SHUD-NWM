@@ -11,7 +11,7 @@ The change SHALL produce a written `z_policy` verdict from a narrow audit of the
 #### Scenario: Audit answers the three questions and records an allowed verdict
 - **WHEN** the `z_policy` verdict evidence file is produced
 - **THEN** it records an answer to each of the three questions (Z read?, Z used for?, `.cfg` switch?) with line-level citations into the pinned solver source
-- **THEN** it records the pinned commit `3aec65755926c478e13ca7d4fea80715e4e90345` and how the audit oracle was obtained (local `SHUD/` tree HEAD and/or the node-22 forensic command)
+- **THEN** it records the pinned commit `3aec65755926c478e13ca7d4fea80715e4e90345` and how the audit oracle was obtained (local `SHUD/` tree HEAD and/or the forensic command on the retired node-22 host)
 - **THEN** the recorded verdict value is exactly one of `sentinel`, `model_dem_at_cell_center`, or `canonical_orography`.
 
 #### Scenario: A verdict outside the allowed set is rejected

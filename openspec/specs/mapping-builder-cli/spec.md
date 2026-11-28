@@ -31,7 +31,7 @@ The CLI SHALL resolve the baseline model package only from the object-store rele
 - **THEN** the CLI proceeds with the build and records the non-default root in the evidence package.
 
 #### Scenario: Dev-workspace path is rejected without the override flag
-- **WHEN** the CLI input path is a `Basins` dev-workspace path (node-27 `/home/ghdc/nwm/Basins/...` or node-22 `/volume/nwm/Basins/...`) and no override flag is set
+- **WHEN** the CLI input path is a `Basins` dev-workspace path (node-27 `/home/ghdc/nwm/Basins/...` or `/volume/nwm/Basins/...` on the compute hosts) and no override flag is set
 - **THEN** the CLI fails closed and does not read the package or write any output.
 
 #### Scenario: Dev-workspace override is explicit and recorded

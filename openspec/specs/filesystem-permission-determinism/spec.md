@@ -7,7 +7,7 @@ the ambient environment.
 
 `packages/common/safe_fs.py` is the shared creator behind ~122 production call
 sites. When its `os.mkdir` carried no mode argument, every directory it created
-landed at `0o777 & ~umask` — so the same code produced `0o755` on node-22 and CI
+landed at `0o777 & ~umask` — so the same code produced `0o755` on the retired node-22 host (recorded 2026-08-20) and CI
 (umask `0022`) and `0o775` on node-27 (umask `0002`). `provider_atomic` guards
 every provider publish with two fail-closed mode checks, one on a lock's direct
 parent directory and one on an already-existing destination file, so an

@@ -1,7 +1,7 @@
 # file-state-snapshot-index Specification
 
 ## Purpose
-Govern the private file-backed state-snapshot index on node-22: which warm-start candidates it may admit,
+Govern the private file-backed state-snapshot index of the compute role: which warm-start candidates it may admit,
 how copyback merges and replays commit or are classified uncertain, and what it persists, so state lineage
 stays verifiable without a database.
 
@@ -869,7 +869,7 @@ The enforce receipt SHALL stay within the receipt size limit.
 
 ### Requirement: State snapshot index capacity SHALL be watched daily with a failing unit as the alert
 
-node-22 SHALL run a daily user-level oneshot unit that performs the `prune-retention` dry-run of both state index lanes. The run SHALL never pass `enforce`, and SHALL never write either index, the repair archive root or the repair receipt root. It SHALL write a bounded, owner-private receipt that records, for each lane:
+The compute control host SHALL run a daily user-level oneshot unit that performs the `prune-retention` dry-run of both state index lanes. The run SHALL never pass `enforce`, and SHALL never write either index, the repair archive root or the repair receipt root. It SHALL write a bounded, owner-private receipt that records, for each lane:
 
 - `checksum_valid`
 - `entry_count_before`
@@ -973,7 +973,7 @@ When capacity `warning` is true, the logged warning SHALL carry, in addition to 
 
 ### Requirement: State index prune-retention SHALL be enforced automatically at the scheduler pass boundary
 
-node-22 SHALL run a daily user-level oneshot unit that performs a `prune-retention` dry-run. When either lane's `capacity_before.warning` is true, it SHALL enforce the prune. The window SHALL be `max(DEFAULT_STATE_INDEX_RETENTION_DAYS, minimum_days)`, computed from the scheduler cycle lag through the same floor helper the repair uses.
+The compute control host SHALL run a daily user-level oneshot unit that performs a `prune-retention` dry-run. When either lane's `capacity_before.warning` is true, it SHALL enforce the prune. The window SHALL be `max(DEFAULT_STATE_INDEX_RETENTION_DAYS, minimum_days)`, computed from the scheduler cycle lag through the same floor helper the repair uses.
 
 Before enforcing, the unit SHALL do all of the following:
 

@@ -1,7 +1,7 @@
 # scheduler-pass-timing-instrumentation Specification
 
 ## Purpose
-Every production scheduler pass on node-22 emits durable, structured timing evidence separating python-side planning cost from Slurm queue/compute wait, at pass / stage / candidate layers, so downstream optimisation decisions and long-term regression detection can rest on data rather than intuition.
+Every production scheduler pass of the compute role emits durable, structured timing evidence separating python-side planning cost from Slurm queue/compute wait, at pass / stage / candidate layers, so downstream optimisation decisions and long-term regression detection can rest on data rather than intuition.
 
 ## Requirements
 
@@ -101,7 +101,7 @@ Candidate-layer records SHALL NOT be written to stdout under any level to preven
 
 #### Scenario: Candidate level enables candidate records in evidence only
 
-- **WHEN** `NHMS_SCHEDULER_TIMING_LEVEL=candidate` and a pass runs 13 basin models × 2 sources × 5 stages (the canonical node-22 workload)
+- **WHEN** `NHMS_SCHEDULER_TIMING_LEVEL=candidate` and a pass runs 13 basin models × 2 sources × 5 stages (the canonical workload on the retired node-22 host, recorded no later than 2026-07-25)
 - **THEN** the evidence JSON `timing.candidates` array contains 130 records (13 × 2 × 5), one per `(basin_model_id, source_id, stage_name)` tuple
 - **AND** each record has non-negative values for every included sub-phase duration
 - **AND** the operator's `journalctl` output has zero lines with `level="candidate"`.

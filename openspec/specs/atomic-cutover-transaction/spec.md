@@ -1,7 +1,7 @@
 # atomic-cutover-transaction Specification
 
 ## Purpose
-Record that model activation does not transfer warm state. The activation-time state clone was retired by #3189. State carry-over at a cutover is an operator procedure through the node-22 clone CLI (`scripts/node22_clone_direct_grid_cutover_states.py`), and this capability no longer guarantees that an activated-but-not-transferred state is never observable.
+Record that model activation does not transfer warm state. The activation-time state clone was retired by #3189. State carry-over at a cutover is an operator procedure through the clone CLI of the compute role (`scripts/node22_clone_direct_grid_cutover_states.py`), and this capability no longer guarantees that an activated-but-not-transferred state is never observable.
 
 ## Requirements
 
@@ -12,7 +12,7 @@ The model lifecycle operation SHALL NOT clone, write or refuse on warm state:
 - it accepts no cold-start approval input;
 - it writes no `hydro.state_snapshot` row.
 
-State carry-over at a cutover is performed outside activation by the node-22 clone CLI `scripts/node22_clone_direct_grid_cutover_states.py`, whose
+State carry-over at a cutover is performed outside activation by the clone CLI of the compute role, `scripts/node22_clone_direct_grid_cutover_states.py`, whose
 `baseline_cutover` mode partitions basins into warm candidates (fingerprint-gated clone into the scheduler state index)
 and declared cold basins (verified to have no target state; nothing fabricated). The warm/cold partition exists only in
 `baseline_cutover` mode and is declared per basin.

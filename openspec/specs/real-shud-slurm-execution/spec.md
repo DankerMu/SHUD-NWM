@@ -20,7 +20,7 @@ The production runtime SHALL reject stub executables and validate the configured
 
 #### Scenario: SHUD binary dependencies validated
 - **WHEN** a SHUD executable is configured
-- **THEN** preflight verifies that the executable exists, is executable, is visible from the node-22 execution context, has required shared libraries available, and can report a bounded version/help or dry preflight signal
+- **THEN** preflight verifies that the executable exists, is executable, is visible from the execution context of the compute role, has required shared libraries available, and can report a bounded version/help or dry preflight signal
 - **AND** missing libraries are reported as blockers without leaking environment secrets.
 
 #### Scenario: Project inputs validated
@@ -38,8 +38,8 @@ The production runtime SHALL reject stub executables and validate the configured
 - **THEN** the output does not count as SHUD identity, because identity requires the SHUD banner phrase (`Simulator for Hydrologic Unstructured Domains`)
 - **AND** the real SHUD binary, whose no-argument banner contains that phrase, still reports the identity signal as present.
 
-### Requirement: Node-22 Slurm submission path
-SHUD production execution SHALL use a working node-22 Slurm gateway or host submission path with health and accounting receipts.
+### Requirement: Slurm submission path of the compute role
+SHUD production execution SHALL use a working Slurm gateway or host submission path of the compute role with health and accounting receipts.
 
 #### Scenario: Slurm gateway healthy
 - **WHEN** scheduler is configured for Slurm execution

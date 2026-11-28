@@ -2,7 +2,9 @@
 
 ## Purpose
 TBD - created by archiving change issue-494-forcing-backfill. Update Purpose after archive.
+
 ## Requirements
+
 ### Requirement: Historical forcing copyback backfill scans q_down-capable runs
 
 The backfill command MUST scan `hydro.hydro_run` rows with display-ready parsed or published status that have q_down publish value, join those rows to `met.forcing_version`, and dedupe candidate work by normalized forcing package key.
@@ -63,9 +65,9 @@ The backfill command MUST emit an auditable JSON report containing aggregate cou
 - **THEN** dry-run and apply both report the package as already present
 - **AND** apply does not count it as copied.
 
-### Requirement: Node-22 operator documentation describes execution and recovery
+### Requirement: Operator documentation of the compute role describes execution and recovery
 
-The repository MUST document the node-22 backfill command, required environment variables, dry-run/apply distinction, rerun behavior, and rollback boundaries.
+The repository MUST document the backfill command of the compute role, required environment variables, dry-run/apply distinction, rerun behavior, and rollback boundaries.
 
 #### Scenario: Operator follows documented command
 
@@ -114,4 +116,3 @@ The apply path SHALL wrap its probe and raise `COPYBACK_ROOT_UNSAFE`, matching i
 - **WHEN** the backfill verifies the object-store root
 - **THEN** it raises the existing object-store-root unsafety error
 - **AND** the reported details name the object-store root, not the copyback root
-

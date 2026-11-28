@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The node-22 command that carries a model succession through its compute-side steps after the node-27
+The command of the compute role that carries a model succession through its compute-side steps after the node-27
 provision step: copying the new packages to the compute store, stopping the scheduler timer, carrying or
 deliberately not carrying state, publishing the merged scheduler registry, refreshing the providers and
 starting the timer again, each step gated on the receipt of the one before it.
@@ -11,7 +11,7 @@ starting the timer again, each step gated on the receipt of the one before it.
 
 ### Requirement: Compute-side succession steps run in a fixed, receipt-gated order
 
-The node-22 model succession tool SHALL run the steps of the succession kind in a fixed order: copyback,
+The model succession tool of the compute role SHALL run the steps of the succession kind in a fixed order: copyback,
 preflight, begin, clone, publish, refresh and finish for `recalibration`; copyback, preflight, begin, publish,
 refresh and finish for `cold_start` and for `add_basin`; preflight, begin, publish, refresh and finish for
 `remove_basin`. It SHALL write one receipt per completed step, and SHALL refuse a step whose preceding step

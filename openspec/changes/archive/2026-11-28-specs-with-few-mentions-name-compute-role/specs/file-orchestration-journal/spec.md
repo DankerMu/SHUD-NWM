@@ -1,0 +1,158 @@
+## MODIFIED Requirements
+
+### Requirement: Scheduler can use a file-backed orchestration journal
+
+The system SHALL provide a file-backed implementation of the scheduler's
+active/completed/candidate/job/event state responsibilities; the file journal
+is the only orchestration repository.
+
+#### Scenario: File journal preserves active pipeline detection
+
+- **WHEN** scheduler evaluates a source/cycle/model candidate
+- **THEN** the file journal can answer whether an active orchestration or active
+  pipeline already exists
+- **AND** active statuses prevent duplicate submission.
+
+#### Scenario: File journal preserves completed pipeline detection
+
+- **WHEN** scheduler evaluates a source/cycle/model candidate
+- **THEN** the file journal can answer whether the pipeline is already
+  completed
+- **AND** completed candidates are skipped with bounded evidence.
+
+#### Scenario: File journal writes lifecycle and pipeline state
+
+- **WHEN** DB-free scheduler or orchestrator code creates lifecycle,
+  reservation, pipeline-job, or pipeline-event state
+- **THEN** the file journal writes append-only records with atomic/no-clobber
+  file behavior and materializes latest/query views for the same source/cycle
+  identity
+- **AND** read-modify-write appends, event-id allocation, reservation duplicate
+  checks, direct snapshot materialization, and latest materialization are
+  linearized by a durable per-cycle file lock
+- **AND** scheduler-pass lease configuration and journal-transaction guard
+  configuration have distinct, unambiguous semantics; a mode that omits
+  `flock` for the lease MUST NOT silently become `flock` for the journal
+- **AND** DB-free startup fails closed when the configured shared filesystem has
+  no supported cross-process journal transaction guard
+- **AND** direct pipeline-job snapshots are materialized only after the
+  append-only journal truth is committed, so append failure cannot leave a
+  direct-only reservation blocker
+- **AND** reservation, binding, job-status, event insertion, forecast/hydro
+  status, retry, and permanent-failure writes follow the journal's own pinned
+  repository semantics: a unique conflict on job id or idempotency key is a
+  clean reservation loss, a dead unbound reservation is reclaimable, and a
+  permanent failure stays sticky.
+
+#### Scenario: Read-side journal schemas are explicit
+
+- **WHEN** the compute role's scheduler reads orchestration state in DB-free mode
+- **THEN** append-only records use schema
+  `nhms.scheduler.file_orchestration_journal.v1`
+- **AND** materialized latest views use schema
+  `nhms.scheduler.file_orchestration_latest.v1`
+- **AND** records include source/cycle/model/run/candidate identity, job ID,
+  Slurm job ID, stage, status, error code, sequence or event ID, redacted
+  runtime-root evidence, and replay metadata.
+
+#### Scenario: Trusted read surfaces validate schema and identity before replay
+
+- **WHEN** the reader consumes latest views, append-only records, sidecar
+  pipeline events, direct pipeline-job snapshots, model contexts, or forcing
+  contexts
+- **THEN** every consumed row must pass its applicable schema, identity, and
+  field contract before it can affect active, completed, candidate, query, or
+  Slurm evidence
+- **AND** non-object embedded job/event rows, missing required identity fields,
+  invalid cycle timestamps, and mismatched source/cycle/model/run/job identity
+  fail closed as file-journal blocking evidence.
+
+#### Scenario: Direct pipeline-job snapshots cannot mask scoped journal truth
+
+- **WHEN** `<journal-root>/pipeline-jobs/<job_id>.json` is read
+- **THEN** it must be a journal-shaped `pipeline_job` record with schema
+  `nhms.scheduler.file_orchestration_journal.v1` and matching source/cycle/
+  model/job identity
+- **AND** schema-less or mismatched direct snapshots fail closed
+- **AND** terminal direct snapshots do not override active latest/journal rows
+  for the same job even when the direct snapshot has a later `updated_at`.
+
+#### Scenario: Sidecar pipeline events use the journal record contract
+
+- **WHEN** `<journal-root>/pipeline-events/<source>/<cycle>.jsonl` is replayed
+- **THEN** each line must use the append-only journal schema, `pipeline_event`
+  record type, and matching source/cycle identity
+- **AND** wrong schema, wrong cycle, or malformed event identity blocks replay
+  instead of being treated as absent evidence.
+
+#### Scenario: Read-side journal replays without writes
+
+- **WHEN** only append-only journal records exist for a source/cycle
+- **THEN** the DB-free file repository can replay active pipeline jobs and
+  pipeline events into candidate state
+- **AND** missing materialized latest views do not block replay.
+
+#### Scenario: File journal preserves active Slurm job detection
+
+- **WHEN** scheduler asks for active Slurm jobs for a source/cycle/model
+- **THEN** the file journal returns bounded queued, pending, submitted, or
+  running Slurm job evidence for that identity
+- **AND** active Slurm jobs prevent duplicate submission and support
+  cancel/status-sync evidence.
+
+#### Scenario: DB-free mode uses file-backed retry state
+
+- **WHEN** DB-free mode constructs a production orchestrator
+- **THEN** it uses the file-journal retry service, never a DB-backed retry
+  service or SQLAlchemy `PipelineStore`
+- **AND** retry attempts, retry-limit exhaustion, manual repair markers, and
+  permanent-failure state are represented in append-only file journal records.
+- **AND** manual repair markers that unblock scheduler retry decisions require
+  `pipeline.retry_run` policy evidence.
+
+#### Scenario: Historical scheduler state migrates into append-only journal
+
+- **WHEN** operators export scheduler-relevant rows from historical
+  do-not-connect PostgreSQL `:55433` of the retired node-22 host for the archived/stopped rollback
+  state
+- **THEN** the importer writes active/completed/candidate/job/event/retry and
+  permanent-failure rows into the file journal
+- **AND** migrated pipeline events preserve historical `event_id` and
+  `created_at` ordering and repeated imports do not duplicate visible replay
+  events
+- **AND** the migration receipt records cutoff time, row counts, input
+  checksums, replay status, and stale `download_source_cycle` supersession
+  evidence
+- **AND** receipt files are written with no-follow atomic writes under the
+  configured journal/evidence root.
+
+#### Scenario: Malformed file state fails closed
+
+- **WHEN** a DB-free scheduler read sees malformed JSON, unsupported schema, or
+  source/cycle identity mismatch in file journal state
+- **THEN** duplicate-prevention reads fail closed as active/blocking evidence
+- **AND** malformed state is not treated as an absent row.
+
+#### Scenario: File journal discovery and JSON parsing are bounded
+
+- **WHEN** the file journal discovers JSON/JSONL surfaces or decodes JSON
+  payloads
+- **THEN** total discovered files, recursion depth, byte count, record count,
+  JSON node count, and JSON depth are bounded
+- **AND** symlinked/non-regular scanned entries and unsafe path segments fail
+  closed with stable file-journal reasons.
+
+#### Scenario: Candidate-state ordering matches DB tie-breaks before limits
+
+- **WHEN** file-backed rows are materialized into candidate state with job or
+  event limits
+- **THEN** rows are pre-limited using the journal's fixed ordering, including
+  `job_id DESC` for jobs and `event_id DESC` for events when timestamps tie
+- **AND** file input order cannot decide equal-timestamp candidate state.
+
+#### Scenario: Blocked query evidence is public-safe
+
+- **WHEN** a query helper blocks on malformed or unsafe file-journal state
+- **THEN** returned sentinel evidence redacts raw `job_id`, `idempotency_key`,
+  `cycle_id`, `run_id`, and `slurm_job_id` values that look like local paths,
+  `file://`, `s3://`, or `published://` URIs.

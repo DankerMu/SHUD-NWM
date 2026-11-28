@@ -18,7 +18,7 @@ TBD - created by archiving change m25-multibasin-frontend-production. Update Pur
 - **THEN** 响应返回全部已注册流域，与本变更前行为一致
 
 #### Scenario: 新流域产出产品后自动出现
-- **WHEN** 新流域经 `basins_registry_import` 注册并由 22 节点产出 published run 后，调用 `GET /api/v1/basins?has_display_product=true`
+- **WHEN** 新流域经 `basins_registry_import` 注册并由计算角色产出 published run 后，调用 `GET /api/v1/basins?has_display_product=true`
 - **THEN** 该新流域出现在响应中，无需修改任何前端或后端代码
 
 ### Requirement: 流域发现 ready 判定与 latest-product 一致

@@ -7,7 +7,7 @@ The compute side has no database, so the jobs that produced a forecast run (thei
 
 ### Requirement: Source-owned published job provenance
 
-The node-22 DB-free scheduler SHALL publish a bounded, versioned `pipeline_jobs.json` record for each selected run, derived from the real file journal and cross-checked against the run's immutable scientific manifest. The record SHALL bind source, cycle, run, model, job identity, job type, stage, Slurm identity and lifecycle timestamps to the run's manifest and SHALL contain no private filesystem paths, credentials, URIs, or unpinned user payloads. A journal read SHALL never create directories, take a journal write lock, mutate scheduler state, or invoke Slurm submission/cancel/retry APIs.
+The DB-free scheduler of the compute role SHALL publish a bounded, versioned `pipeline_jobs.json` record for each selected run, derived from the real file journal and cross-checked against the run's immutable scientific manifest. The record SHALL bind source, cycle, run, model, job identity, job type, stage, Slurm identity and lifecycle timestamps to the run's manifest and SHALL contain no private filesystem paths, credentials, URIs, or unpinned user payloads. A journal read SHALL never create directories, take a journal write lock, mutate scheduler state, or invoke Slurm submission/cancel/retry APIs.
 
 #### Scenario: Successful export after a real terminal stage
 

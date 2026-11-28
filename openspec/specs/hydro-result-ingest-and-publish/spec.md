@@ -2,7 +2,9 @@
 
 ## Purpose
 TBD - created by archiving change m23-qhh-22-production-automation. Update Purpose after archive.
+
 ## Requirements
+
 ### Requirement: SHUD output ingestion
 The system SHALL parse real SHUD outputs into hydro database tables using stable QHH output identities.
 
@@ -42,7 +44,7 @@ The system SHALL publish node-27-readable q_down display manifests and logs afte
 #### Scenario: Publish identity is strict
 - **WHEN** publication writes latest-product or display manifest state
 - **THEN** product identity includes `run_id`, `source`, `cycle_time`, `model_id`, basin version, river network version, forcing version, station count, and segment count
-- **AND** downstream 27 evidence can verify it consumed the same run produced by node 22.
+- **AND** downstream 27 evidence can verify it consumed the same run produced by the compute role.
 
 ### Requirement: Pipeline jobs and events cover every stage
 The production path SHALL persist stage/job/event records for download, convert, forcing, SHUD forecast, parse, and publish.

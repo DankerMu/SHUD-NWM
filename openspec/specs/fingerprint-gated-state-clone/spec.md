@@ -1,7 +1,7 @@
 # fingerprint-gated-state-clone Specification
 
 ## Purpose
-Define the fingerprint-gated state clone. A `(M0, source, t*)` warm-state row is cloned into `(M1, source, t*)` only when the hydrologic-core (or state-compatibility) fingerprints match. The clone records `cloned_from` provenance and refuses fail-closed, with a stable code and an audit record. Its production caller is the node-22 clone CLI.
+Define the fingerprint-gated state clone. A `(M0, source, t*)` warm-state row is cloned into `(M1, source, t*)` only when the hydrologic-core (or state-compatibility) fingerprints match. The clone records `cloned_from` provenance and refuses fail-closed, with a stable code and an audit record. Its production caller is the clone CLI of the compute role.
 
 ## Requirements
 
@@ -291,7 +291,7 @@ entry, treating absence as "no lineage" rather than as an error.
 
 ### Requirement: File-index clone invocations preserve durable abort evidence and primary errors
 
-The node-22 file-index clone CLI SHALL require a persistent receipt path for every `recalibration` invocation, including dry-run. `baseline_cutover` SHALL retain its existing optional receipt flag.
+The file-index clone CLI of the compute role SHALL require a persistent receipt path for every `recalibration` invocation, including dry-run. `baseline_cutover` SHALL retain its existing optional receipt flag.
 
 When an `--apply` invocation has already persisted one or more clone rows and then aborts, the CLI SHALL attempt to write a receipt that enumerates every completed persisted clone and identifies the failed pair or basin/source location and failure reason before propagating the original failure. A receipt-write failure during this abort handling SHALL be exposed to the operator but SHALL NOT replace the original clone, validation, or mirror-write failure. A receipt-write failure on an otherwise successful invocation SHALL still fail normally, and an existing receipt SHALL never be overwritten.
 
