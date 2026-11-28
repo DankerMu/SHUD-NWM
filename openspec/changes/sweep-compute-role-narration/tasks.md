@@ -179,7 +179,7 @@ Minimal mergeable slice: 7.1 - about 65 lines in packages no script imports text
   OpenAPI description chains (patching code, `openapi/nhms.v1.yaml`, generated types); drift test and
   `check:api-types`. `ops-monitoring-api`, all of it: the sentence of the retry requirement in the
   slice's own change, the Purpose line edited at archive.
-- [ ] 8.2 Monitoring hint (both components, both variants), the fake page, the probe's fallback text,
+- [x] 8.2 Monitoring hint (both components, both variants), the fake page, the probe's fallback text,
   three tests, the frontend comment lines; `display-readonly-ops-ui` (the guidance scenario and the
   two "22-node" lines) in the slice's own change.
 - [ ] 8.3 node-27, after 8.1 and 8.2 are merged. **Stop: needs the owner's go-ahead for the production

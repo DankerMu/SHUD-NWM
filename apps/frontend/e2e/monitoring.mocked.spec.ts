@@ -116,7 +116,7 @@ test.describe('monitoring page', () => {
       },
     })
 
-    // #3179: failed-run recovery is the node-22 marker lane; the page offers no retry.
+    // #3179: failed-run recovery is the marker lane of the compute role; the page offers no retry.
     const failedRow = page.getByRole('row', { name: /run-failed/ })
     await expect(failedRow).toContainText('failed')
     await expect(failedRow.getByRole('button', { name: /查看日志/ })).toBeVisible()
@@ -163,7 +163,7 @@ test.describe('monitoring page', () => {
     await expect(failedRow.getByRole('button', { name: /查看日志/ })).toBeVisible()
     await expect(page.getByRole('button', { name: /重试/ })).toHaveCount(0)
 
-    // Recovery happens off-page through the node-22 manual-repair marker lane
+    // Recovery happens off-page through the manual-repair marker lane of the compute role
     // (scripts/node22_manual_retry_failed_runs.py); the page only observes it.
     opsApi.recoverViaMarkerLane()
     await page.reload()

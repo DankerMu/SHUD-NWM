@@ -86,11 +86,11 @@ export function JobsTable({
   const sortKey = filters.sortBy ?? 'submitted_at'
   const sortDirection = filters.sortOrder ?? 'desc'
   // #3179, #3394: no run action (retry, cancel) is a page control; failed-run
-  // recovery is the node-22 manual-repair marker lane.
+  // recovery is the manual-repair marker lane of the compute role.
   const controlsVisible = logControlsEnabled || diagnosticsEnabled
   const manualRecoveryGuidance = diagnosticsDisplayReadonly
-    ? '失败诊断用于交给 22 compute-control 节点处理；在 27 display_readonly 页面只做只读查看和本地通知标记，不写入数据库或审计 API。'
-    : '失败诊断用于交给 22 compute-control 节点处理；当前运维页面复制诊断和本地通知标记不写入数据库或审计 API。'
+    ? '失败诊断用于交给计算控制主机处理；在 node-27 display_readonly 页面只做只读查看和本地通知标记，不写入数据库或审计 API。'
+    : '失败诊断用于交给计算控制主机处理；当前运维页面复制诊断和本地通知标记不写入数据库或审计 API。'
   const canDisplayRows = displayEnabled ?? fetchEnabled
   const visibleJobs = canDisplayRows ? jobs : []
   const visibleJobTotal = canDisplayRows ? jobTotal : 0

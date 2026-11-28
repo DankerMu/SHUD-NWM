@@ -208,7 +208,7 @@ export function installC4OpsDom(
   if (observation.operatorRecoveryVisible) {
     const guidance = document.createElement('div')
     guidance.setAttribute('data-testid', 'ops-manual-recovery-guidance')
-    guidance.textContent = '失败诊断用于交给 22 compute-control 节点处理；需要恢复时在 22 compute-control 节点按恢复 runbook 处理。'
+    guidance.textContent = '失败诊断用于交给计算控制主机处理；需要恢复时在计算控制主机按恢复 runbook 处理。'
     document.body.appendChild(guidance)
   }
   if (options.jobId) {

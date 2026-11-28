@@ -236,6 +236,36 @@ describe('C4 production DOM helpers', () => {
     expect(openC4JobLogInPage('job-gfs')).toEqual({ clicked: true })
     expect(openC4JobLogInPage('job-missing')).toEqual({ clicked: false })
   })
+
+  it('recognises the recovery guidance by its element alone, whatever its text', () => {
+    document.body.innerHTML = ''
+    const guidance = document.createElement('div')
+    guidance.setAttribute('data-testid', 'ops-manual-recovery-guidance')
+    document.body.appendChild(guidance)
+    expect(inspectC4OpsInPage().operatorRecoveryVisible).toBe(true)
+    document.body.innerHTML = ''
+  })
+
+  it('recognises the recovery guidance by the fallback status text without the element', () => {
+    document.body.innerHTML = ''
+    const status = document.createElement('div')
+    status.setAttribute('role', 'status')
+    status.textContent = '需要恢复时在计算控制主机按恢复 runbook 处理。'
+    document.body.appendChild(status)
+    expect(inspectC4OpsInPage().operatorRecoveryVisible).toBe(true)
+    document.body.innerHTML = ''
+  })
+
+  it('does not recognise the recovery guidance without the element or the fallback text', () => {
+    document.body.innerHTML = ''
+    expect(inspectC4OpsInPage().operatorRecoveryVisible).toBe(false)
+    const status = document.createElement('div')
+    status.setAttribute('role', 'status')
+    status.textContent = 'display_readonly 只读展示节点不读取 Slurm 队列深度；阶段、作业和日志仍可查看。'
+    document.body.appendChild(status)
+    expect(inspectC4OpsInPage().operatorRecoveryVisible).toBe(false)
+    document.body.innerHTML = ''
+  })
 })
 
 describe('C4 live lane', () => {
