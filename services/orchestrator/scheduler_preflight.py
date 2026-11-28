@@ -135,7 +135,7 @@ def _gateway_self_reference_blocker(
                 "field": "SLURM_GATEWAY_URL",
                 "message": (
                     "Slurm gateway URL resolves to this service's own listen address; "
-                    "configure a real node-22 Slurm gateway endpoint."
+                    "configure a real Slurm gateway endpoint of the compute role."
                 ),
                 "host": host,
                 "port": effective_port,
@@ -216,7 +216,7 @@ def _in_process_gateway_probe(mode: str) -> dict[str, Any]:
     The mock backend runs in-process (no HTTP server to probe), so the dev
     convention reads ``create_gateway().health()`` directly. This keeps a
     submittable dev/test run from ever being fenced (never-break-userspace);
-    the HTTP probe path is reserved for a real node-22 gateway deployment.
+    the HTTP probe path is reserved for a real gateway deployment of the compute role.
     """
 
     from services.slurm_gateway.config import SlurmGatewaySettings

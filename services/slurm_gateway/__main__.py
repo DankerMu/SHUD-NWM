@@ -8,7 +8,7 @@ it never starts the full business API.
 The entrypoint FAILS CLOSED before uvicorn starts when the resolved or
 overridden bind host is not a loopback address (``127.0.0.0/8`` or ``::1``).
 This is the deployable user-level equivalent of the loopback-only listening
-requirement: node-22's user has no noninteractive sudo to install a host
+requirement: the production user of the compute role has no noninteractive sudo to install a host
 packet-filter, so the process itself rejects ``0.0.0.0``, ``::``, hostname, or
 any non-loopback IP before binding. A root-managed host packet-filter/ACL
 remains an optional stronger defense and is not required for the process to be
@@ -80,7 +80,7 @@ def main(argv: list[str] | None = None) -> int:
         port = args.port
 
     # Deployable loopback-only control: reject non-loopback before any import
-    # or bind (node-22 user has no noninteractive sudo for a host firewall).
+    # or bind (the production user of the compute role has no noninteractive sudo for a host firewall).
     _validate_bind_host(host)
 
     import uvicorn
@@ -89,8 +89,8 @@ def main(argv: list[str] | None = None) -> int:
 
     # Load-bearing compatibility pin: `http="h11"` (deterministic pure-Python
     # protocol) avoids uvicorn's `auto` default drifting onto the optional native
-    # httptools, which is live-proven broken in the node-22 maintained active
-    # Python environment (module.parser missing `__all__` -> startup exit 1).
+    # httptools, which was live-proven broken in the Python environment of the retired node-22 host
+    # (recorded 2026-08-29; module.parser missing `__all__` -> startup exit 1).
     # `UVICORN_HTTP` does NOT affect programmatic `uvicorn.run`; the keyword is
     # the only deterministic control. Not a dependency repair: no `uv sync`.
     uvicorn.run(create_gateway_app(), host=host, port=port, http="h11")

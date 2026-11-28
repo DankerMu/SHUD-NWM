@@ -2,7 +2,7 @@
 
 This builds a *bounded* FastAPI app that mounts only the Slurm router
 (`/api/v1/slurm/health` + `/api/v1/slurm/*`). It deliberately includes no forecast/model/
-pipeline/static/frontend business routes, so a node-22 deployment of this app
+pipeline/static/frontend business routes, so a deployment of this app on the compute control host
 cannot expose business surfaces. The full business API (``apps.api.main``)
 remains the only place those routes are served.
 

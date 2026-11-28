@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://nwm.local/schemas/forcing_domain_handoff.schema.json",
   "title": "NHMS Forcing-Domain Object-Store Handoff",
-  "description": "Run-scoped object-store handoff contract for reconstructing met.forcing_version, met.met_station, met.forcing_station_timeseries, and met.interp_weight without a node-22 database.",
+  "description": "Run-scoped object-store handoff contract for reconstructing met.forcing_version, met.met_station, met.forcing_station_timeseries, and met.interp_weight without a database of the compute role.",
   "type": "object",
   "additionalProperties": false,
   "required": [

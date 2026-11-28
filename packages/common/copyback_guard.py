@@ -20,9 +20,9 @@ consuming account on the other node loses traversal. The
 caller, so it lives here rather than in ``safe_fs``.
 
 Standard library plus ``packages.common.safe_fs`` only, deliberately:
-``scripts/canonical_precip_copyback_backfill.py`` must import the mutex while
-node-22's checkout is venv-frozen ahead of its maintenance window, so nothing on
-this module's import closure may pull in a third-party package.
+``scripts/canonical_precip_copyback_backfill.py`` must import the mutex from the
+production checkout of the compute hosts, whose shared ``.venv`` is not synced in daily
+operation, so nothing on this module's import closure may pull in a third-party package.
 """
 
 from __future__ import annotations
@@ -64,16 +64,16 @@ COPYBACK_LOCK_TIMEOUT_ENV = "NHMS_OBJECT_STORE_COPYBACK_LOCK_TIMEOUT_SECONDS"
 #
 # Retention (#2238) is the first acquirer on this lock that is not a writer:
 # it acquires once per tree it removes on the copyback root -- 48-54 per
-# pass on the node-22 config, not once per cycle. That count does not
+# pass on the config of the retired node-22 host (recorded 2026-09-10), not once per cycle. That count does not
 # multiply the ~24 queued acquisitions above, because *within one pass* those
 # acquisitions are strictly sequential (one removal's release precedes the next
 # one's acquire), so one retention pass contributes at most ONE concurrent
 # waiter no matter how many trees it removes. How many waiters retention
 # contributes is therefore the number of concurrent passes, and there are three
 # sources of them:
-#   - the node-22 scheduler pass (`scheduler_runtime._run_retention`), one at a
+#   - the scheduler pass of the compute role (`scheduler_runtime._run_retention`), one at a
 #     time under the scheduler lease;
-#   - each concurrent operator `cleanup` on node-22 (`cli._run_cleanup`), which
+#   - each concurrent operator `cleanup` on the compute control host (`cli._run_cleanup`), which
 #     takes no scheduler lease and no cross-process guard of its own;
 #   - node-27 raw retention (`scripts/node27_raw_retention.py`, canonical and
 #     forcing lanes, #3087),
@@ -307,9 +307,9 @@ def acquire_copyback_batch_lock(
     so a stale file is not a stale lock.
 
     That release guarantee is the *local* kernel's, and the production copyback
-    root is not local: ``/ghdc/data/nwm/object-store`` on node-22 is an NFSv4.2
-    mount of ``ghdc:/home/ghdc`` (measured 2026-09-10). A process death there
-    still releases at exit, but a **host** death does not -- the server holds
+    root is not local: ``/ghdc/data/nwm/object-store`` was an NFSv4.2 mount of ``ghdc:/home/ghdc`` on
+    the retired node-22 host (measured 2026-09-10) and is a mount of the same node-27 export on ``w3``
+    (read 2026-11-27). A process death there still releases at exit, but a **host** death does not -- the server holds
     the lock open until the client's lease expires, so on that root there is a
     third state beyond "held" and "orphaned": correctly owned, no local holder,
     and still locked. The only correct response is to wait it out; unlinking

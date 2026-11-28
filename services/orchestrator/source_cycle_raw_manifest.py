@@ -37,7 +37,7 @@ NFS_RAW_STAGE_PREFIX_ENV = "NHMS_SCHEDULER_NFS_RAW_STAGE_PREFIX"
 NFS_RAW_MANIFEST_MAX_BYTES = 16 * 1024 * 1024
 NFS_RAW_MANIFEST_READY_SOURCE = "node27_nfs_raw_manifest"
 # Fixed deployment topology identity, not an environment-configurable policy.
-# Node-22 production sees node-27's shared object-store through this NFS path.
+# The compute hosts see node-27's shared object-store through this NFS path.
 NODE22_CANONICAL_NFS_RAW_AUTHORITY_ROOT = Path("/ghdc/data/nwm/object-store")
 NODE22_CANONICAL_NFS_RAW_MANIFEST_PREFIX = "s3://nhms"
 
@@ -67,7 +67,7 @@ __all__ = (
 
 
 class NfsRawManifestStagingError(RuntimeError):
-    """Raised when node-22 cannot materialize node-27 NFS raw for compute."""
+    """Raised when the compute role cannot materialize node-27 NFS raw for compute."""
 
 
 # #3236: the environment variables ``nfs_raw_manifest_readiness_from_env`` reads;

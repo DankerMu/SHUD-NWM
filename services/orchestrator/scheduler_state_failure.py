@@ -972,7 +972,7 @@ _FORCING_SIDECAR_FILENAME = "forcing_version_record.json"
 _FORCING_PACKAGE_MANIFEST_FILENAME = "forcing_package.json"
 #: Sized from the records the producer actually writes: a production
 #: ``forcing_version_record.json`` embeds per-station
-#: ``lineage_json.output_files`` and measures 1.6-2.0 MB on node-22 (cycle
+#: ``lineage_json.output_files`` and measured 1.6-2.0 MB on the retired node-22 host (cycle
 #: 2026080100/IFS, largest basin 2,014,038 bytes).  The original 64 KiB cap made
 #: this tier fail ``sidecar_unreadable`` for EVERY production basin (#1203
 #: round-2 V5-C1).  16 MiB matches the existing

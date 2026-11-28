@@ -186,7 +186,7 @@ def _slurm_gateway_check(
     *,
     probe: Callable[[Any], Mapping[str, Any]] | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """Validate the node-22 Slurm gateway before any submission."""
+    """Validate the Slurm gateway of the compute role before any submission."""
 
     checks: dict[str, Any] = {}
     blockers: list[dict[str, Any]] = []

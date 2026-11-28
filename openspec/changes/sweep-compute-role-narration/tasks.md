@@ -156,14 +156,18 @@ Minimal mergeable slice: 6.2 - its followers are its own except one inventory ro
 
 ## 7. Human text in scripts, services, packages, workers
 
-- [ ] 7.1 Services, packages, workers, `apps/` text outside the API contract and outside the frontend,
-  SQL comments (not the `COMMENT ON` text), the schema description, the undated "measured on" comment
-  in `config/calibration_overrides.yaml` (its date is added): messages, help, docstrings, comments.
+- [x] 7.1 Services, packages, workers, `apps/` text outside the API contract and outside the frontend,
+  the schema description: messages, help, docstrings, comments. The SQL comments of the two applied
+  migrations stay (7.3): `tests/test_migrations.py` pins every applied migration file byte for byte
+  (#2634). The "Measured on node-22" sentence of `config/calibration_overrides.yaml` is not a
+  comment: it is the `reason` value of an entry, which the registry publisher copies into the
+  package manifests of that basin, and the entry carries its own `date`. It stays (7.3).
 - [ ] 7.2 Scripts: comments, docstrings, CLI help, messages, the gate's finding texts; the message
   asserted by the two basin-retirement tests follows; no `file.py:NNN` token is added to a Python
   comment. The alert script is group 9's.
-- [ ] 7.3 Not touched, and shown by the counter: forbidden-host sets, evidence keys, the receipt
-  `source` default, the migration comment.
+- [x] 7.3 Not touched, and shown by the counter: forbidden-host sets, evidence keys, the receipt
+  `source` default, the applied migration files (their `COMMENT ON` text and their `--` comments),
+  the `reason` text of the calibration override entry.
 
 Suggested fixture level: compact - strings and comments in code; one message is asserted by tests; no control flow changes.
 Minimal mergeable slice: 7.1 - about 65 lines in packages no script imports text from; 7.2 is independent of it and follows 6.2; 7.3 is a check both PRs carry.

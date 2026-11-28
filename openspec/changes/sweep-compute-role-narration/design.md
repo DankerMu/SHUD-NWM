@@ -126,10 +126,10 @@ scenarios that forbid the command, this change's own among them, match it.
 
 | Class | Where | Rule |
 |---|---|---|
-| persisted or compared value | evidence keys `node22`, `node22_touched`; forbidden-host sets; the receipt `source` default (`appendix-inventory.md` §1, without the alert script's two lines, which §5 changes) | unchanged |
+| persisted or compared value | evidence keys `node22`, `node22_touched`; forbidden-host sets; the receipt `source` default (`appendix-inventory.md` §1, without the alert script's two lines, which §5 changes); the `reason` text of the entry in `config/calibration_overrides.yaml` (copied into package manifests; the entry has its own `date`) | unchanged |
 | a sentence that defines the codename | the instructions' "历史代号" line, the contract's identifier sentence, the topology runbook's opening | stays; the codename is in code font there |
 | a test's own input | the alert test's sender string, `--checked-by node-22-operator`, synthetic repositories | unchanged |
-| `COMMENT ON` text in an applied migration | `db/migrations/000035_*.sql` | unchanged |
+| text in an applied migration: the `COMMENT ON` string and the `--` comments | `db/migrations/000035_*.sql`, `db/migrations/000061_*.sql` | unchanged: `tests/test_migrations.py` pins every applied migration file byte for byte (#2634) |
 | gate vocabulary and the synthetic sentences its tests feed it | `scripts/governance/entropy_audit/topology_*.py`, `tests/test_entropy_audit_*` | unchanged; new vocabulary is added next to it (§2) |
 | statements about the retired host | wherever the sentence is about `210.77.77.22`, port `:55433` or the Python 3.12.7 environment | reworded to "the retired node-22 host" / "原 node-22 主机" where they do not say so yet |
 | dated observations inside a live page | "2026-06-22 现场验证 …" | keep their text, and the tests that pin them stay: they say what was seen on that host on that day. Where the page gives them without a date, the date is added rather than the host renamed |

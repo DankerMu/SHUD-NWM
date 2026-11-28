@@ -284,7 +284,7 @@ def _db_free_path_check(
     # and db_free_runtime_preflight is pass-level (scheduler_runtime.py:650),
     # so the pass aborts with db_free_runtime_preflight_blocked before the lock
     # is taken. Self-healing on the next pass, and evidence is written -- but on
-    # NFS-backed node-22 this is availability traded for containment safety.
+    # the NFS-backed compute hosts this is availability traded for containment safety.
     resolved, resolution_error = _db_free_loop_filtered_realpath(path)
     if resolution_error is not None:
         check.update({"absolute": True, "contained": False})

@@ -1,6 +1,6 @@
 """Per-pass scheduler timing collector.
 
-Every production scheduler pass on node-22 constructs one
+Every production scheduler pass of the compute role constructs one
 :class:`SchedulerPassTiming` instance at ``run_once`` entry.  The collector
 records ``time.monotonic()`` deltas for wall-clock durations and
 ``time.process_time()`` deltas for CPU accounting, exposes three nested

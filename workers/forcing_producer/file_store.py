@@ -394,7 +394,7 @@ class FileForcingRepository:
     ) -> tuple[float, float, float, float, uuid.UUID, datetime | None] | None:
         """Resolve the checksum-bound snapshot projection embedded in file registry rows.
 
-        Node-22 is deliberately DB-free.  A direct-grid registry row therefore
+        The compute role is deliberately DB-free.  A direct-grid registry row therefore
         carries the immutable DB snapshot projection under
         ``resource_profile.canonical_grid_snapshot``.  Multiple source-scoped
         model variants may reference the same projection; byte-equivalent

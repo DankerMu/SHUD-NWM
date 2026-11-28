@@ -1,7 +1,7 @@
 """``list-operator-actions`` (#1186): enumerate manual-action decisions from pass evidence.
 
 The db-free scheduler writes ``manual_retry_required: true`` on five terminal
-decisions but node-22 had no surface that lists them.  This read-only command
+decisions but the compute role had no surface that lists them.  This read-only command
 scans the newest terminal pass evidence files under the evidence root and prints
 one sorted-key JSON line naming every candidate that waits on an operator.
 
@@ -502,7 +502,7 @@ def _orphan_reservations(root: Path, newest_evaluating_started_at: str | None) -
     pass wrote its ``<pass_id>.json`` is history and is dropped before its payload
     is even read.  The name is derived from the RESERVATION FILENAME rather than
     the payload's ``final_evidence_artifact``, because under
-    ``scheduler_db_free_required`` -- which is how node-22 runs -- that field is
+    ``scheduler_db_free_required`` -- which is how the compute role runs -- that field is
     redacted to ``[local-path]`` (``scheduler_evidence.artifact_path_evidence``)
     and would match nothing, making every completed pass's lingering reservation
     an orphan.  The writer names both files from the same ``pass_id``
@@ -658,8 +658,8 @@ _REQUIRED_OPERATOR_FILTER_KEYS = ("basin_ids", "model_ids", "expression")
 _REQUIRED_CYCLE_WINDOW_KEYS = ("lookback_hours",)
 #: The one ``counts`` sub-key this surface reads (#2443).  ``counts`` is written
 #: in the same main-path evidence dict as ``blocked_candidates`` itself
-#: (``scheduler_runtime.py:1346-1350``) and was present on EVERY live node-22
-#: evaluating pass without exception (measured 2026-09-16), each with
+#: (``scheduler_runtime.py:1346-1350``) and was present on EVERY live evaluating pass of the retired node-22 host
+#: without exception (measured 2026-09-16), each with
 #: ``selected_model_count`` 76 -- so requiring it does not turn any live pass
 #: unknown, and the zero test does not turn any live pass undecidable.  The other
 #: counters are candidate/submission tallies, not statements about what the pass
@@ -676,7 +676,7 @@ _REQUIRED_COUNTS_KEYS = ("selected_model_count",)
 #: second declaration elsewhere in the payload -- every other entry is either a
 #: copy of a top-level key already judged, a ``config.dry_run`` derivative, a
 #: throughput/retry parameter, or a binary block-and-rewrite-``status`` contract
-#: switch.  Measured 2026-09-16: every live node-22 pass carries ``[0, 12]``, the
+#: switch.  Measured 2026-09-16: every live pass of the retired node-22 host carried ``[0, 12]``, the
 #: code default element for element, so the coverage test flips no live exit code.
 _REQUIRED_RUNTIME_CONFIG_KEYS = ("allowed_cycle_hours_utc",)
 
@@ -701,7 +701,7 @@ def _scope_reason(payload: Mapping[str, Any]) -> str | None:
 
     Within a mapping whose keys are all present, scope is read from the filter
     VALUES, never from the mapping's size: a normal production pass always writes
-    the four keys at their empty defaults (measured on every live node-22 pass
+    the four keys at their empty defaults (measured on every live pass of the retired node-22 host
     without exception, EF-8, 2026-09-16), so a rule keyed on mapping-emptiness
     would call every production pass narrowed and never reach exit 0.
 

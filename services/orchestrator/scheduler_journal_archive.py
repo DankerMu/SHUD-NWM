@@ -184,8 +184,8 @@ def _archive_commands(
     members: Sequence[dict[str, Any]],
 ) -> list[list[str]]:
     names = [member["path"] for member in members]
-    # node-22 has GNU tar and zstd.  Keeping argv data-only prevents a path from
-    # becoming shell syntax; names were already safe-relative-path validated.
+    # The compute control host has GNU tar and zstd (read on w3 2026-11-27).  Keeping argv data-only prevents
+    # a path from becoming shell syntax; names were already safe-relative-path validated.
     if os.environ.get("NHMS_JOURNAL_RETENTION_TEST_ALLOW_BSD_TAR") == "true":
         # Local macOS fixtures lack GNU tar. Production never sets this test-only
         # escape hatch and therefore requires the fixed GNU tar argv below.

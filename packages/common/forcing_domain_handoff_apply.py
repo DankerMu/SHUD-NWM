@@ -103,7 +103,7 @@ MET_STATION_SELECT_COLUMNS = (
 #: confused for each other -- they are different lengths and different things.
 NARROW_INSERT_COLUMNS = FORCING_NARROW_INSERT_COLUMNS
 
-#: The handoff PAYLOAD's column tuple: the node-22 -> node-27 wire protocol,
+#: The handoff PAYLOAD's column tuple: the wire protocol from the compute role to node-27,
 #: unchanged by 7.3. `basin_version_id` and `source_id` still travel; they are
 #: simply not stored per fact row any more.
 FORCING_STATION_TIMESERIES_COLUMNS = (
@@ -960,7 +960,7 @@ def _replace_forcing_station_timeseries(
             (forcing_version_key, valid_time_min, valid_time_max),
         )
     # The handoff PAYLOAD keeps its ten-column shape
-    # (FORCING_STATION_TIMESERIES_COLUMNS, the node-22 -> node-27 wire protocol);
+    # (FORCING_STATION_TIMESERIES_COLUMNS, the wire protocol from the compute role to node-27);
     # only the INSERT narrows. `basin_version_id` and `source_id` are dropped
     # here on purpose: after 000061 they are derived by joining
     # `met.met_station` and `met.forcing_version`, and the narrow fact row
@@ -1081,8 +1081,8 @@ def _verify_apply_row_counts(cursor: Any, prepared: Mapping[str, Any]) -> dict[s
         # predicate on `forcing_version_key`, which leads the narrow primary key.
         #
         # The row_counts KEY stays `met.forcing_station_timeseries`: it is
-        # compared against the payload's `expected_row_counts`, which the
-        # node-22 side writes and which names the logical table.
+        # compared against the payload's `expected_row_counts`, which
+        # the compute role writes and which names the logical table.
         "met.forcing_station_timeseries": _select_count(
             cursor,
             "SELECT count(*) AS rows FROM met.forcing_station_timeseries fst "

@@ -112,7 +112,7 @@ CENSUS_JOB_ID_SCOPE_HELP = (
     "A production-sized tree can legitimately "
     "exceed the default replay record budget "
     "(file_journal_record_limit_exceeded: pipeline_job_records, exit 1); "
-    "--max-records raises it -- node-22 needed 5000000 on 2026-09-02."
+    "--max-records raises it -- the retired node-22 host needed 5000000 on 2026-09-02."
 )
 
 #: The row-bearing surfaces a divergent id's ``surfaces`` list may name.
@@ -160,7 +160,7 @@ MAX_RECORDS_HELP = (
     "every journal segment, whatever the record type. The census replays with "
     "include_direct=False, so direct files charge nothing. A trip fails loud "
     "with 'file_journal_record_limit_exceeded: pipeline_job_records' and exit 1; "
-    "node-22's live tree needed 5000000 on 2026-09-02. Raising the budget is the "
+    "the live tree of the retired node-22 host needed 5000000 on 2026-09-02. Raising the budget is the "
     "documented remedy, never a skip."
 )
 
@@ -596,7 +596,7 @@ def _require_output_outside_root(output: str, verified_root: Path) -> Path:
     The containment verdict here (``resolved == root_real or root_real in
     resolved.parents``) and the write to that same target in
     :func:`_census_command_result` are separated by ``census_job_id_scope``,
-    which on node-22 takes minutes; the endorsement therefore carries the
+    which took minutes on the retired node-22 host (recorded 2026-09-17); the endorsement therefore carries the
     premise "single operator CLI, no concurrent writer" (ADR 0009 已知限制 3).
     A concurrent writer entering this path invalidates clause 2 here, and the
     site would have to move to clause 1 or re-check -- which is why no re-check
@@ -650,7 +650,7 @@ def _census_command_result(
     ``emit`` publishes the receipt to stdout and is called BEFORE the optional
     ``--output`` write, so a receipt path that turns out to be unwritable costs
     the file and not the census: an unguarded write here would leak an
-    ``OSError`` traceback and throw away a run that on node-22 takes minutes.
+    ``OSError`` traceback and throw away a run that took minutes on the retired node-22 host.
     The in-root refusal is unaffected -- it raises before the census runs, so
     nothing has been emitted when it fires.
     """

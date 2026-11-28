@@ -1,6 +1,6 @@
 """Source-owned pipeline job provenance publication and node-27 projection.
 
-Publisher (node-22) reads the DB-free journal without write locks or mkdir,
+Publisher (the compute role) reads the DB-free journal without write locks or mkdir,
 cross-checks the selected run's scientific manifest, and writes a closed
 sidecar at ``runs/<run_id>/input/pipeline_jobs.json`` plus any verified
 canonical published logs. Importer (node-27) projects that sidecar into

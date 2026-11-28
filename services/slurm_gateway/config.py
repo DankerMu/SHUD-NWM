@@ -44,7 +44,7 @@ class SlurmGatewaySettings(BaseSettings):
     slurm_bin_path: str = ""
     # Per-deployment Slurm partition override (env SLURM_GATEWAY_PARTITION_OVERRIDE).
     # Canonical resource_profiles.yaml defaults to "compute"; clusters whose real
-    # partition differs (e.g. node-22 "CPU") set this so submitted jobs target a
+    # partition differs (e.g. "CPU" on the compute hosts) set this so submitted jobs target a
     # valid partition without editing the shared profile config. Empty = no override.
     partition_override: str = ""
     # Per-deployment node exclusion override (env SLURM_GATEWAY_EXCLUDE_NODES).

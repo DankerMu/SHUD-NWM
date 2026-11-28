@@ -12,9 +12,9 @@ from typing import Any, TypeVar
 # ---------------------------------------------------------------------------
 # #1734 D11: always-on per-entrypoint journal read attribution.
 #
-# The 2026-08-23 node-22 receipt left three candidate mechanisms (A full-tree
+# The 2026-08-23 receipt from the retired node-22 host left three candidate mechanisms (A full-tree
 # replay, B flat-directory re-read, C absent memo) and traced none of them.
-# node-22 pulls from GitHub, so a monkeypatched probe is not an option: the
+# The compute hosts run a checkout of this repository, so a monkeypatched probe is not an option: the
 # counter has to ship in the repo and be on by default. It is a dict increment
 # per read — no new IO, and its own dedicated lock, which is increment-only and
 # never held while acquiring anything else, so the journal's single lock order

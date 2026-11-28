@@ -123,7 +123,7 @@ _BREAKER_RELEASED_SELECTION_REASON = "journal_predecessor_identity_quarantine_br
 #: projects.  The dispatch catch-all (``scheduler_execution.py:738-754``) writes
 #: the crash site ONLY into the artifact -- that module imports no logging and
 #: never prints -- while the fallback rebuilds the payload without
-#: ``model_run_evidence`` at all, so four node-22 incidents landed as
+#: ``model_run_evidence`` at all, so four incidents on the retired node-22 host landed as
 #: ``resource_limit_blocked`` artifacts with no recoverable cause.  Same cap as
 #: the source-cycle projection: a row is a few identity scalars plus the
 #: producer-bounded tail (``ERROR_TRACEBACK_TAIL_MAX_CHARS = 2000``), so 64 rows
