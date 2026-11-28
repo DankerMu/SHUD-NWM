@@ -246,7 +246,7 @@ def test_failed_unit_hands_exactly_one_message_to_the_transport(lane: Path) -> N
     assert header_lines[:3] == [
         f"To: {RECIPIENT}",
         f"From: {SENDER}",
-        f"Subject: [NHMS node-22] unit failed: {UNIT}",
+        f"Subject: [NHMS compute] unit failed: {UNIT}",
     ]
     assert "MIME-Version: 1.0" in header_lines
     assert 'Content-Type: text/plain; charset="utf-8"' in header_lines
@@ -282,14 +282,14 @@ def test_empty_journal_falls_back_to_a_named_placeholder(tmp_path: Path) -> None
     assert f"(no journal context available for {UNIT})" in message.splitlines()
 
 
-def test_hostname_failure_falls_back_to_node22(lane: Path) -> None:
+def test_hostname_failure_falls_back_to_compute(lane: Path) -> None:
     _write_executable(lane / "hostname", "exit 1\n")
 
     result = _run_handler(_env(lane), UNIT)
 
     assert result.returncode == 0, result.stderr
     (message,) = _sendmail_messages(lane)
-    assert f"systemd unit {UNIT} entered the failed state on node-22 at " in message
+    assert f"systemd unit {UNIT} entered the failed state on compute at " in message
 
 
 # --- scenario: unconfigured recipient does not add a second failure -----------
