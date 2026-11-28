@@ -174,7 +174,7 @@ Minimal mergeable slice: 7.1 - about 65 lines in packages no script imports text
 
 ## 8. API and UI text
 
-- [ ] 8.1 The retry message and both suggested actions of the control-plane refusal (the test that
+- [x] 8.1 The retry message and both suggested actions of the control-plane refusal (the test that
   asserts one of them follows); the two
   OpenAPI description chains (patching code, `openapi/nhms.v1.yaml`, generated types); drift test and
   `check:api-types`. `ops-monitoring-api`, all of it: the sentence of the retry requirement in the

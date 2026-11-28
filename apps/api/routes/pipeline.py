@@ -202,7 +202,7 @@ def _retry_lane_retired_error(run_id: str) -> ApiError:
     return ApiError(
         status_code=409,
         code=_CONTROL_PLANE_MANUAL_ACTION_REQUIRED,
-        message="Control-plane retry is a manual node-22 action; this API does not submit retries.",
+        message="Control-plane retry is a manual action on the compute control host; this API does not submit retries.",
         details={
             "run_id": run_id,
             "suggested_action": _manual_action_suggestion("retry"),
@@ -214,11 +214,11 @@ def _retry_lane_retired_error(run_id: str) -> ApiError:
 def _manual_action_suggestion(control_action: str) -> str:
     if control_action == "retry":
         return (
-            "Ask a node 22 operator to record a manual repair for this run with "
+            "Ask an operator of the compute role to record a manual repair for this run with "
             "scripts/node22_manual_retry_failed_runs.py (FileJournalRetryService.record_manual_repair); "
             "the scheduler mints the retry."
         )
-    return "Ask a node 22 operator to handle this control-plane action from the compute_control runbook."
+    return "Ask an operator of the compute role to handle this control-plane action from the compute_control runbook."
 
 
 @router.get(
