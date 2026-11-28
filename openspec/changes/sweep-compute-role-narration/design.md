@@ -13,7 +13,8 @@
 
 **Non-Goals**
 
-- Renaming identifiers, changing persisted values, rewriting history (lists in §3).
+- Renaming identifiers, changing persisted values, rewriting history (lists in §3; the one renamed
+  test is in §5).
 - Changing what any code does, except the gate's vocabulary (§2) and the text of the alert mail (§5).
 - Retiring the forcing copyback backfill lane (CLI, spec and runbook).
 - Correcting facts in the swept documents that have nothing to do with where compute runs (found
@@ -83,7 +84,8 @@ and files every line that matches the codename (`node22`, `node-22`, `node 22`, 
 the strongest class of its occurrences:
 
 - `name`: the codename is part of a longer token (file, script, unit, module, function, env key,
-  schema id, capability name, CLI flag, marker, check id, a path). Unchanged by the sweep.
+  schema id, capability name, CLI flag, marker, check id, a path). Unchanged by the sweep, with the
+  one exception of §5 (a renamed test).
 - `quoted`: the codename alone, in code font. A mention of the name; stays.
 - `bare`: the codename alone in running text, or in a hyphenated prose compound
   ("node-22-local"). This is what the sweep reads line by line.
@@ -245,7 +247,7 @@ live or is read by a spec).
 - The alert test's sender string is the test's own input and stays.
 - The test of the `HOST` fallback carried the old value in its name
   (`test_hostname_failure_falls_back_to_node22`). It is renamed with the value: the name would
-  otherwise state a fallback the script no longer has, and nothing refers to a test by name. This is
+  otherwise state a fallback the script no longer has, and nothing refers to this test by name. This is
   the one `name` token the sweep moves without deleting a file (§3).
 - The two units under `infra/systemd/node22/` are pinned byte-exactly to the read-only receipt of
   2026-10-16 by `tests/test_node22_unit_tracking.py`, and `node22-unit-tracking` says which receipt
