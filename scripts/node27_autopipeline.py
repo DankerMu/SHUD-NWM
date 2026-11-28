@@ -451,7 +451,7 @@ def _database_preflight(database_url: str | None, env: dict[str, str]) -> tuple[
             _preflight_blocker(
                 DATABASE_URL_NODE22_HISTORICAL_ENDPOINT,
                 "DATABASE_URL",
-                "DATABASE_URL must target the node-27 ingest writer, not node-22 historical PostgreSQL.",
+                "DATABASE_URL must target the node-27 ingest writer, not the retired node-22 host's PostgreSQL.",
             )
         )
     if not _database_url_points_to_allowed_node27(host=host, port=port, database=database, env=env):
@@ -2632,7 +2632,7 @@ def main(argv: list[str] | None = None) -> int:
             _preflight_blocker(
                 NODE22_DSN_ARGV_FORBIDDEN,
                 "N22_DSN",
-                "Legacy node-22 DB DSNs are forbidden; use object-store forcing-domain handoff.",
+                "Legacy DB DSNs of the retired node-22 host are forbidden; use object-store forcing-domain handoff.",
             )
         )
         _emit_json_summary(
@@ -2809,7 +2809,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # ---- phase 1: seed any unseeded basin -------------------------------
     # Seed candidates come from BASINS_ROOT first so node-27 display metadata is
-    # ready for every publishable basin before the first node-22 run lands. If a
+    # ready for every publishable basin before the first run of the compute role lands. If a
     # run manifest already exists, it overrides the inventory-derived package
     # identity for that basin -- except as the SEED target when the run model is
     # a direct-grid variant (see `_direct_grid_baseline_model_id`).

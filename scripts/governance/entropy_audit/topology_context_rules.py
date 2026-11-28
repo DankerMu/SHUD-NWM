@@ -1,4 +1,4 @@
-"""Context-window allowance rules of the node-22 topology family.
+"""Context-window allowance rules of the topology family of the compute role.
 
 Split out of ``scripts/governance/audit_repo_entropy.py`` by #1842. Each rule
 reads the surrounding context of a candidate drift line and decides whether it
@@ -10,7 +10,7 @@ pre-cutover historical evidence and archived/stopped state claims.
 w2). The database-writer rules here receive lines whose host names were already
 rewritten to the codename, so their codename patterns apply to both; the
 retired-host local-PostgreSQL rules read the original lines and so stay about
-node-22's own PostgreSQL."""
+the retired node-22 host's own PostgreSQL."""
 
 from __future__ import annotations
 

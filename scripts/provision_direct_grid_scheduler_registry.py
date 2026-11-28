@@ -334,7 +334,7 @@ def _snapshot_projection(snapshot: CanonicalGridSnapshot) -> dict[str, Any]:
 
 
 def _make_package_readable(root: Path) -> None:
-    """Make non-secret model assets readable by the node-22 NFS consumer."""
+    """Make non-secret model assets readable by the compute role, which reads them over NFS."""
 
     for path in root.rglob("*"):
         path.chmod(0o755 if path.is_dir() else 0o644)

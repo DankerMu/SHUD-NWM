@@ -12,7 +12,7 @@ except on a journal root the #1955 authority seam refuses: that exits 2 with a
 single ``FILE_JOURNAL_INVALID_ROOT: <message>`` line on stderr and no receipt,
 before any directory is read.
 
-Usage (node-22, exact active interpreter — never bare uv before maintenance):
+Usage (the compute control host, exact active interpreter — never bare uv before maintenance):
     /scratch/frd_muziyao/NWM/.venv/bin/python scripts/ops/node22_repair_placeholder_hydro_uris.py \
         --journal-root /scratch/frd_muziyao/nhms-prod/workspace/scheduler/journal \
         --object-store-root /ghdc/data/nwm/object-store \

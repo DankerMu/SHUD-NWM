@@ -16,7 +16,7 @@ precipitation for a cycle whose mirror is gone.
 
 Each canonical and forcing cycle is removed while holding the object-store
 copyback batch mutex (`packages.common.copyback_guard`), because on node-27 the
-object-store root IS the shared copyback root that node-22 writers promote
+object-store root IS the shared copyback root that writers of the compute role promote
 `canonical/` and `forcing/` trees into. The raw and PNG-cache lanes are not
 locked: no mutex writer promotes into them.
 
@@ -98,7 +98,7 @@ DEFAULT_RETENTION_DAYS = 14
 # Anchor disclosure (issue #1407 / design D4). This process keeps the display
 # watermark as its cutoff anchor instead of the pipeline frontier used by the
 # out-of-pass cleanup CLI: the scheduler pass receipts and journal live on
-# node-22 private /scratch, which node-27 cannot reach, and publishing the
+# the /scratch of the compute hosts, which node-27 cannot reach, and publishing the
 # frontier across nodes needs a shared-store write surface that is out of scope
 # here. The residual risk is disclosed in every summary rather than left
 # implicit.
@@ -174,7 +174,7 @@ def _dir_size(path: Path) -> tuple[int, OSError | None]:
     `collect_targets` and kill the whole tick before any deletion and before
     the summary write. Same contract as `_iter_dirs`: a returned error means
     the caller must not plan this target -- a tree that went stale half-walked
-    may be the one node-22 is rewriting. The per-file `stat` guard stays: a
+    may be the one the compute role is rewriting. The per-file `stat` guard stays: a
     single file vanishing mid-walk is sized as 0, not a reason to retire the
     target.
     """

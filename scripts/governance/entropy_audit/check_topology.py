@@ -7,7 +7,7 @@ document tests, the declared-current-authority front-matter parser, and the
 context-window extractors (``_topology_line_context`` and the three fixed-width
 wrappers over it).
 
-#3358 and #3403: the node-22 database-writer and local-PostgreSQL checks cover the
+#3358 and #3403: the database-writer and local-PostgreSQL checks cover the
 compute role by codename, by host name and by role term. The database-writer
 family reads the lines with host names and role terms rewritten to the codename;
 the local-PostgreSQL check adds a compute-host leg. The retired-host legs and the
@@ -135,14 +135,14 @@ def _check_production_topology_drift(root: Path) -> list[FindingSpec]:
                         ),
                         description=(
                             "An active topology surface mentions a local PostgreSQL of the compute role "
-                            "(node-22 / w3 / w2), port :55433, or a node-22 rollback mirror without the required "
-                            "boundary wording."
+                            "(node-22 / w3 / w2), port :55433, or a rollback mirror of the retired node-22 host "
+                            "without the required boundary wording."
                         ),
                         recommendation=(
                             "State that the compute role (node-22 / w3 / w2) uses no local PostgreSQL: w3 / w2 "
-                            "run none, and node-22 local PostgreSQL is historical and do-not-connect; keep any "
-                            "rollback mirror explicit-DSN, archived-rollback-flagged, compatibility-only, and "
-                            "sunset-bound."
+                            "run none, and the local PostgreSQL of the retired node-22 host is historical and "
+                            "do-not-connect; keep any rollback mirror explicit-DSN, archived-rollback-flagged, "
+                            "compatibility-only, and sunset-bound."
                         ),
                     )
                 )

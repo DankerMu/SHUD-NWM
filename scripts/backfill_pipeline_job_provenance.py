@@ -78,7 +78,7 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument(
         "--publish-only",
         action="store_true",
-        help="Run the node-22 publisher only; it never connects to node-27 PostgreSQL.",
+        help="Run the publisher of the compute role only; it never connects to node-27 PostgreSQL.",
     )
     mode.add_argument(
         "--import-only",

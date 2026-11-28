@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run one explicit 00/12 production cycle on node-22 with the DB-free scheduler config.
+# Run one explicit 00/12 production cycle on the compute control host with the DB-free scheduler config.
 
 set -euo pipefail
 
@@ -32,7 +32,7 @@ Notes:
     direct-grid forcing package from a verified ready raw manifest. Without the
     flag, missing forcing remains fail-closed.
   - The DB-free runtime preflight binds both configured raw-authority roots to
-    the fixed node-22 shared-NFS topology before lock acquisition or repair work.
+    the fixed shared-NFS topology of the compute hosts before lock acquisition or repair work.
   - Loads the same environment as nhms-compute-scheduler.service: the scheduler
     env, the Slurm gateway secret env (NHMS_NODE22_GATEWAY_SECRET_ENV) and
     NHMS_PYTHON_VENV_BIN. --submit refuses to run without a readable secret.

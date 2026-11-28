@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# node-22 env backup sweep (#2918, OpenSpec node22-config-hygiene design D5).
+# Env backup sweep for the production checkout of the compute hosts (#2918, OpenSpec node22-config-hygiene design D5).
 #
 # Backup copies of env files (`*.bak*`, `*.backup-*`, `*.pre-*`) never live
 # under `infra/env/`; their home is `~/NWM-presync-backup-<UTC date>/infra-env/`

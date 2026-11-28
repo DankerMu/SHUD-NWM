@@ -108,8 +108,8 @@ NEW_BASIN_NOTICE = (
 REMOVED_BASIN_NOTICE = (
     "Removed basin: once this succession has published, the scheduler no longer plans runs for the removed "
     "models. Runs that were already submitted may still finish and be ingested on node-27. This succession ends "
-    "on node-22 with the manifests: the next step is the node-27 retirement tool, which takes the same "
-    "--succession-id {succession_id} and refuses to run before this succession has finished."
+    "on the compute control host with the manifests: the next step is the node-27 retirement tool, which takes "
+    "the same --succession-id {succession_id} and refuses to run before this succession has finished."
 )
 _NOTHING_WRITTEN = "Nothing was written."
 # What ``step-finish.json`` and the report of an apply say was done to the timer.

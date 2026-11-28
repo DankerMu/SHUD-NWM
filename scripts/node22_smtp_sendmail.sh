@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
-# node-22 SMTPS sendmail transport for the unit-failure alert lane (#3127,
+# SMTPS sendmail transport on the compute control host for the unit-failure alert lane (#3127,
 # OpenSpec node22-alert-smtp-wrapper). Point NHMS_FRONTIER_SENDMAIL in
 # infra/env/node22-unit-failure-alert.env at this file.
 #
 # Runs the node-27 authenticated-SMTPS shim (scripts/node27_frontier_smtp_sendmail.py,
-# #1368) under the exact node-22 interpreter: that shim's own shebang resolves
-# an interpreter through PATH, which node-22 must not use. Arguments, stdin,
+# #1368) under the exact interpreter of the active checkout: that shim's own shebang resolves
+# an interpreter through PATH, which the compute hosts must not use. Arguments, stdin,
 # environment and exit status pass through unchanged via exec; this wrapper
 # reads no credential and prints nothing on success.
 #
 # Fail closed: a missing or non-executable interpreter, or a missing shim,
 # prints one `node22-smtp-sendmail: ...` line to stderr and exits 64 (the
 # shim's own usage/config code). There is no fallback interpreter and no
-# override knob; the paths below are the node-22 active checkout.
+# override knob; the paths below are the active checkout of the compute hosts.
 
 set -u
 

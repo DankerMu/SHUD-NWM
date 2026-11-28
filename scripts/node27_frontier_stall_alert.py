@@ -7,7 +7,7 @@ in the systemd surface noticed that production had silently stopped producing
 for ~11 h. Unit-level timeouts cannot cover that class (a full pass legitimately
 runs 2 h 16 m - 3 h 01 m, so no safe unit deadline exists), therefore this lane
 watches the *outcome* instead: the final landed artifact in
-``hydro.hydro_run``. Any node-22 failure class collapses into the same
+``hydro.hydro_run``. Any failure class of the compute role collapses into the same
 observable — the frontier stops advancing.
 
 Design pins (``openspec/changes/node27-frontier-stall-alert/design.md``):

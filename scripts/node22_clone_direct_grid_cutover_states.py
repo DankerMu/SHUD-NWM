@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Clone node-22 warm states for a declared direct-grid state carry-over.
+"""Clone warm states of the compute role for a declared direct-grid state carry-over.
 
 Two modes, selected by ``--transfer-mode``:
 
@@ -31,10 +31,10 @@ Two modes, selected by ``--transfer-mode``:
     ``solver_config``), with ``cfg.ic`` / ``cfg.para`` bytes read PER SIDE so a
     new ``cfg.ic`` in ``M1'`` refuses instead of false-passing.  The clone row
     is written into BOTH state indexes -- the NFS canonical index and the
-    node-22-local scratch mirror -- in one invocation.
+    ``/scratch`` mirror of the compute hosts -- in one invocation.
 
-Execution host: node-22.  It is the only host that can reach both the shared
-NFS canonical index and the node-22-local ``/scratch`` mirror, and it is
+Execution host: the compute control host.  It reaches both the shared
+NFS canonical index and the ``/scratch`` mirror of the compute hosts, and it is
 DB-free, so the recalibration mode is file-index-only and takes no DB handle.
 """
 
@@ -920,7 +920,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--mirror-state-index",
-        help="recalibration only: the node-22-local scratch state-index mirror",
+        help="recalibration only: the scratch state-index mirror of the compute hosts",
     )
     parser.add_argument("--receipt")
     parser.add_argument("--apply", action="store_true")

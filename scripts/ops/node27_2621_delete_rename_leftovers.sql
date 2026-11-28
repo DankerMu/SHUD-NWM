@@ -9,7 +9,7 @@
 --
 -- Run ONLY through scripts/ops/node27_oneshot_sql.py, with a FRESH --copy-dir
 -- per run (the runner refuses this file without one and never overwrites a
--- copy file) and --set nhms.manifest_basins=<the basin_id set of node-22
+-- copy file) and --set nhms.manifest_basins=<the basin_id set of the compute role's
 -- manifest-last.json, comma separated>. The runner refuses every other --set
 -- key (@settings above). Operator steps (openspec change
 -- basin-catalog-semantics-and-rename-leftovers, tasks 3.2-3.3):

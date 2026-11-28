@@ -56,7 +56,7 @@ from packages.common.safe_fs import SafeFilesystemError, ensure_directory_no_fol
 from packages.common.source_identity import normalize_source_id
 
 ROOT = Path(__file__).resolve().parents[1]
-# Canonical active node-22 checkout. The diagnostic chain may only run from a
+# Canonical active checkout of the compute hosts. The diagnostic chain may only run from a
 # detached diagnostic worktree with its own virtualenv; this root must fail closed.
 CANONICAL_ACTIVE_ROOT = Path("/scratch/frd_muziyao/NWM").resolve()
 DETACHED_CHECKOUT_ENV_NAME = "QHH_DIAGNOSTIC_CHECKOUT"
@@ -136,7 +136,7 @@ class CandidateCycle:
 def _require_detached_diagnostic_checkout(root: Path = ROOT) -> None:
     """Fail closed unless the chain runs from a detached diagnostic worktree.
 
-    The canonical active node-22 checkout must never execute the QHH diagnostic
+    The canonical active checkout of the compute hosts must never execute the QHH diagnostic
     chain (its shared ``.venv`` is owned by the online services). Only a detached
     diagnostic worktree with its own virtualenv may run it.
     """

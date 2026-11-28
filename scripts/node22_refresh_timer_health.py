@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only health probe for the node-22 DB-free file-provider refresh lane.
+"""Read-only health probe for the DB-free file-provider refresh lane of the compute role.
 
 Issue #2146 / #2041.  The refresh timer can sit at ``UnitFileState=enabled``
 with ``ActiveState=inactive`` and no next elapse: it looks green, never fires,
@@ -256,7 +256,7 @@ def parse_systemd_timestamp(raw: str) -> datetime | None:
     """Parse a ``systemctl show`` timestamp such as ``Fri 2026-08-28 00:11:18 CST``.
 
     ``%Z`` in ``strptime`` only accepts the running machine's own zone
-    abbreviations, so it parses on node-22 and fails anywhere else.  Instead the
+    abbreviations, so it parses on a host in that zone and fails anywhere else.  Instead the
     zone token is handled explicitly: ``UTC``/``GMT``/``Z`` are read as UTC and
     anything else is read as the local zone, which is what systemd emitted.
 
@@ -720,7 +720,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="node22_refresh_timer_health.py",
         description=(
-            "Read-only health probe for the node-22 file-provider refresh timer. "
+            "Read-only health probe for the file-provider refresh timer on the compute control host. "
             "It observes and reports; it never modifies a systemd unit."
         ),
     )

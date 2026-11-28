@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install / arm / roll back the node-22 refresh-timer health probe units.
+# Install / arm / roll back the refresh-timer health probe units on the compute control host.
 #
 # The probe is a watchdog, so the one thing this installer must never do is
 # disturb what it watches.  Every action captures the state of four protected

@@ -6,8 +6,8 @@ directory found under ``--source-root``, plus each source's
 ``canonical/<storage_source>/grid/<grid_id>/``, into ``--copyback-root`` under
 the identical keyspace, and prints a JSON summary to stdout.
 
-Standard library only -- deliberately. node-22's checkout is frozen ahead of a
-maintenance window, so this must run as::
+Standard library only -- deliberately. The production checkout was frozen ahead of a maintenance
+window when this was written (2026-09-04, on the retired node-22 host), so this must run as::
 
     cd /scratch/frd_muziyao/NWM && \\
         /scratch/frd_muziyao/NWM/.venv/bin/python -m scripts.canonical_precip_copyback_backfill \\
@@ -35,7 +35,7 @@ record (tasks.md 4.1-4.3 invariant matrix), not a duplicated implementation.
 
 Unlike its sibling ``services/tile_publisher/forcing_copyback_backfill.py`` this
 script *writes by default*; only ``--dry-run`` suppresses writes, because the
-node-22 operation invokes it without any flag.
+operation of the compute role invokes it without any flag.
 
 Exit codes: 0 = completed with no failure, 1 = completed but something failed
 (the summary is still printed), 2 = unusable arguments or roots -- which
@@ -68,7 +68,7 @@ Path safety, stated as exactly what is enforced and nothing more:
 
 Every directory the script creates *below* the mirror root is chmod'ed 0o2775
 explicitly, and every file it promotes there is chmod'ed 0o644 on the temp name
-before the ``os.replace``, because node-22 writes as one account and node-27
+before the ``os.replace``, because the compute role writes as one account and node-27
 reads the same NFS as another and the process umask must not decide that
 (``O_CREAT``'s mode argument is masked by the umask exactly as ``mkdir``'s is).
 0o2775 rather than 0o755 since #2100: node-27's retention account must be able

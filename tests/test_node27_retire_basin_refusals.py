@@ -80,7 +80,7 @@ def _manifest_missing(space: Space) -> None:  # noqa: F811
 
 
 PRECONDITIONS: list[tuple[Callable[[Space], None], str, str]] = [
-    (_no_finish_receipt, HUAI, "has not finished on node-22"),
+    (_no_finish_receipt, HUAI, "has not finished on the compute control host"),
     (_finish_not_completed, HUAI, "has outcome 'failed', not 'completed'"),
     (_another_kind, HUAI, "has kind 'add_basin', not 'remove_basin'"),
     (lambda space: None, "basins_huai_v9", "is not a row of core.basin_version"),  # noqa: F811

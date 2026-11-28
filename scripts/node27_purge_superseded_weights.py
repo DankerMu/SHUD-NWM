@@ -588,8 +588,8 @@ def purge_model(connection: Any, settings: Settings, run_directory: Path, model_
             for source_id, grid_id in pairs:
                 cursor.execute(ADVISORY_LOCK_SQL, (lock_key(source_id, grid_id, model_id),))
             try:
-                # Read under the locks, not before them: node-22 rewrites the manifest, and what protects a
-                # model is what the manifest says once the wait for its scopes is over.
+                # Read under the locks, not before them: the compute role rewrites the manifest, and what
+                # protects a model is what the manifest says once the wait for its scopes is over.
                 manifest = read_manifest(settings.manifest)
             except ValueError as error:
                 raise PurgeFailure(f"Stopped at {model_id}: {error}. Its rows were not touched.") from error
