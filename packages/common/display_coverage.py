@@ -25,7 +25,7 @@ contract (task 6.3) left only the narrow key/enum fact table, whose keys are its
 primary key and cannot be NULL.
 
 Refresh is scoped to one ``run_id`` (or all parsed/finished QHH forecast runs).
-It never touches node-22; it runs against whichever DB ``DATABASE_URL`` points
+It never involves the compute role; it runs against whichever DB ``DATABASE_URL`` points
 at (node-27 local).
 """
 

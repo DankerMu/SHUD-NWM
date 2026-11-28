@@ -286,7 +286,7 @@ def resolve_lineage_cutover(
             # The split is by blocker reason, NOT by status.  A deployment that
             # has never published an index is HEALTHY with no clones, and "no
             # index" and "this pair is not in the index" are the same answer;
-            # failing it would make every pair on node-22's db-free plane warn
+            # failing it would make every pair on the db-free plane of the compute role warn
             # every pass forever and never converge.  Everything else here —
             # unreadable, malformed JSON, not an object, over the size limit,
             # failed validation or freshness — means "there should have been an

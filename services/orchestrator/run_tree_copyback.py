@@ -576,7 +576,7 @@ def _copy_tree_no_symlinks(source: Path, target: Path) -> dict[str, Any]:
         # and leaves `mask::rwx` intact.
         #
         # Do NOT go looking for a live consumer of that grant: there is none
-        # today (`find` reports zero nwm-owned entries under `runs/`; node-22 is
+        # today (`find` reports zero nwm-owned entries under `runs/`; the compute role is
         # the sole writer and node-27 only reads).  The point is that this site
         # is already on the correct side of the incompatibility if one ever
         # appears, not that something depends on it right now.

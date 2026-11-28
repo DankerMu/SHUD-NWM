@@ -1982,7 +1982,7 @@ class PsycopgForecastStore:
         # the deep coverage CTEs on every request. The materialized values are
         # produced by the identical CTE arithmetic (packages/common/
         # display_coverage.py), so the rows are field-for-field identical to the
-        # CTE path. node-22 lacks the table and keeps the CTE path below.
+        # CTE path. A database without migration 000035 lacks the table and keeps the CTE path below.
         #
         # The materialization is a CACHE, not a gate: a candidate run missing its
         # coverage row (just parsed with its per-run refresh still pending, or a
@@ -4454,7 +4454,7 @@ def _hydro_run_response(row: Mapping[str, Any]) -> dict[str, Any]:
 def _run_display_coverage_available(cursor: Any) -> bool:
     """Whether hydro.run_display_coverage (the latest-product fast-path
     materialization) exists. Present on node-27 local (migration 000035 applied);
-    absent on node-22, which therefore keeps the coverage-CTE path unchanged."""
+    absent from a database without that migration, which therefore keeps the coverage-CTE path unchanged."""
     cursor.execute("SELECT to_regclass('hydro.run_display_coverage') AS reg", ())
     return cursor.fetchone()["reg"] is not None
 

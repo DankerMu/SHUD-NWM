@@ -2,7 +2,7 @@
 
 Both routes are DB-free — no `Depends(get_hydro_display_session)` — and read
 exactly two environment variables: `NHMS_PRECIP_MIRROR_ROOT` (the node-27 view of
-the NFS tree node-22 mirrors into) and `NHMS_MVT_FILE_CACHE_DIR`. The display
+the NFS tree the compute role mirrors into) and `NHMS_MVT_FILE_CACHE_DIR`. The display
 profile forbids `NHMS_OBJECT_STORE_COPYBACK_ROOT` outright
 (see runtime_mode's display forbidden-env list), so it is never read here.
 

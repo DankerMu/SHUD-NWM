@@ -2290,7 +2290,7 @@ class FileOrchestrationJournalRepository(
         The constraint that binds is NOT wall time (#1810).  An earlier version
         of this docstring defended a whole-tree replay as "acceptable because
         this is an operator command run by hand on a wedge"; what actually
-        fired on node-22 was the fail-closed aggregate ``_RecordBudget`` the
+        fired on the retired node-22 host was the fail-closed aggregate ``_RecordBudget`` the
         replay opens, because ``journal/`` is append-only history that had
         already crossed ``MAX_FILE_JOURNAL_RECORDS``.  No amount of operator
         patience gets past a budget, and raising it only moves the cliff.  So
@@ -4166,7 +4166,7 @@ class FileOrchestrationJournalRepository(
 
         The flat directory is not partitioned: it holds one file per cohort
         master row and per non-forecast-stage row for ALL retained history
-        (4,303 files / 12.29 MiB on node-22), so reading it whole would dominate
+        (4,303 files / 12.29 MiB on the retired node-22 host, recorded 2026-08-22), so reading it whole would dominate
         the cycle slice and keep the growth law intact — the very thing this
         change repairs (design D2a).
 
@@ -4260,7 +4260,7 @@ class FileOrchestrationJournalRepository(
         ``_flat_direct_pipeline_job_paths_for_cycle`` — the SAME definition the
         other flat reader uses (design D9). Before that, this reader decoded
         every file in the unpartitioned flat directory (13.18 MB across 4,375
-        files on node-22) on every cache miss, which is the parity defect D9
+        files on the retired node-22 host, recorded 2026-08-23) on every cache miss, which is the parity defect D9
         names. Only the flat leg changes: the by-cycle partition is already
         cycle-scoped, and both legs still feed the one merged sort so the yield
         order is unchanged.
@@ -4268,8 +4268,8 @@ class FileOrchestrationJournalRepository(
         The two legs carry DISTINCT lane tags (#1734 round-1 finding 3). One
         tag over the merged list graded partitioned bytes against the flat
         directory's size: measured, by-cycle was 33.5% of the lane in a scratch
-        fixture and would be roughly two thirds at node-22's tree sizes (26 MB
-        by-cycle / 13 MB flat). The tag is set per path around the eager read
+        fixture and would be roughly two thirds at the tree sizes of the retired node-22 host (26 MB
+        by-cycle / 13 MB flat, recorded 2026-08-23). The tag is set per path around the eager read
         only — never across the ``yield`` — because a ``ContextVar`` token reset
         from a generator a consumer abandoned can land in a foreign context, and
         an instrument must not be able to fail a read path (design D11).

@@ -14,7 +14,7 @@ SUB-3 (§2.2) adds an operator-argv input-authority resolver
 ``<object-store-root>/models/basins_<basin>_shud/<release>/package/``
 (root defaults to ``/home/ghdc/nwm/object-store`` and is overridable
 via ``--object-store-root``) and refuses dev-workspace paths (node-27
-``/home/ghdc/nwm/Basins/...`` and node-22 ``/volume/nwm/Basins/...``)
+``/home/ghdc/nwm/Basins/...`` and ``/volume/nwm/Basins/...`` on the compute hosts)
 unless ``--allow-dev-workspace`` is set with a non-empty
 ``--dev-workspace-rationale``. Any override is recorded on the
 returned :class:`ResolvedPackagePath.input_authority_evidence`
@@ -150,7 +150,7 @@ DEFAULT_OBJECT_STORE_ROOT = pathlib.Path("/home/ghdc/nwm/object-store")
 
 #: Recognized dev-workspace path prefixes that :func:`resolve_package_path`
 #: REJECTS by default. ``/home/ghdc/nwm/Basins`` is the node-27 dev tree;
-#: ``/volume/nwm/Basins`` is the node-22 dev tree. Only unblocked when the
+#: ``/volume/nwm/Basins`` is the dev tree of the compute hosts. Only unblocked when the
 #: operator opts in via ``--allow-dev-workspace`` with a non-empty rationale.
 _DEV_WORKSPACE_PREFIXES: tuple[pathlib.Path, ...] = (
     pathlib.Path("/home/ghdc/nwm/Basins"),
@@ -1057,7 +1057,7 @@ def _argparse_main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help=(
             "Accept a dev-workspace package path (node-27 "
-            "/home/ghdc/nwm/Basins/... or node-22 /volume/nwm/Basins/...); "
+            "/home/ghdc/nwm/Basins/... or /volume/nwm/Basins/... on the compute hosts); "
             "requires --dev-workspace-rationale."
         ),
     )

@@ -12,7 +12,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-# Read-only display-side env naming the node-27 view of the NFS tree node-22
+# Read-only display-side env naming the node-27 view of the NFS tree the compute role
 # writes under NHMS_OBJECT_STORE_COPYBACK_ROOT. The display API must never read
 # that compute-side variable: `apps/api/runtime_mode.py` forbids its presence
 # for the display_readonly role outright.

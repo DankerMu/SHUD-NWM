@@ -3,9 +3,9 @@
 ``db/migrations/000061_forcing_station_timeseries_narrow_expand.sql`` created the
 narrow key/enum ``met.forcing_station_timeseries``, and both writers
 (``workers/forcing_producer/store.py``, the direct-DB writer -- historically
-node-22's own database until #836/#837 retired it; production node-22 now
+the database of the retired node-22 host until #836/#837 retired it; the compute role now
 connects to no database -- and ``packages/common/forcing_domain_handoff_apply.py``
-across the node-22 -> node-27 handoff) write only that table. This module owns what they must not
+across the handoff from the compute role to node-27) write only that table. This module owns what they must not
 spell twice:
 
 * the lookup that resolves a forcing version's surrogate key — one row,
@@ -38,8 +38,8 @@ WHERE forcing_version_id = %s
 #: The narrow fact table's column list, in the order both writers bind it.
 #: Spelled once because the two writers must not drift: they write the same rows
 #: from the same producer, one through the direct-DB path (historically
-#: node-22's own database, retired by #836/#837) and one across the
-#: node-22 -> node-27 handoff.
+#: the database of the retired node-22 host, retired by #836/#837) and one across the
+#: handoff from the compute role to node-27.
 FORCING_NARROW_INSERT_COLUMNS: tuple[str, ...] = (
     "forcing_version_key",
     "station_key",

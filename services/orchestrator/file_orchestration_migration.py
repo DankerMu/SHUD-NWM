@@ -1803,7 +1803,7 @@ def _skipped_rows_summary(rows: list[dict[str, str]]) -> dict[str, Any]:
 
 def _validate_historical_node22_database_url(database_url: str, *, allow_historical_node22: bool) -> None:
     if not allow_historical_node22:
-        raise ValueError("historical node-22 export requires --allow-historical-node22")
+        raise ValueError("historical export from the retired node-22 host requires --allow-historical-node22")
     parsed = urlparse(database_url)
     if parsed.scheme not in {"postgresql", "postgres"}:
         raise ValueError("historical scheduler-state export requires a PostgreSQL URL")
@@ -1812,7 +1812,7 @@ def _validate_historical_node22_database_url(database_url: str, *, allow_histori
     if parsed.port != HISTORICAL_NODE22_DB_PORT:
         raise ValueError(f"historical scheduler-state export must target port {HISTORICAL_NODE22_DB_PORT}")
     if (parsed.hostname or "") not in HISTORICAL_NODE22_DB_HOSTS:
-        raise ValueError("historical scheduler-state export must target the node-22 historical PostgreSQL host")
+        raise ValueError("historical scheduler-state export must target the PostgreSQL of the retired node-22 host")
 
 
 def _historical_source_label(database_url: str) -> str:

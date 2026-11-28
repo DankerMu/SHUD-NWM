@@ -1,6 +1,6 @@
 """Receipt helpers shared by the steps of a model succession.
 
-Every step of a succession (provision on node-27, publish on node-22) leaves
+Every step of a succession (provision on node-27, publish on the compute control host) leaves
 its receipts under ``<receipt-root>/<succession-id>/``.  The helpers here are
 the part that does not depend on the step: the succession id, the receipt
 directory, exclusive-create writes and the path / commit records.  What a step
@@ -130,9 +130,9 @@ def prepare_receipt_target(path: Path, *, receipt_root: str | Path) -> None:
     if not writable:
         raise SuccessionReceiptError(
             f"Receipt directory {directory} cannot be created or written ({reason}). One-time setup of the "
-            f"receipt root, as frd_muziyao on node-22 (on its mount of the same path): mkdir -p {receipt_root} "
-            f"&& chgrp nwmuser {receipt_root} && chmod 2775 {receipt_root}. This tool never changes "
-            "permissions on the receipt root."
+            f"receipt root, as frd_muziyao on the compute control host (on its mount of the same path): "
+            f"mkdir -p {receipt_root} && chgrp nwmuser {receipt_root} && chmod 2775 {receipt_root}. "
+            "This tool never changes permissions on the receipt root."
         )
 
 
