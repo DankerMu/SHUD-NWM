@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# node-22 generic unit-failure alert handler (#2913, OpenSpec
+# Generic unit-failure alert handler of the compute control host (#2913, OpenSpec
 # node22-config-hygiene design D4). Mirrors scripts/node27_unit_failure_alert_once.sh.
 #
 # Invoked by infra/systemd/nhms-node22-unit-failure-alert@.service as the
-# `OnFailure=` handler of a node-22 user unit:
+# `OnFailure=` handler of a user unit on the compute control host:
 #
 #   OnFailure=nhms-node22-unit-failure-alert@%n.service
 #
@@ -25,7 +25,7 @@
 
 set -euo pipefail
 
-HOST=$(hostname 2>/dev/null || echo node-22)
+HOST=$(hostname 2>/dev/null || echo compute)
 SENDMAIL="${NHMS_FRONTIER_SENDMAIL:-}"
 RECIPIENT="${NHMS_ALERT_EMAIL_TO:-}"
 SENDER="${NHMS_ALERT_EMAIL_FROM:-}"
@@ -94,7 +94,7 @@ rc=0
 printf '%s\n' \
   "To: $RECIPIENT" \
   "From: $SENDER" \
-  "Subject: [NHMS node-22] unit failed: $SAFE_UNIT" \
+  "Subject: [NHMS compute] unit failed: $SAFE_UNIT" \
   "Date: $(date -R)" \
   "MIME-Version: 1.0" \
   'Content-Type: text/plain; charset="utf-8"' \

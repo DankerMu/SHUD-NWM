@@ -13,7 +13,8 @@
 
 **Non-Goals**
 
-- Renaming identifiers, changing persisted values, rewriting history (lists in §3).
+- Renaming identifiers, changing persisted values, rewriting history (lists in §3; the one renamed
+  test is in §5).
 - Changing what any code does, except the gate's vocabulary (§2) and the text of the alert mail (§5).
 - Retiring the forcing copyback backfill lane (CLI, spec and runbook).
 - Correcting facts in the swept documents that have nothing to do with where compute runs (found
@@ -83,7 +84,8 @@ and files every line that matches the codename (`node22`, `node-22`, `node 22`, 
 the strongest class of its occurrences:
 
 - `name`: the codename is part of a longer token (file, script, unit, module, function, env key,
-  schema id, capability name, CLI flag, marker, check id, a path). Unchanged by the sweep.
+  schema id, capability name, CLI flag, marker, check id, a path). Unchanged by the sweep, with the
+  one exception of §5 (a renamed test).
 - `quoted`: the codename alone, in code font. A mention of the name; stays.
 - `bare`: the codename alone in running text, or in a hyphenated prose compound
   ("node-22-local"). This is what the sweep reads line by line.
@@ -116,7 +118,7 @@ bare 22 shorthand: 41 lines
 
 Every PR quotes the table before and after, and `--tokens` (the histogram of `name` tokens) before
 and after. A `name` token count moves only when a file is deleted or a pointer to a deleted file is
-removed; each such move is listed in the PR. The counter measures; it does not decide.
+removed (one exception: the renamed test of §5); each such move is listed in the PR. The counter measures; it does not decide.
 
 The 44 `ssh` lines are 31 commands in seven production-ops pages, 7 banner pointers, 3 banners, 1
 line of the bring-up runbook and 2 lines of spec scenarios. The count does not end at zero: the
@@ -243,6 +245,10 @@ live or is read by a spec).
 | alert mail subject `[NHMS node-22] unit failed: …` and the `HOST` fallback `node-22` | `[NHMS compute] unit failed: …`; fallback `compute` | next sync of the production checkout (the script runs from it; it is not an installed file); a mail filter on the old subject stops matching (the owner chose to change it) |
 
 - The alert test's sender string is the test's own input and stays.
+- The test of the `HOST` fallback carried the old value in its name
+  (`test_hostname_failure_falls_back_to_node22`). It is renamed with the value: the name would
+  otherwise state a fallback the script no longer has, and nothing refers to this test by name. This is
+  the one `name` token the sweep moves without deleting a file (§3).
 - The two units under `infra/systemd/node22/` are pinned byte-exactly to the read-only receipt of
   2026-10-16 by `tests/test_node22_unit_tracking.py`, and `node22-unit-tracking` says which receipt
   records which file. Receipts are history. The redeploy therefore writes a new receipt for the two

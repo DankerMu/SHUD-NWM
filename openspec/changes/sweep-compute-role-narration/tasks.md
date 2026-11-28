@@ -17,7 +17,8 @@ its tasks here in its final push.
   sentence follows it in the same PR with a red run on the old sentence. A test that pins a dated
   observation stays as it is, with its sentence.
 - A `name` token count of the counter moves only for a deleted file or a removed pointer to one, and
-  the PR lists it.
+  the PR lists it. One exception (9.1): a test whose name states a value that `design.md` §5 changes
+  is renamed with the value (`test_hostname_failure_falls_back_to_compute`).
 - Commands that remain in a live runbook are the ones the page had, minus the literal `ssh` to the
   retired host; `uv` discipline lines for the compute hosts stay as they are.
 - A renamed heading takes every inbound link with it, and a deleted file every reference to it. The
@@ -191,7 +192,7 @@ Minimal mergeable slice: 8.1 - backend text and its generated chain, verified by
 
 ## 9. Units and alert lane
 
-- [ ] 9.1 Alert mail subject and host fallback with their tests; the script's comments. No spec text
+- [x] 9.1 Alert mail subject and host fallback with their tests; the script's comments. No spec text
   states the subject, and no installed file changes: the script runs from the production checkout.
 - [ ] 9.2 `Description=` of the 16 manifest units (`design.md` §5) and the unit comments (17 manifest
   files change: the 16, and `nhms-w3-journal-backup.service` by one comment);
