@@ -2,7 +2,7 @@
 
 ## Purpose
 Define the ops monitoring API: pipeline status, stages, jobs, logs, metrics and queue-depth reads, and the retry
-endpoint that fails closed to a manual node-22 action. It has no run cancel route (#3394).
+endpoint that fails closed to a manual action on the compute control host. It has no run cancel route (#3394).
 
 ## Requirements
 
@@ -222,7 +222,7 @@ All monitoring API endpoints MUST return responses in a standard wrapper format.
 
 ### Requirement: POST /api/v1/runs/{run_id}/retry is a fail-closed manual-action endpoint
 
-The API SHALL keep the `POST /api/v1/runs/{run_id}/retry` endpoint but it SHALL NOT submit, enqueue, or record anything. After run-id validation (400 `INVALID_RUN_ID`) and RBAC (401/403), and after the existing `display_readonly` 409, every request SHALL be answered with HTTP 409 and error code `CONTROL_PLANE_MANUAL_ACTION_REQUIRED` in the standard error envelope, regardless of service role (`compute_control`, `dev_monolith`, `display_readonly`). The error details SHALL include the safe `run_id`, a `suggested_action` that names the supported operator path (the node-22 manual-repair marker lane `FileJournalRetryService.record_manual_repair`, driven by `scripts/node22_manual_retry_failed_runs.py`), and `recovery_runbook` equal to `node22-control-plane-manual-recovery`. The endpoint SHALL NOT construct a database session, a retry service, or a Slurm gateway. The published OpenAPI operation `retryRun` SHALL declare no success (2xx) response and no `RetryRunResult` schema, because none can be returned; it keeps its path, security and error responses so existing callers and deny-write probes see the same 401/403/409.
+The API SHALL keep the `POST /api/v1/runs/{run_id}/retry` endpoint but it SHALL NOT submit, enqueue, or record anything. After run-id validation (400 `INVALID_RUN_ID`) and RBAC (401/403), and after the existing `display_readonly` 409, every request SHALL be answered with HTTP 409 and error code `CONTROL_PLANE_MANUAL_ACTION_REQUIRED` in the standard error envelope, regardless of service role (`compute_control`, `dev_monolith`, `display_readonly`). The error details SHALL include the safe `run_id`, a `suggested_action` that names the supported operator path (the manual-repair marker lane of the compute role, `FileJournalRetryService.record_manual_repair`, driven by `scripts/node22_manual_retry_failed_runs.py`), and `recovery_runbook` equal to `node22-control-plane-manual-recovery`. The endpoint SHALL NOT construct a database session, a retry service, or a Slurm gateway. The published OpenAPI operation `retryRun` SHALL declare no success (2xx) response and no `RetryRunResult` schema, because none can be returned; it keeps its path, security and error responses so existing callers and deny-write probes see the same 401/403/409.
 
 #### Scenario: Compute-control retry returns the stable manual-action error
 

@@ -1694,7 +1694,7 @@ paths:
       - runs
       summary: 'Retired manual retry: always 409 CONTROL_PLANE_MANUAL_ACTION_REQUIRED'
       description: Submits, enqueues and records nothing (#3157/#3179). Failed-run recovery
-        is the node-22 manual-repair marker lane (scripts/node22_manual_retry_failed_runs.py,
+        is the manual-repair marker lane of the compute role (scripts/node22_manual_retry_failed_runs.py,
         runbook node22-control-plane-manual-recovery).
       operationId: retryRun
       parameters:
@@ -6611,7 +6611,7 @@ components:
     ControlPlaneManualActionRequired:
       description: Control-plane mutation is unavailable from a display_readonly API
         node; the authorized actor must perform the action from the compute_control
-        runbook on node 22.
+        runbook on the compute control host.
       content:
         application/json:
           schema:

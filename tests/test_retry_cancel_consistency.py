@@ -448,10 +448,10 @@ def _assert_policy_error_response(
     assert audit["decision"] == policy_decision["decision"]
 
 
-# #3157: retry points at the node-22 marker lane.
+# #3157: retry points at the marker lane of the compute role.
 _DISPLAY_SUGGESTED_ACTIONS = {
     "retry": (
-        "Ask a node 22 operator to record a manual repair for this run with "
+        "Ask an operator of the compute role to record a manual repair for this run with "
         "scripts/node22_manual_retry_failed_runs.py (FileJournalRetryService.record_manual_repair); "
         "the scheduler mints the retry."
     ),

@@ -460,7 +460,7 @@ export interface paths {
         put?: never;
         /**
          * Retired manual retry: always 409 CONTROL_PLANE_MANUAL_ACTION_REQUIRED
-         * @description Submits, enqueues and records nothing (#3157/#3179). Failed-run recovery is the node-22 manual-repair marker lane (scripts/node22_manual_retry_failed_runs.py, runbook node22-control-plane-manual-recovery).
+         * @description Submits, enqueues and records nothing (#3157/#3179). Failed-run recovery is the manual-repair marker lane of the compute role (scripts/node22_manual_retry_failed_runs.py, runbook node22-control-plane-manual-recovery).
          */
         post: operations["retryRun"];
         delete?: never;
@@ -2296,7 +2296,7 @@ export interface components {
                 "application/json": components["schemas"]["ErrorResponse"];
             };
         };
-        /** @description Control-plane mutation is unavailable from a display_readonly API node; the authorized actor must perform the action from the compute_control runbook on node 22. */
+        /** @description Control-plane mutation is unavailable from a display_readonly API node; the authorized actor must perform the action from the compute_control runbook on the compute control host. */
         ControlPlaneManualActionRequired: {
             headers: {
                 [name: string]: unknown;

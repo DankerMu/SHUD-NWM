@@ -68,7 +68,7 @@ def _patch_pipeline_openapi(schema: dict) -> None:
     }
     responses["ControlPlaneManualActionRequired"] = _typed_error_response(
         "Control-plane mutation is unavailable from a display_readonly API node; "
-        "the authorized actor must perform the action from the compute_control runbook on node 22.",
+        "the authorized actor must perform the action from the compute_control runbook on the compute control host.",
         ["CONTROL_PLANE_MANUAL_ACTION_REQUIRED"],
     )
     responses["ControlPlaneQueueUnavailable"] = _typed_error_response(
@@ -210,8 +210,8 @@ def _patch_pipeline_openapi(schema: dict) -> None:
         operation_id="retryRun",
         summary="Retired manual retry: always 409 CONTROL_PLANE_MANUAL_ACTION_REQUIRED",
         operation_description=(
-            "Submits, enqueues and records nothing (#3157/#3179). Failed-run recovery is the node-22 "
-            "manual-repair marker lane (scripts/node22_manual_retry_failed_runs.py, runbook "
+            "Submits, enqueues and records nothing (#3157/#3179). Failed-run recovery is the manual-repair "
+            "marker lane of the compute role (scripts/node22_manual_retry_failed_runs.py, runbook "
             "node22-control-plane-manual-recovery)."
         ),
         tags=["runs"],
