@@ -863,7 +863,7 @@ pass-blocking failure。合同缺失或损坏仍须 fail closed。
 file registry 决定全量自动计算；只在定向 rollback/drill 时临时收窄。
 生产并发由 scheduler 的全局 Slurm 数组预算
 `NHMS_SCHEDULER_SLURM_ARRAY_CONCURRENCY_BOUND=64` 和 resource profile 的
-`max_concurrent=64` 共同约束（2026-11-27 起，#3344，测量中，回退值 32，见下文"并发上限"）。计算控制主机上的 scheduler
+`max_concurrent=64` 共同约束（2026-11-27 起，#3344；实测结论与回退值见下文"并发上限"）。计算控制主机上的 scheduler
 只按“数据源 × 时次 × restart-compatible stage × 网关资源 profile 键”构造 cohort、
 提交和轮询，不执行 direct-grid forcing。每个 cohort 的全部流域进入 `produce_forcing_array.sbatch`，Gateway
 生成 `--array=0-(N-1)%min(cohort预算,resource profile上限,N)`；同一 pass 同时运行的
@@ -924,15 +924,22 @@ job type 压过 model：model override 说的是求解器对这个流域要多�
   task）在 32 下是 15 / 1 / 15 / 1，在 64 下是 31 / 1 / 31 / 1；单源 pass（65 / 1）在 32 下是 31 / 1，
   在 64 下是 63 / 1。profile 若留在 32，双源时不起约束（31 小于 32），单源时起约束，所以两个值一起改。
   `--repair-missing-forcing` 随之拒绝高于 64 的总预算（原为高于 32），否则读同一份 env 的 repair 会全被拒。
-  - **测量中**：基线是 2026-11-26 22:00Z 那趟 pass，回退判据见 #3344 的 OpenSpec change
-    `raise-forcing-array-bound`；回退值是 32（改回两个值，repair 上限可以留在 64）。
+  - **实测结论：保留 64。** 2026-11-27 22:00Z 的双源 pass（每个阶段 132 个 task）对比基线
+    2026-11-26 22:00Z（上限 32）：整趟 pass 71 分 01 秒（基线 97 分 46 秒），forcing 阶段 25 分 17 秒
+    （43 分 39 秒），forecast 阶段 40 分 44 秒（70 分 15 秒）。forcing 同时最多 64 个 task，w2 接 75 个、
+    w3 接 57 个，每 task 耗时中位数 w2 576 s、w3 516 s（基线全在 w2，510 s）。400 个任务全部
+    `COMPLETED`。判据是 `raise-forcing-array-bound` 写定的三档，这趟落在"pass 至少缩短 5 分钟就保留"。
+  - **没被这趟 pass 检验的**：窗口内没有其他用户的作业，"别人的作业排队超过 10 分钟就回退"这一档
+    没有触发过，以后出现仍按它回退。`nhms_state_save_qc` 耗时超过 60 秒的 task 从 40 个变成 50 个；
+    它们不决定 pass 的长度（最后一个比最后一个 forecast 晚 15 分 39 秒结束），原因没有查。
+  - **回退值是 32**：改回两个值，repair 上限可以留在 64。
   - **生效与回退都不用重启**：gateway 每次提交都重读 checkout 里的 profile 文件，scheduler 在每趟
     pass 开始时读 env。
-- **收益取决于 task 落在哪台机器**：forcing 每个 task 在 w3 上约 387 s user CPU，在 w2 上约 828 s
-  （w2 的单线程解释型负载慢 2 倍以上，主机层问题，见 issue 3384）；两节点 `Weight` 相同，空闲集群
-  先填 w2。降核后整个 forcing 阶段可能全落在 w2，预计约 57 min（原 70 min），而不是按核数推算的
-  25 min 上下。再往下要靠修掉 w2 的慢、让 w3 先被填满，或提高并发上限让任务溢出到两台机器
-  （最后一项即上一条：2026-11-27 起两个值为 64，测量中）。
+- **task 落在哪台机器**：两节点 `Weight` 相同，空闲集群先填 w2。降核当时（2026-11-25，w2 还开着 SMT）
+  forcing 每个 task 的 user CPU 中位数在 w3 上是 387 s，在 w2 上是 813 s；w2 关 SMT 后（issue 3384，
+  2026-11-26）是 500 s，主机占用低时 402 s。上限 32 时 132 个 task 全落在 w2，forcing 阶段 43 分 39 秒；
+  上限 64 让任务溢出到两台机器，阶段降到 25 分 17 秒（上一条）。主机一满，每个 task 会慢一些：
+  w2 上耗时中位数 576 s 对 510 s。
 - 其它 stage 暂不加条目：`nhms_convert` 每趟只有 4 个作业；`nhms_state_save_qc` 主要在等待
   （CPU 占 8–15%），且在 w2 上慢 3 倍，放出它的核只会把更多 task 挤到 w2。
 - **生效与回滚**：yaml 每次提交都重读，但解析代码在 gateway 进程里。代码首次上线后必须在计算控制主机上重启一次

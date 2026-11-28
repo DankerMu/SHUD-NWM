@@ -95,6 +95,11 @@ w2 上的进程走 NFS，两边会同时拿到同一把锁。实测见
 - **w2 关 SMT**（#3384，2026-11-26）。w2 原来开着超线程（w3 的在固件里关着），解释器类单线程代码因此
   慢 2.2–2.9 倍；关掉后两台基准一致。之前把 forcing 在 w2 上慢一倍读成"IO 局部性"是错的：时间落在
   user CPU 上，不是 IO 等待。
+  - 生产 pass 上的效果（#3384 回执 2）：forcing 每 task 的 user CPU 中位数在 w2 上从 813 s
+    （2026-11-25 22:00Z，SMT 开）降到 500 s（2026-11-26 22:00Z，SMT 关）；两天都落在 w2 的 42 个 task
+    配对比值中位数 0.58。w2 已分配 12–24 核时是 402 s，和 w3 的 387 s 相差 4%；已分配 24–32 核时是
+    505 s。w3 在同样占用下的数字当时没有；2026-11-27 22:00Z（并发上限 64，两台都接 forcing）每 task
+    耗时中位数是 w2 576 s、w3 516 s。forecast 上看不到 w2 的劣势。
   - 运行时：`/sys/devices/system/cpu/smt/control` 为 `off`；开机时由 `/etc/tmpfiles.d/nwm-smt-off.conf`
     写入（仓库副本见第 4 节）。`slurm.conf` 里 w2 的节点定义是 `CPUs=40 ... ThreadsPerCore=1`，两台主机的
     `slurm.conf` 必须一致。
